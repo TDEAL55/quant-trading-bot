@@ -45,6 +45,58 @@ def test_skips_if_already_ran_for_market_day(monkeypatch, tmp_path):
     assert calls["count"] == 0
 
 
+def test_emits_railway_markers_on_success(monkeypatch, tmp_path, capsys):
+    marker = tmp_path / "marker.json"
+
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("RAILWAY_RUN_MARKER_PATH", str(marker))
+    monkeypatch.setenv("ALPACA_API_KEY", "key-secret-value")
+    monkeypatch.setenv("ALPACA_API_SECRET", "secret-secret-value")
+
+    def fake_runner(**kwargs):
+        return {
+            "days_processed": 1,
+            "review_required": False,
+            "stop_reason": "completed",
+            "report_path": "TWO_WEEK_REPORT.md",
+        }
+
+    monkeypatch.setattr(railway_start, "run_two_week_paper_runner", fake_runner)
+
+    result = railway_start.run_railway_job(now=datetime(2026, 7, 8, 9, 0, tzinfo=EASTERN_TZ))
+    output = capsys.readouterr().out.splitlines()
+    expected_summary = Path(railway_start.__file__).resolve().parent / "daily_summaries" / "2026-07-08.md"
+
+    assert result["ran"] is True
+    assert output == [
+        "RAILWAY_JOB_STARTED",
+        "TRADING_MODE value=PAPER",
+        "PAPER_MODE_CONFIRMED",
+        "ACCOUNT_CHECK_STARTED",
+        "MARKET_CHECK_STARTED",
+        "ORDER_DRY_RUN_STARTED",
+        "ORDER_DRY_RUN_RESULT days_processed=1 review_required=False stop_reason=completed",
+        "DAILY_SUMMARY_CREATED path=" + str(expected_summary),
+        "RAILWAY_JOB_COMPLETED market_date=2026-07-08 status=completed",
+    ]
+    assert "key-secret-value" not in "\n".join(output)
+    assert "secret-secret-value" not in "\n".join(output)
+
+
+def test_main_reports_safe_failure(monkeypatch, capsys):
+    def fake_run_railway_job(now=None):
+        raise RuntimeError("ALPACA_API_KEY=secret-value")
+
+    monkeypatch.setattr(railway_start, "run_railway_job", fake_run_railway_job)
+
+    exit_code = railway_start.main()
+    output = capsys.readouterr().out.splitlines()
+
+    assert exit_code == 1
+    assert output[-1] == "RAILWAY_JOB_FAILED error=RuntimeError"
+    assert "secret-value" not in "\n".join(output)
+
+
 def test_runs_one_day_and_writes_marker(monkeypatch, tmp_path):
     marker = tmp_path / "marker.json"
 
