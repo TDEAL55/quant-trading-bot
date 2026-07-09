@@ -1,0 +1,11 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "git-setup-check",
+			"type": "shell",
+			"command": "git init; git branch -M main; git status --short; git check-ignore -v .env; git branch --show-current",
+			"isBackground": false
+		}
+	]
+}

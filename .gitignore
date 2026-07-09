@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+bot.log
+
+tmp_secret_scan.py
+trade_journal.csv
+daily_summaries/
+TWO_WEEK_REPORT.md
