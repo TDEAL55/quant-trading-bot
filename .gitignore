@@ -11,3 +11,5 @@ trade_journal.csv
 daily_summaries/
 TWO_WEEK_REPORT.md
 .overnight_cache/
+.paper_daily_state.json
+.paper_daily_state.json.*

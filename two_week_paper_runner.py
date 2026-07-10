@@ -1,7 +1,9 @@
 import os
 import re
-from datetime import date, datetime, timedelta
+import json
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from alpaca.trading.client import TradingClient
 from dotenv import load_dotenv
@@ -10,6 +12,14 @@ from logger_setup import logger
 from market_data import download_price_data
 from paper_order import create_paper_order_manager
 from strategy import generate_signal
+
+
+MAX_SUBMITTED_ORDERS_PER_DAY = 3
+MAX_SUBMITTED_NOTIONAL_PER_DAY = 30.0
+ORDER_NOTIONAL = 10.0
+ORDER_COOLDOWN_MINUTES = 30
+DEFAULT_CLOUD_DAILY_STATE_PATH = Path("/app/state/paper_daily_state.json")
+DEFAULT_LOCAL_DAILY_STATE_PATH = Path(__file__).resolve().parent / ".paper_daily_state.json"
 
 
 def _safe_float(value):
@@ -101,6 +111,131 @@ def _emit_paper_run_error(stage, exc):
     )
 
 
+def _daily_state_path():
+    configured = os.getenv("PAPER_DAILY_STATE_PATH")
+    if configured:
+        return Path(configured)
+
+    running_in_cloud = any(
+        os.getenv(name)
+        for name in ("RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID")
+    ) or Path("/app").exists()
+
+    return DEFAULT_CLOUD_DAILY_STATE_PATH if running_in_cloud else DEFAULT_LOCAL_DAILY_STATE_PATH
+
+
+def _load_daily_state(path):
+    if not path.exists():
+        return {"dates": {}}, None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return None, f"state file is not valid JSON: {type(exc).__name__}"
+    if not isinstance(payload, dict):
+        return None, "state file root must be an object"
+    if "dates" not in payload or not isinstance(payload.get("dates"), dict):
+        return None, "state file must contain a dates object"
+    return payload, None
+
+
+def _write_daily_state(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    try:
+        temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temp_path.replace(path)
+    except Exception:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except Exception:
+            pass
+        raise
+
+
+def _day_state(payload, market_date):
+    dates = payload.setdefault("dates", {})
+    return dates.setdefault(
+        market_date,
+        {
+            "daily_order_count": 0,
+            "daily_submitted_notional": 0.0,
+            "orders": [],
+        },
+    )
+
+
+def _to_iso_timestamp(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_timestamp(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+def _clock_timestamp(clock):
+    ts = getattr(clock, "timestamp", None)
+    if isinstance(ts, datetime):
+        return ts
+    return datetime.now(timezone.utc)
+
+
+def _is_final_order_status(status):
+    normalized = str(status or "").lower()
+    return normalized in {"filled", "canceled", "cancelled", "expired", "rejected", "done_for_day"}
+
+
+def _has_pending_or_unfilled_order(client, stored_orders):
+    get_orders = getattr(client, "get_orders", None)
+    if callable(get_orders):
+        try:
+            live_orders = get_orders()
+        except Exception:
+            return True
+
+        for order in live_orders or []:
+            if not _is_final_order_status(getattr(order, "status", "")):
+                return True
+        # If live open-order query succeeds and returns none, allow progression.
+        return False
+
+    for order in stored_orders:
+        if not _is_final_order_status(order.get("status")):
+            return True
+    return False
+
+
+def _signal_identifier(signal, day_prices):
+    if day_prices is None or day_prices.empty:
+        return f"signal:{signal}:empty"
+    last_ts = day_prices.index[-1]
+    last_close = float(day_prices["close"].iloc[-1]) if "close" in day_prices.columns else float("nan")
+    return f"signal:{signal}|ts:{last_ts}|close:{last_close:.6f}"
+
+
+def _emit_preflight_logs(client):
+    _emit_runner_log("PAPER_PREFLIGHT_STARTED")
+    account = client.get_account()
+    _emit_runner_log("PAPER_ACCOUNT_AUTHENTICATED")
+    _emit_runner_log("PAPER_ACCOUNT_STATUS", status=getattr(account, "status", "unknown"))
+    clock = client.get_clock()
+    _emit_runner_log(
+        "PAPER_MARKET_STATUS",
+        is_open=bool(getattr(clock, "is_open", False)),
+        next_open=getattr(clock, "next_open", None),
+        next_close=getattr(clock, "next_close", None),
+    )
+    _emit_runner_log("PAPER_PREFLIGHT_COMPLETED")
+    return account, clock
+
+
 def run_two_week_paper_runner(
     start_day=None,
     env_path=None,
@@ -135,6 +270,45 @@ def run_two_week_paper_runner(
         raise RuntimeError("Missing required Alpaca credentials")
 
     client = trading_client_factory(api_key=api_key, secret_key=api_secret, paper=True)
+    preflight_account, preflight_clock = _emit_preflight_logs(client)
+
+    state_path = _daily_state_path()
+    state_payload, state_error = _load_daily_state(state_path)
+    if state_error:
+        review_required = True
+        os.environ["REVIEW_REQUIRED"] = "true"
+        _emit_paper_run_error("state_load", RuntimeError(state_error))
+
+        summaries_dir = Path(output_dir) if output_dir else Path(__file__).resolve().parent / "daily_summaries"
+        final_report = Path(report_path) if report_path else Path(__file__).resolve().parent / "TWO_WEEK_REPORT.md"
+        blocked_day = start_day or date.today()
+        summary = {
+            "date": blocked_day.isoformat(),
+            "account_status": "unavailable",
+            "cash": "N/A",
+            "buying_power": "N/A",
+            "portfolio_value": "N/A",
+            "positions": "N/A",
+            "signal": "N/A",
+            "decision": "stop",
+            "order_submitted_or_skipped": "skipped",
+            "reason": "state corrupted",
+            "daily_pl": "N/A",
+            "total_pl": "N/A",
+            "errors": f"state_error: {state_error}",
+        }
+        _write_daily_summary(summary, summaries_dir)
+        _write_final_report(final_report, [summary], review_required, "state corrupted")
+        return {
+            "review_required": True,
+            "stop_reason": "state corrupted",
+            "days_processed": 1,
+            "report_path": str(final_report),
+        }
+
+    if not state_path.exists():
+        _emit_runner_log("PAPER_DAILY_STATE_MISSING", path=state_path)
+
     summaries_dir = Path(output_dir) if output_dir else Path(__file__).resolve().parent / "daily_summaries"
     final_report = Path(report_path) if report_path else Path(__file__).resolve().parent / "TWO_WEEK_REPORT.md"
 
@@ -154,7 +328,6 @@ def run_two_week_paper_runner(
     stop_reason = "completed"
     previous_portfolio_value = None
     baseline_portfolio_value = None
-    submitted_order_days = set()
 
     for day_offset in range(days):
         current_day = start + timedelta(days=day_offset)
@@ -180,9 +353,13 @@ def run_two_week_paper_runner(
                 raise RuntimeError("LIVE mode detected; stopping immediately")
 
             paper_run_stage = "account_fetch"
-            account = client.get_account()
-            paper_run_stage = "clock_fetch"
-            clock = client.get_clock()
+            if day_offset == 0:
+                account = preflight_account
+                clock = preflight_clock
+            else:
+                account = client.get_account()
+                paper_run_stage = "clock_fetch"
+                clock = client.get_clock()
             paper_run_stage = "positions_fetch"
             positions = client.get_all_positions()
 
@@ -274,13 +451,77 @@ def run_two_week_paper_runner(
                 logger.info("two_week_paper_runner day=%s skipped reason=signal not buy", summary["date"])
                 continue
 
-            if current_day in submitted_order_days:
-                summary["decision"] = "skip"
-                summary["reason"] = "duplicate order detected"
+            market_date = summary["date"]
+            day_state = _day_state(state_payload, market_date)
+            orders = day_state.setdefault("orders", [])
+
+            paper_run_stage = "daily_limits_check"
+            daily_order_count = int(day_state.get("daily_order_count", 0))
+            daily_submitted_notional = float(day_state.get("daily_submitted_notional", 0.0))
+            _emit_runner_log("DAILY_ORDER_COUNT", value=daily_order_count)
+            _emit_runner_log("DAILY_SUBMITTED_NOTIONAL", value=round(daily_submitted_notional, 4))
+
+            if review_required:
+                summary["decision"] = "stop"
+                summary["reason"] = "review required"
+                summary["errors"] = "REVIEW_REQUIRED"
                 summaries.append(summary)
                 _write_daily_summary(summary, summaries_dir)
-                logger.info("two_week_paper_runner day=%s skipped reason=duplicate order detected", summary["date"])
+                stop_reason = "review required"
+                break
+
+            if daily_order_count >= MAX_SUBMITTED_ORDERS_PER_DAY:
+                _emit_runner_log("DAILY_ORDER_LIMIT_REACHED", limit="order_count", value=daily_order_count)
+                summary["decision"] = "skip"
+                summary["reason"] = "daily order count limit reached"
+                summaries.append(summary)
+                _write_daily_summary(summary, summaries_dir)
                 continue
+
+            if daily_submitted_notional + ORDER_NOTIONAL > MAX_SUBMITTED_NOTIONAL_PER_DAY:
+                _emit_runner_log(
+                    "DAILY_ORDER_LIMIT_REACHED",
+                    limit="submitted_notional",
+                    value=round(daily_submitted_notional, 4),
+                )
+                summary["decision"] = "skip"
+                summary["reason"] = "daily submitted notional limit reached"
+                summaries.append(summary)
+                _write_daily_summary(summary, summaries_dir)
+                continue
+
+            signal_id = _signal_identifier(signal, day_prices)
+            if any(item.get("signal_identifier") == signal_id for item in orders):
+                _emit_runner_log("DUPLICATE_SIGNAL_BLOCKED", signal_identifier=signal_id)
+                summary["decision"] = "skip"
+                summary["reason"] = "duplicate signal detected"
+                summaries.append(summary)
+                _write_daily_summary(summary, summaries_dir)
+                continue
+
+            paper_run_stage = "pending_order_check"
+            if _has_pending_or_unfilled_order(client, orders):
+                summary["decision"] = "skip"
+                summary["reason"] = "pending or unfilled order exists"
+                summaries.append(summary)
+                _write_daily_summary(summary, summaries_dir)
+                continue
+
+            submitted_orders = [item for item in orders if item.get("submitted")]
+            if submitted_orders:
+                submitted_orders_sorted = sorted(submitted_orders, key=lambda item: item.get("timestamp", ""))
+                last_ts = _parse_iso_timestamp(submitted_orders_sorted[-1].get("timestamp"))
+                now_ts = _clock_timestamp(clock)
+                if last_ts is not None:
+                    elapsed = now_ts - last_ts
+                    if elapsed.total_seconds() < ORDER_COOLDOWN_MINUTES * 60:
+                        remaining = int(((ORDER_COOLDOWN_MINUTES * 60) - elapsed.total_seconds() + 59) // 60)
+                        _emit_runner_log("ORDER_COOLDOWN_ACTIVE", remaining_minutes=max(0, remaining))
+                        summary["decision"] = "skip"
+                        summary["reason"] = "cooldown active"
+                        summaries.append(summary)
+                        _write_daily_summary(summary, summaries_dir)
+                        continue
 
             paper_run_stage = "order_manager_init"
             manager = order_manager_factory(
@@ -290,10 +531,10 @@ def run_two_week_paper_runner(
                 trading_client=client,
             )
             if submit_enabled:
-                _emit_runner_log("PAPER_ORDER_SUBMIT_STARTED", date=summary["date"], symbol="SPY", notional=10.0)
+                _emit_runner_log("PAPER_ORDER_SUBMIT_STARTED", date=summary["date"], symbol="SPY", notional=ORDER_NOTIONAL)
             try:
                 paper_run_stage = "order_submit"
-                order_result = manager.place_order(command="BUY $10 of SPY", order_type="market")
+                order_result = manager.place_order(command=f"BUY ${ORDER_NOTIONAL:g} of SPY", order_type="market")
             except Exception:
                 order_result = {
                     "approved": False,
@@ -312,14 +553,27 @@ def run_two_week_paper_runner(
                     result_fields["order_id"] = order_result.get("order_id", "N/A")
                 _emit_runner_log("PAPER_ORDER_SUBMIT_RESULT", **result_fields)
 
+            order_record = {
+                "signal_identifier": signal_id,
+                "order_id": order_result.get("order_id"),
+                "timestamp": _to_iso_timestamp(_clock_timestamp(clock)),
+                "status": order_result.get("status", order_result.get("reason", "unknown")),
+                "submitted": bool(order_result.get("submitted")),
+                "notional": ORDER_NOTIONAL,
+            }
+            orders.append(order_record)
+
+            if order_record["submitted"]:
+                day_state["daily_order_count"] = daily_order_count + 1
+                day_state["daily_submitted_notional"] = round(daily_submitted_notional + ORDER_NOTIONAL, 4)
+
+            _write_daily_state(state_path, state_payload)
+
             summary["decision"] = "buy" if order_result.get("approved") else "skip"
             summary["order_submitted_or_skipped"] = "submitted" if order_result.get("approved") else "skipped"
             summary["reason"] = order_result.get("reason", "unknown")
             if summary["reason"] == "duplicate order rejected":
                 summary["reason"] = "duplicate order detected"
-
-            if order_result.get("approved"):
-                submitted_order_days.add(current_day)
 
             summaries.append(summary)
             _write_daily_summary(summary, summaries_dir)
