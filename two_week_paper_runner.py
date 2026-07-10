@@ -307,7 +307,42 @@ def run_two_week_paper_runner(
         }
 
     if not state_path.exists():
-        _emit_runner_log("PAPER_DAILY_STATE_MISSING", path=state_path)
+        try:
+            _write_daily_state(state_path, state_payload)
+        except Exception as exc:
+            review_required = True
+            os.environ["REVIEW_REQUIRED"] = "true"
+            _emit_paper_run_error("state_init_write", exc)
+
+            summaries_dir = Path(output_dir) if output_dir else Path(__file__).resolve().parent / "daily_summaries"
+            final_report = Path(report_path) if report_path else Path(__file__).resolve().parent / "TWO_WEEK_REPORT.md"
+            blocked_day = start_day or date.today()
+            summary = {
+                "date": blocked_day.isoformat(),
+                "account_status": "unavailable",
+                "cash": "N/A",
+                "buying_power": "N/A",
+                "portfolio_value": "N/A",
+                "positions": "N/A",
+                "signal": "N/A",
+                "decision": "stop",
+                "order_submitted_or_skipped": "skipped",
+                "reason": "state init failed",
+                "daily_pl": "N/A",
+                "total_pl": "N/A",
+                "errors": f"state_error: {type(exc).__name__}",
+            }
+            _write_daily_summary(summary, summaries_dir)
+            _write_final_report(final_report, [summary], review_required, "state init failed")
+            return {
+                "review_required": True,
+                "stop_reason": "state init failed",
+                "days_processed": 1,
+                "report_path": str(final_report),
+            }
+        _emit_runner_log("PAPER_DAILY_STATE_INITIALIZED")
+    else:
+        _emit_runner_log("PAPER_DAILY_STATE_LOADED")
 
     summaries_dir = Path(output_dir) if output_dir else Path(__file__).resolve().parent / "daily_summaries"
     final_report = Path(report_path) if report_path else Path(__file__).resolve().parent / "TWO_WEEK_REPORT.md"

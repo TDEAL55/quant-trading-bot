@@ -661,3 +661,73 @@ def test_atomic_state_write_replaces_file(monkeypatch, tmp_path):
     loaded = json.loads(state_path.read_text(encoding="utf-8"))
     assert loaded["dates"]["2026-07-01"]["daily_order_count"] == 2
     assert not (tmp_path / "daily_state.json.tmp").exists()
+
+
+def test_missing_state_is_initialized_and_persisted_when_signal_not_buy(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+
+    state_path = tmp_path / "daily_state.json"
+    monkeypatch.setenv("PAPER_DAILY_STATE_PATH", str(state_path))
+    if state_path.exists():
+        state_path.unlink()
+
+    result = two_week_paper_runner.run_two_week_paper_runner(
+        start_day=date(2026, 7, 1),
+        days=1,
+        output_dir=tmp_path / "summaries",
+        report_path=tmp_path / "report.md",
+        dry_run=False,
+        submit_enabled=True,
+        trading_client_factory=lambda **kwargs: MockTradingClient(is_open=True, clock_timestamp=datetime(2026, 7, 1, 10, 0, 0)),
+        market_data_loader=lambda *args, **kwargs: fake_prices_with_last_close(100.0),
+        signal_generator=lambda *args, **kwargs: "hold",
+        order_manager_factory=lambda **kwargs: MockOrderManager(**kwargs),
+    )
+
+    output = capsys.readouterr().out
+    assert result["stop_reason"] == "completed"
+    assert "PAPER_DAILY_STATE_INITIALIZED" in output
+    assert state_path.exists()
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state == {"dates": {}}
+
+
+def test_next_runner_instance_loads_existing_state(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+
+    state_path = tmp_path / "daily_state.json"
+    monkeypatch.setenv("PAPER_DAILY_STATE_PATH", str(state_path))
+
+    two_week_paper_runner.run_two_week_paper_runner(
+        start_day=date(2026, 7, 1),
+        days=1,
+        output_dir=tmp_path / "summaries1",
+        report_path=tmp_path / "report1.md",
+        dry_run=False,
+        submit_enabled=True,
+        trading_client_factory=lambda **kwargs: MockTradingClient(is_open=True, clock_timestamp=datetime(2026, 7, 1, 10, 0, 0)),
+        market_data_loader=lambda *args, **kwargs: fake_prices_with_last_close(100.0),
+        signal_generator=lambda *args, **kwargs: "hold",
+        order_manager_factory=lambda **kwargs: MockOrderManager(**kwargs),
+    )
+    _ = capsys.readouterr()
+
+    two_week_paper_runner.run_two_week_paper_runner(
+        start_day=date(2026, 7, 2),
+        days=1,
+        output_dir=tmp_path / "summaries2",
+        report_path=tmp_path / "report2.md",
+        dry_run=False,
+        submit_enabled=True,
+        trading_client_factory=lambda **kwargs: MockTradingClient(is_open=True, clock_timestamp=datetime(2026, 7, 2, 10, 0, 0)),
+        market_data_loader=lambda *args, **kwargs: fake_prices_with_last_close(101.0),
+        signal_generator=lambda *args, **kwargs: "hold",
+        order_manager_factory=lambda **kwargs: MockOrderManager(**kwargs),
+    )
+
+    output = capsys.readouterr().out
+    assert "PAPER_DAILY_STATE_LOADED" in output
