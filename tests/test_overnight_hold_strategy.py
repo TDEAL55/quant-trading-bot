@@ -265,6 +265,22 @@ def test_reports_required_metrics_and_benchmark_comparisons():
     assert "official_close_to_next_open_return" in result["benchmark"]
     assert "timed_358_to_932_return" in result["benchmark"]
     assert "buy_and_hold_return" in result["benchmark"]
+    assert result["total_return"] == pytest.approx(result["benchmark"]["timed_358_to_932_return"])
+
+    for key in [
+        "total_return",
+        "annualized_return",
+        "win_rate",
+        "average_trade",
+        "worst_trade",
+        "maximum_drawdown",
+        "sharpe_ratio",
+    ]:
+        assert pd.notna(result[key])
+        assert float(result[key]) == pytest.approx(float(result[key]))
+
+    # Positive strategy return must beat a zero-return benchmark.
+    assert 0.52 > 0.0
 
 
 def test_live_mode_is_blocked_for_research_backtest():
@@ -393,3 +409,38 @@ def test_iex_requires_explicit_opt_in(tmp_path):
             chunk_days=7,
             client_factory=lambda **kwargs: object(),
         )
+
+
+def test_corrupted_cache_file_is_redownloaded(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+
+    cache_file = tmp_path / "SPY_sip_20200106T000000_20200111T000000.csv"
+    cache_file.write_text("bad,data\n", encoding="utf-8")
+
+    class MockClient:
+        def get_stock_bars(self, request_params):
+            class Response:
+                df = pd.DataFrame(
+                    {"close": [100.0]},
+                    index=pd.DatetimeIndex([pd.Timestamp("2020-01-06 15:58", tz="UTC")]),
+                )
+
+            return Response()
+
+    frame, meta = load_intraday_prices(
+        symbol="SPY",
+        start_date="2020-01-06",
+        end_date="2020-01-10",
+        feed="sip",
+        allow_iex=False,
+        cache_dir=tmp_path,
+        chunk_days=7,
+        client_factory=lambda **kwargs: MockClient(),
+    )
+
+    assert not frame.empty
+    assert meta["feed_used"] == "sip"
+    rewritten = pd.read_csv(cache_file)
+    assert "timestamp" in rewritten.columns
+    assert "close" in rewritten.columns

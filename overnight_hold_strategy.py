@@ -1,7 +1,7 @@
 import math
 import os
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -28,6 +28,8 @@ class OvernightConfig:
     exit_minutes_after_open: int = 2
     slippage_rate: float = 0.0
     transaction_cost_rate: float = 0.0
+    slippage_bps: float | None = None
+    transaction_cost_bps: float | None = None
     initial_capital: float = 1.0
     intraday_feed: str = "sip"
     allow_iex: bool = False
@@ -42,8 +44,29 @@ def _validate_config(config):
         raise ValueError("initial_capital must be greater than 0")
     if config.slippage_rate < 0 or config.transaction_cost_rate < 0:
         raise ValueError("slippage and transaction costs must be non-negative")
+    if config.slippage_bps is not None and config.slippage_bps < 0:
+        raise ValueError("slippage_bps must be non-negative")
+    if config.transaction_cost_bps is not None and config.transaction_cost_bps < 0:
+        raise ValueError("transaction_cost_bps must be non-negative")
+    if config.slippage_bps is not None and config.slippage_rate != 0.0:
+        raise ValueError("set either slippage_rate or slippage_bps, not both")
+    if config.transaction_cost_bps is not None and config.transaction_cost_rate != 0.0:
+        raise ValueError("set either transaction_cost_rate or transaction_cost_bps, not both")
     if int(config.chunk_days) < 1:
         raise ValueError("chunk_days must be >= 1")
+
+
+def _resolve_cost_rates(config):
+    # Rates are expressed as decimal percentages, e.g. 0.001 = 0.1%.
+    slippage_rate = float(config.slippage_rate)
+    transaction_cost_rate = float(config.transaction_cost_rate)
+
+    if config.slippage_bps is not None:
+        slippage_rate = float(config.slippage_bps) / 10000.0
+    if config.transaction_cost_bps is not None:
+        transaction_cost_rate = float(config.transaction_cost_bps) / 10000.0
+
+    return slippage_rate, transaction_cost_rate
 
 
 def _normalize_timestamp_index(dataframe, target_tz=EASTERN_TZ):
@@ -115,11 +138,26 @@ def _extract_bar_df(bar_set, symbol):
 def _load_cached_chunk(cache_path):
     if not cache_path.exists():
         return None
-    cached = pd.read_csv(cache_path)
+    try:
+        cached = pd.read_csv(cache_path)
+    except Exception:
+        try:
+            cache_path.unlink()
+        except Exception:
+            pass
+        return None
     if cached.empty:
-        return pd.DataFrame(columns=["close"])
+        try:
+            cache_path.unlink()
+        except Exception:
+            pass
+        return None
     if "timestamp" not in cached.columns or "close" not in cached.columns:
-        raise RuntimeError(f"Cache file has invalid schema: {cache_path}")
+        try:
+            cache_path.unlink()
+        except Exception:
+            pass
+        return None
     cached["timestamp"] = pd.to_datetime(cached["timestamp"], utc=True)
     return pd.DataFrame({"close": cached["close"].astype(float)}, index=pd.DatetimeIndex(cached["timestamp"]))
 
@@ -362,14 +400,18 @@ def _annualized_return(total_return, start_ts, end_ts):
 def _price_at(minute_prices, timestamp):
     if timestamp in minute_prices.index:
         value = minute_prices.loc[timestamp, "close"]
+        if pd.isna(value):
+            return None
         return float(value)
     return None
 
 
 def _compute_comparisons(schedule, daily_prices, minute_prices):
     official_returns = []
-    timed_returns = []
     schedule_rows = list(schedule.itertuples())
+    daily_by_date = daily_prices.copy()
+    daily_by_date["trade_date"] = daily_by_date.index.date
+    daily_by_date = daily_by_date.set_index("trade_date")
 
     for idx in range(len(schedule_rows) - 1):
         current = schedule_rows[idx]
@@ -377,21 +419,13 @@ def _compute_comparisons(schedule, daily_prices, minute_prices):
         current_day = pd.Timestamp(current.Index).date()
         next_day = pd.Timestamp(nxt.Index).date()
 
-        if current_day in daily_prices.index and next_day in daily_prices.index:
-            close_px = float(daily_prices.loc[current_day, "close"])
-            open_px = float(daily_prices.loc[next_day, "open"])
-            if close_px > 0:
+        if current_day in daily_by_date.index and next_day in daily_by_date.index:
+            close_px = float(daily_by_date.loc[current_day, "close"])
+            open_px = float(daily_by_date.loc[next_day, "open"])
+            if close_px > 0 and math.isfinite(close_px) and math.isfinite(open_px):
                 official_returns.append((open_px / close_px) - 1.0)
 
-        entry_ts = current.market_close - pd.Timedelta(minutes=2)
-        exit_ts = nxt.market_open + pd.Timedelta(minutes=2)
-        entry_price = _price_at(minute_prices, entry_ts)
-        exit_price = _price_at(minute_prices, exit_ts)
-        if entry_price is not None and exit_price is not None and entry_price > 0:
-            timed_returns.append((exit_price / entry_price) - 1.0)
-
     official_total = float((pd.Series(official_returns) + 1.0).prod() - 1.0) if official_returns else 0.0
-    timed_total = float((pd.Series(timed_returns) + 1.0).prod() - 1.0) if timed_returns else 0.0
 
     buy_hold_return = 0.0
     if not daily_prices.empty:
@@ -402,9 +436,31 @@ def _compute_comparisons(schedule, daily_prices, minute_prices):
 
     return {
         "official_close_to_next_open_return": official_total,
-        "timed_358_to_932_return": timed_total,
         "buy_and_hold_return": buy_hold_return,
     }
+
+
+def _validate_trade_values(trade):
+    for field in ("entry_price", "exit_price", "gross_return", "costs", "net_return"):
+        value = float(trade[field])
+        if not math.isfinite(value):
+            raise RuntimeError(f"Invalid completed trade value: {field} is not finite")
+    if trade["entry_price"] <= 0 or trade["exit_price"] <= 0:
+        raise RuntimeError("Invalid completed trade value: entry/exit price must be positive")
+
+
+def _assert_finite_metrics(result):
+    for key in [
+        "total_return",
+        "annualized_return",
+        "win_rate",
+        "average_trade",
+        "worst_trade",
+        "maximum_drawdown",
+        "sharpe_ratio",
+    ]:
+        if not math.isfinite(float(result[key])):
+            raise RuntimeError(f"Invalid metric generated: {key} is not finite")
 
 
 def run_overnight_hold_backtest(
@@ -424,6 +480,7 @@ def run_overnight_hold_backtest(
 
     strategy_config = config or OvernightConfig()
     _validate_config(strategy_config)
+    slippage_rate, transaction_cost_rate = _resolve_cost_rates(strategy_config)
 
     schedule = get_nyse_schedule(start_date, end_date, calendar_provider=calendar_provider)
     if schedule.empty:
@@ -490,10 +547,10 @@ def run_overnight_hold_backtest(
         entry_price = _price_at(intraday_prices, entry_ts)
         exit_price = _price_at(intraday_prices, exit_ts)
         missing = False
-        if entry_price is None or entry_price <= 0:
+        if entry_price is None or entry_price <= 0 or not math.isfinite(entry_price):
             missing_entry += 1
             missing = True
-        if exit_price is None:
+        if exit_price is None or not math.isfinite(exit_price):
             missing_exit += 1
             missing = True
         if missing:
@@ -502,8 +559,9 @@ def run_overnight_hold_backtest(
 
         gross_return = (exit_price / entry_price) - 1.0
 
-        buy_multiplier = 1.0 + strategy_config.slippage_rate + strategy_config.transaction_cost_rate
-        sell_multiplier = 1.0 - strategy_config.slippage_rate - strategy_config.transaction_cost_rate
+        # Costs are applied once on entry and once on exit as decimal rates.
+        buy_multiplier = 1.0 + slippage_rate + transaction_cost_rate
+        sell_multiplier = 1.0 - slippage_rate - transaction_cost_rate
         effective_entry = entry_price * buy_multiplier
         effective_exit = exit_price * sell_multiplier
         net_return = (effective_exit / effective_entry) - 1.0
@@ -523,9 +581,10 @@ def run_overnight_hold_backtest(
                 "net_return": net_return,
             }
         )
+        _validate_trade_values(trades[-1])
 
     trade_returns = [item["net_return"] for item in trades]
-    total_return = (equity / strategy_config.initial_capital) - 1.0
+    total_return = float((pd.Series(trade_returns) + 1.0).prod() - 1.0) if trade_returns else 0.0
     win_rate = (sum(1 for value in trade_returns if value > 0) / len(trade_returns)) if trade_returns else 0.0
     average_trade = float(pd.Series(trade_returns).mean()) if trade_returns else 0.0
     worst_trade = float(pd.Series(trade_returns).min()) if trade_returns else 0.0
@@ -539,6 +598,7 @@ def run_overnight_hold_backtest(
         annualized = 0.0
 
     comparisons = _compute_comparisons(schedule, daily_prices, intraday_prices)
+    timed_result = total_return
 
     if strict_data and len(trades) == 0:
         raise RuntimeError(
@@ -547,7 +607,10 @@ def run_overnight_hold_backtest(
             f"to {actual_latest_bar.isoformat() if actual_latest_bar is not None else 'None'}]"
         )
 
-    return {
+    if not math.isclose(total_return, timed_result, rel_tol=1e-12, abs_tol=1e-12):
+        raise RuntimeError("Strategy return mismatch: total_return must equal 3:58-to-9:32 result")
+
+    output = {
         "symbol": strategy_config.symbol,
         "start_date": str(start_date),
         "end_date": str(end_date),
@@ -575,10 +638,17 @@ def run_overnight_hold_backtest(
         "worst_trade": float(worst_trade),
         "maximum_drawdown": float(max_dd),
         "sharpe_ratio": float(_safe_sharpe(trade_returns)),
-        "benchmark": comparisons,
+        "benchmark": {
+            "official_close_to_next_open_return": comparisons["official_close_to_next_open_return"],
+            "timed_358_to_932_return": timed_result,
+            "buy_and_hold_return": comparisons["buy_and_hold_return"],
+        },
+        "timed_358_to_932_result": timed_result,
         "benchmark_comparison": {
             "vs_official_close_to_next_open": float(total_return - comparisons["official_close_to_next_open_return"]),
-            "vs_timed_358_to_932": float(total_return - comparisons["timed_358_to_932_return"]),
+            "vs_timed_358_to_932": float(total_return - timed_result),
             "vs_buy_and_hold": float(total_return - comparisons["buy_and_hold_return"]),
         },
     }
+    _assert_finite_metrics(output)
+    return output
