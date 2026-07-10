@@ -74,9 +74,6 @@ def test_emits_railway_markers_on_success(monkeypatch, tmp_path, capsys):
         "PAPER_MODE_CONFIRMED",
         "ACCOUNT_CHECK_STARTED",
         "MARKET_CHECK_STARTED",
-        "ORDER_DRY_RUN_STARTED",
-        "ORDER_DRY_RUN_RESULT days_processed=1 review_required=False stop_reason=completed",
-        "DAILY_SUMMARY_CREATED path=" + str(expected_summary),
         "RAILWAY_JOB_COMPLETED market_date=2026-07-08 status=completed",
     ]
     assert "key-secret-value" not in "\n".join(output)
@@ -122,6 +119,8 @@ def test_runs_one_day_and_writes_marker(monkeypatch, tmp_path):
     assert result["reason"] == "completed"
     assert captured["days"] == 1
     assert captured["load_env_file"] is False
+    assert captured["dry_run"] is False
+    assert captured["submit_enabled"] is True
     assert marker.exists()
     marker_data = json.loads(marker.read_text(encoding="utf-8"))
     assert marker_data["market_date"] == "2026-07-08"

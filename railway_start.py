@@ -72,23 +72,16 @@ def run_railway_job(now=None):
 
     _emit_railway_log("ACCOUNT_CHECK_STARTED")
     _emit_railway_log("MARKET_CHECK_STARTED")
-    _emit_railway_log("ORDER_DRY_RUN_STARTED")
 
     result = run_two_week_paper_runner(
         start_day=datetime.fromisoformat(market_date).date(),
         load_env_file=False,
         days=1,
+        dry_run=False,
+        submit_enabled=True,
     )
 
     _write_last_run(marker_path, market_date)
-    daily_summary_path = Path(__file__).resolve().parent / "daily_summaries" / f"{market_date}.md"
-    _emit_railway_log(
-        "ORDER_DRY_RUN_RESULT",
-        days_processed=result.get("days_processed"),
-        review_required=result.get("review_required"),
-        stop_reason=result.get("stop_reason"),
-    )
-    _emit_railway_log("DAILY_SUMMARY_CREATED", path=daily_summary_path)
     logger.info(
         "railway_start completed market_date=%s days_processed=%s review_required=%s",
         market_date,

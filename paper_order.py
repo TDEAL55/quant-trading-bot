@@ -1,6 +1,9 @@
 import os
 import re
 
+from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest
+
 from logger_setup import logger
 
 
@@ -67,6 +70,37 @@ class PaperOrderManager:
             "reason": "approved",
             "dry_run": self.dry_run,
             "submitted": False,
+            "simulated_order": simulated_order,
+        }
+
+    def _submit(self, symbol, side, notional, simulated_order):
+        if self.trading_client is None:
+            return self._reject(symbol, side, notional, "trading client is required for submission", simulated_order)
+
+        order_request = MarketOrderRequest(
+            symbol=symbol,
+            notional=notional,
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+        )
+        order = self.trading_client.submit_order(order_data=order_request)
+        order_id = str(getattr(order, "id", "N/A"))
+        status = str(getattr(order, "status", "submitted"))
+        logger.info(
+            "paper_order submitted symbol=%s side=%s notional=%s order_id=%s status=%s",
+            symbol,
+            side,
+            notional,
+            order_id,
+            status,
+        )
+        return {
+            "approved": True,
+            "reason": "submitted",
+            "dry_run": False,
+            "submitted": True,
+            "order_id": order_id,
+            "status": status,
             "simulated_order": simulated_order,
         }
 
@@ -164,8 +198,7 @@ class PaperOrderManager:
         if not self.submit_enabled:
             return self._reject(resolved_symbol, normalized_side, order_notional, "order submission disabled", simulated_order)
 
-        # Real submission path intentionally remains unused by default.
-        return self._reject(resolved_symbol, normalized_side, order_notional, "real order submission is not enabled", simulated_order)
+        return self._submit(resolved_symbol, normalized_side, order_notional, simulated_order)
 
 
 def create_paper_order_manager(mode=None, dry_run=None, submit_enabled=False, trading_client=None):

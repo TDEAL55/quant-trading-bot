@@ -39,6 +39,7 @@ def _write_daily_summary(summary, output_dir):
         f"- errors if any: {summary['errors']}",
     ]
     file_path.write_text("\n".join(content) + "\n", encoding="utf-8")
+    _emit_runner_log("DAILY_SUMMARY_CREATED", date=summary["date"], path=file_path)
 
 
 def _write_final_report(report_path, summaries, review_required, stop_reason):
@@ -58,6 +59,15 @@ def _write_final_report(report_path, summaries, review_required, stop_reason):
     report_path.write_text("\n".join(content) + "\n", encoding="utf-8")
 
 
+def _emit_runner_log(event, **fields):
+    parts = [event]
+    for key, value in fields.items():
+        if value is None:
+            continue
+        parts.append(f"{key}={value}")
+    print(" ".join(parts), flush=True)
+
+
 def run_two_week_paper_runner(
     start_day=None,
     env_path=None,
@@ -69,6 +79,8 @@ def run_two_week_paper_runner(
     market_data_loader=download_price_data,
     signal_generator=generate_signal,
     order_manager_factory=create_paper_order_manager,
+    dry_run=True,
+    submit_enabled=False,
 ):
     """Run a 14-calendar-day paper-trading dry-run with strict safety rules."""
     if days < 1:
@@ -92,6 +104,9 @@ def run_two_week_paper_runner(
     client = trading_client_factory(api_key=api_key, secret_key=api_secret, paper=True)
     summaries_dir = Path(output_dir) if output_dir else Path(__file__).resolve().parent / "daily_summaries"
     final_report = Path(report_path) if report_path else Path(__file__).resolve().parent / "TWO_WEEK_REPORT.md"
+
+    if submit_enabled:
+        _emit_runner_log("PAPER_ORDER_SUBMISSION_ENABLED")
 
     start = start_day or date.today()
     end = start + timedelta(days=days - 1)
@@ -231,11 +246,31 @@ def run_two_week_paper_runner(
 
             manager = order_manager_factory(
                 mode="PAPER",
-                dry_run=True,
-                submit_enabled=False,
+                dry_run=dry_run,
+                submit_enabled=submit_enabled,
                 trading_client=client,
             )
-            order_result = manager.place_order(command="BUY $10 of SPY", order_type="market")
+            if submit_enabled:
+                _emit_runner_log("PAPER_ORDER_SUBMIT_STARTED", date=summary["date"], symbol="SPY", notional=10.0)
+            try:
+                order_result = manager.place_order(command="BUY $10 of SPY", order_type="market")
+            except Exception:
+                order_result = {
+                    "approved": False,
+                    "reason": "submission failed",
+                    "submitted": False,
+                    "status": "error",
+                }
+
+            if submit_enabled:
+                submitted = bool(order_result.get("submitted"))
+                result_fields = {
+                    "submitted": submitted,
+                    "status": order_result.get("status", order_result.get("reason", "unknown")),
+                }
+                if submitted:
+                    result_fields["order_id"] = order_result.get("order_id", "N/A")
+                _emit_runner_log("PAPER_ORDER_SUBMIT_RESULT", **result_fields)
 
             summary["decision"] = "buy" if order_result.get("approved") else "skip"
             summary["order_submitted_or_skipped"] = "submitted" if order_result.get("approved") else "skipped"

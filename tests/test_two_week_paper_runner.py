@@ -56,6 +56,19 @@ class MockOrderManager:
         self.trading_client = trading_client
 
     def place_order(self, command=None, order_type=None):
+        if self.submit_enabled and not self.dry_run:
+            return {
+                "approved": True,
+                "reason": "submitted",
+                "submitted": True,
+                "status": "accepted",
+                "order_id": "paper-order-1",
+                "simulated_order": {
+                    "symbol": "SPY",
+                    "notional": 10.0,
+                    "type": "market",
+                },
+            }
         return {
             "approved": True,
             "reason": "approved",
@@ -192,3 +205,37 @@ def test_buy_signal_uses_existing_strategy_and_submits_at_most_one_per_day(monke
     assert calls["signals"] == 14
     summaries = [path.read_text(encoding="utf-8") for path in sorted(output_dir.glob("*.md"))]
     assert all("order submitted or skipped: submitted" in text for text in summaries)
+
+
+def test_buy_signal_submits_real_paper_order_and_logs(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+
+    output_dir = tmp_path / "daily_summaries"
+    report_path = tmp_path / "TWO_WEEK_REPORT.md"
+
+    result = two_week_paper_runner.run_two_week_paper_runner(
+        start_day=date(2026, 7, 1),
+        days=1,
+        output_dir=output_dir,
+        report_path=report_path,
+        dry_run=False,
+        submit_enabled=True,
+        trading_client_factory=lambda **kwargs: MockTradingClient(is_open=True),
+        market_data_loader=lambda *args, **kwargs: fake_prices(),
+        signal_generator=lambda *args, **kwargs: "buy",
+        order_manager_factory=lambda **kwargs: MockOrderManager(**kwargs),
+    )
+
+    output = capsys.readouterr().out.splitlines()
+
+    assert result["days_processed"] == 1
+    assert output == [
+        "PAPER_ORDER_SUBMISSION_ENABLED",
+        "PAPER_ORDER_SUBMIT_STARTED date=2026-07-01 symbol=SPY notional=10.0",
+        "PAPER_ORDER_SUBMIT_RESULT submitted=True status=accepted order_id=paper-order-1",
+        "DAILY_SUMMARY_CREATED date=2026-07-01 path=" + str(output_dir / "2026-07-01.md"),
+    ]
+    assert report_path.exists()
+    assert (output_dir / "2026-07-01.md").exists()

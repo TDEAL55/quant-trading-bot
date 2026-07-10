@@ -21,6 +21,25 @@ class MockTradingClient:
         raise AssertionError("submit_order should not be called")
 
 
+class MockSubmittingTradingClient(MockTradingClient):
+    def __init__(self, is_open=True):
+        super().__init__(is_open=is_open)
+        self.submit_calls = 0
+        self.last_order_data = None
+
+    def submit_order(self, order_data=None):
+        self.submitted = True
+        self.submit_calls += 1
+        self.last_order_data = order_data
+
+        class MockOrder:
+            def __init__(self):
+                self.id = "paper-order-1"
+                self.status = "accepted"
+
+        return MockOrder()
+
+
 def set_credentials(monkeypatch):
     monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
     monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
@@ -156,6 +175,27 @@ def test_submission_disabled_when_not_dry_run(monkeypatch):
     assert result["approved"] is False
     assert result["reason"] == "order submission disabled"
     assert result["simulated_order"]["notional"] == 10.0
+
+
+def test_real_paper_submission_returns_order_id_and_status(monkeypatch):
+    set_credentials(monkeypatch)
+    client = MockSubmittingTradingClient(is_open=True)
+    manager = create_paper_order_manager(
+        mode="PAPER",
+        dry_run=False,
+        submit_enabled=True,
+        trading_client=client,
+    )
+
+    result = manager.place_order(command="BUY $10 of SPY")
+
+    assert result["approved"] is True
+    assert result["submitted"] is True
+    assert result["order_id"] == "paper-order-1"
+    assert result["status"] == "accepted"
+    assert client.submit_calls == 1
+    assert str(client.last_order_data.symbol) == "SPY"
+    assert float(client.last_order_data.notional) == 10.0
 
 
 def test_non_paper_mode_is_rejected(monkeypatch):
