@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from overnight_hold_strategy import EASTERN_TZ, OvernightConfig, run_overnight_hold_backtest
+from overnight_hold_strategy import EASTERN_TZ, OvernightConfig, load_intraday_prices, run_overnight_hold_backtest
 
 
 def _schedule_from_eastern(rows):
@@ -141,6 +141,8 @@ def test_skips_incomplete_trade_when_exit_bar_missing():
 
     assert result["number_of_trades"] == 0
     assert result["skipped_trades"] == 1
+    assert result["missing_entry_trades"] == 0
+    assert result["missing_exit_trades"] == 1
 
 
 def test_timezone_conversion_from_utc_intraday_bars():
@@ -284,4 +286,110 @@ def test_live_mode_is_blocked_for_research_backtest():
             calendar_provider=lambda start, end: schedule,
             intraday_loader=intraday_loader,
             daily_loader=daily_loader,
+        )
+
+
+def test_reports_missing_entry_and_exit_counts_separately():
+    schedule = _schedule_from_eastern(
+        [
+            ("2023-01-03", "09:30", "16:00"),
+            ("2023-01-04", "09:30", "16:00"),
+            ("2023-01-05", "09:30", "16:00"),
+        ]
+    )
+    intraday_loader = _intraday_loader_from_points(
+        [
+            ("2023-01-04 09:32", 101),
+            ("2023-01-04 15:58", 102),
+        ]
+    )
+    daily_loader = _daily_loader_from_rows(
+        [
+            ("2023-01-03", 100, 100),
+            ("2023-01-04", 101, 101),
+            ("2023-01-05", 102, 102),
+        ]
+    )
+
+    result = run_overnight_hold_backtest(
+        start_date="2023-01-03",
+        end_date="2023-01-05",
+        config=OvernightConfig(),
+        calendar_provider=lambda start, end: schedule,
+        intraday_loader=intraday_loader,
+        daily_loader=daily_loader,
+    )
+
+    assert result["complete_trades"] == 0
+    assert result["missing_entry_trades"] == 1
+    assert result["missing_exit_trades"] == 1
+    assert result["skipped_trades"] == 2
+
+
+def test_sip_unauthorized_fails_clearly_without_iex_opt_in(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+
+    class UnauthorizedClient:
+        def get_stock_bars(self, request_params):
+            raise RuntimeError("subscription does not permit querying recent SIP data")
+
+    with pytest.raises(RuntimeError, match="SIP historical minute data access is unavailable"):
+        load_intraday_prices(
+            symbol="SPY",
+            start_date="2020-01-06",
+            end_date="2020-01-10",
+            feed="sip",
+            allow_iex=False,
+            cache_dir=tmp_path,
+            chunk_days=7,
+            client_factory=lambda **kwargs: UnauthorizedClient(),
+        )
+
+
+def test_sip_can_fallback_to_iex_only_when_explicitly_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+
+    class FallbackClient:
+        def get_stock_bars(self, request_params):
+            if request_params.feed.value == "sip":
+                raise RuntimeError("subscription does not permit querying recent SIP data")
+
+            class Response:
+                df = pd.DataFrame(
+                    {"close": [100.0]},
+                    index=pd.DatetimeIndex([pd.Timestamp("2020-01-06 15:58", tz="UTC")]),
+                )
+
+            return Response()
+
+    frame, meta = load_intraday_prices(
+        symbol="SPY",
+        start_date="2020-01-06",
+        end_date="2020-01-10",
+        feed="sip",
+        allow_iex=True,
+        cache_dir=tmp_path,
+        chunk_days=7,
+        client_factory=lambda **kwargs: FallbackClient(),
+    )
+
+    assert not frame.empty
+    assert meta["feed_used"] == "iex"
+    assert meta["iex_only"] is True
+    assert "not full-market" in meta["note"]
+
+
+def test_iex_requires_explicit_opt_in(tmp_path):
+    with pytest.raises(RuntimeError, match="IEX feed requires explicit opt-in"):
+        load_intraday_prices(
+            symbol="SPY",
+            start_date="2020-01-06",
+            end_date="2020-01-10",
+            feed="iex",
+            allow_iex=False,
+            cache_dir=tmp_path,
+            chunk_days=7,
+            client_factory=lambda **kwargs: object(),
         )

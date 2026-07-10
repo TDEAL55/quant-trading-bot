@@ -10,3 +10,4 @@ tmp_secret_scan.py
 trade_journal.csv
 daily_summaries/
 TWO_WEEK_REPORT.md
+.overnight_cache/

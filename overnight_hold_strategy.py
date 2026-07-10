@@ -1,10 +1,15 @@
 import math
 import os
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
+from alpaca.data.enums import DataFeed
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
 
 try:
     import pandas_market_calendars as mcal
@@ -13,6 +18,7 @@ except ImportError as exc:  # pragma: no cover - validated in runtime checks
 
 
 EASTERN_TZ = "America/New_York"
+DEFAULT_CACHE_DIR = Path(__file__).resolve().parent / ".overnight_cache" / "alpaca_1m"
 
 
 @dataclass(frozen=True)
@@ -23,6 +29,10 @@ class OvernightConfig:
     slippage_rate: float = 0.0
     transaction_cost_rate: float = 0.0
     initial_capital: float = 1.0
+    intraday_feed: str = "sip"
+    allow_iex: bool = False
+    cache_dir: str = str(DEFAULT_CACHE_DIR)
+    chunk_days: int = 7
 
 
 def _validate_config(config):
@@ -32,6 +42,8 @@ def _validate_config(config):
         raise ValueError("initial_capital must be greater than 0")
     if config.slippage_rate < 0 or config.transaction_cost_rate < 0:
         raise ValueError("slippage and transaction costs must be non-negative")
+    if int(config.chunk_days) < 1:
+        raise ValueError("chunk_days must be >= 1")
 
 
 def _normalize_timestamp_index(dataframe, target_tz=EASTERN_TZ):
@@ -53,6 +65,218 @@ def _normalize_timestamp_index(dataframe, target_tz=EASTERN_TZ):
     return output.sort_index()
 
 
+def _to_utc_datetime(value):
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    return ts.to_pydatetime()
+
+
+def _cache_file(cache_dir, symbol, feed, chunk_start, chunk_end):
+    cache_root = Path(cache_dir)
+    cache_root.mkdir(parents=True, exist_ok=True)
+    name = (
+        f"{symbol}_{feed}_"
+        f"{chunk_start.strftime('%Y%m%dT%H%M%S')}_"
+        f"{chunk_end.strftime('%Y%m%dT%H%M%S')}.csv"
+    )
+    return cache_root / name
+
+
+def _extract_bar_df(bar_set, symbol):
+    df = getattr(bar_set, "df", None)
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["close"])
+
+    if isinstance(df.index, pd.MultiIndex):
+        if "symbol" in df.index.names:
+            df = df.xs(symbol, level="symbol")
+        else:
+            df = df.xs(symbol)
+
+    df = df.copy()
+    if "close" not in df.columns and "Close" in df.columns:
+        df = df.rename(columns={"Close": "close"})
+    if "close" not in df.columns:
+        raise RuntimeError("Alpaca bar response did not include close prices")
+
+    df = df[["close"]]
+    index = pd.DatetimeIndex(df.index)
+    if index.tz is None:
+        index = index.tz_localize("UTC")
+    else:
+        index = index.tz_convert("UTC")
+    df.index = index
+    return df.sort_index()
+
+
+def _load_cached_chunk(cache_path):
+    if not cache_path.exists():
+        return None
+    cached = pd.read_csv(cache_path)
+    if cached.empty:
+        return pd.DataFrame(columns=["close"])
+    if "timestamp" not in cached.columns or "close" not in cached.columns:
+        raise RuntimeError(f"Cache file has invalid schema: {cache_path}")
+    cached["timestamp"] = pd.to_datetime(cached["timestamp"], utc=True)
+    return pd.DataFrame({"close": cached["close"].astype(float)}, index=pd.DatetimeIndex(cached["timestamp"]))
+
+
+def _save_cached_chunk(cache_path, dataframe):
+    output = dataframe.copy()
+    output = output.reset_index().rename(columns={"index": "timestamp"})
+    output["timestamp"] = pd.to_datetime(output["timestamp"], utc=True)
+    output.to_csv(cache_path, index=False)
+
+
+def _is_sip_unauthorized(exc):
+    text = str(exc).lower()
+    patterns = [
+        "sip",
+        "unauthorized",
+        "not authorized",
+        "not entitled",
+        "insufficient",
+        "subscription",
+        "forbidden",
+        "403",
+    ]
+    return "sip" in text and any(token in text for token in patterns[1:])
+
+
+def _resolve_feed(feed_name, allow_iex):
+    normalized = str(feed_name or "sip").strip().lower()
+    if normalized not in {"sip", "iex"}:
+        raise ValueError("intraday feed must be 'sip' or 'iex'")
+    if normalized == "iex" and not allow_iex:
+        raise RuntimeError("IEX feed requires explicit opt-in via allow_iex setting")
+    return normalized
+
+
+def _alpaca_client_from_env(client_factory=StockHistoricalDataClient):
+    api_key = os.getenv("ALPACA_API_KEY", "")
+    api_secret = os.getenv("ALPACA_API_SECRET", "")
+    if not api_key or not api_secret:
+        raise RuntimeError("Missing required Alpaca credentials: ALPACA_API_KEY, ALPACA_API_SECRET")
+    return client_factory(api_key=api_key, secret_key=api_secret)
+
+
+def _download_alpaca_bars(
+    symbol,
+    start_date,
+    end_date,
+    feed,
+    cache_dir,
+    chunk_days,
+    client_factory=StockHistoricalDataClient,
+):
+    client = _alpaca_client_from_env(client_factory=client_factory)
+
+    start_utc = pd.Timestamp(start_date, tz="UTC")
+    end_utc = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)
+    current = start_utc
+    chunks = []
+
+    while current < end_utc:
+        chunk_end = min(current + pd.Timedelta(days=chunk_days), end_utc)
+        cache_path = _cache_file(cache_dir, symbol, feed, current, chunk_end)
+        cached = _load_cached_chunk(cache_path)
+        if cached is not None:
+            chunks.append(cached)
+            current = chunk_end
+            continue
+
+        request = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            start=_to_utc_datetime(current),
+            end=_to_utc_datetime(chunk_end),
+            timeframe=TimeFrame.Minute,
+            feed=DataFeed(feed),
+            limit=10000,
+        )
+        bar_set = client.get_stock_bars(request)
+        frame = _extract_bar_df(bar_set, symbol)
+        _save_cached_chunk(cache_path, frame)
+        chunks.append(frame)
+        current = chunk_end
+
+    if not chunks:
+        return pd.DataFrame(columns=["close"])
+
+    combined = pd.concat(chunks).sort_index()
+    if combined.empty:
+        return combined
+    combined = combined[~combined.index.duplicated(keep="last")]
+    return combined
+
+
+def load_intraday_prices(
+    symbol,
+    start_date,
+    end_date,
+    feed="sip",
+    allow_iex=False,
+    cache_dir=DEFAULT_CACHE_DIR,
+    chunk_days=7,
+    client_factory=StockHistoricalDataClient,
+):
+    primary_feed = _resolve_feed(feed, allow_iex)
+
+    try:
+        frame = _download_alpaca_bars(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            feed=primary_feed,
+            cache_dir=cache_dir,
+            chunk_days=chunk_days,
+            client_factory=client_factory,
+        )
+        return frame, {
+            "source": "alpaca",
+            "feed_used": primary_feed,
+            "iex_only": primary_feed == "iex",
+        }
+    except Exception as exc:
+        if primary_feed == "sip" and _is_sip_unauthorized(exc):
+            if not allow_iex:
+                raise RuntimeError(
+                    "SIP historical minute data access is unavailable for this account. "
+                    "Enable IEX explicitly (allow_iex=true) to run IEX-only backtests."
+                ) from exc
+
+            frame = _download_alpaca_bars(
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                feed="iex",
+                cache_dir=cache_dir,
+                chunk_days=chunk_days,
+                client_factory=client_factory,
+            )
+            return frame, {
+                "source": "alpaca",
+                "feed_used": "iex",
+                "iex_only": True,
+                "note": "IEX-only results are not full-market results",
+            }
+        raise
+
+
+def load_daily_prices(symbol, start_date, end_date):
+    start_dt = pd.Timestamp(start_date)
+    end_dt = pd.Timestamp(end_date) + timedelta(days=1)
+    raw = yf.download(symbol, start=start_dt, end=end_dt, interval="1d", progress=False, auto_adjust=False)
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=["open", "close"])
+    daily = raw[["Open", "Close"]].copy()
+    daily.columns = ["open", "close"]
+    daily.index = pd.to_datetime(daily.index).tz_localize(None)
+    return daily.sort_index()
+
+
 def get_nyse_schedule(start_date, end_date, calendar_name="NYSE", calendar_provider=None):
     if calendar_provider is not None:
         schedule = calendar_provider(start_date, end_date)
@@ -69,23 +293,43 @@ def get_nyse_schedule(start_date, end_date, calendar_name="NYSE", calendar_provi
     return output
 
 
-def load_intraday_prices(symbol, start_date, end_date):
-    start_dt = pd.Timestamp(start_date)
-    end_dt = pd.Timestamp(end_date) + timedelta(days=1)
-    raw = yf.download(symbol, start=start_dt, end=end_dt, interval="1m", progress=False, prepost=True)
-    return _normalize_timestamp_index(raw)
+def latest_complete_trading_day(reference_date=None):
+    today = pd.Timestamp(reference_date or date.today()).date()
+    calendar = mcal.get_calendar("NYSE")
+    end = today - timedelta(days=1)
+    start = end - timedelta(days=14)
+    schedule = calendar.schedule(start_date=start.isoformat(), end_date=end.isoformat())
+    if schedule.empty:
+        raise RuntimeError("Unable to determine latest complete trading day")
+    return pd.Timestamp(schedule.index[-1]).date()
 
 
-def load_daily_prices(symbol, start_date, end_date):
-    start_dt = pd.Timestamp(start_date)
-    end_dt = pd.Timestamp(end_date) + timedelta(days=1)
-    raw = yf.download(symbol, start=start_dt, end=end_dt, interval="1d", progress=False, auto_adjust=False)
-    if raw is None or raw.empty:
-        return pd.DataFrame(columns=["open", "close"])
-    daily = raw[["Open", "Close"]].copy()
-    daily.columns = ["open", "close"]
-    daily.index = pd.to_datetime(daily.index).tz_localize(None)
-    return daily.sort_index()
+def find_earliest_available_alpaca_date(
+    through_date,
+    config,
+    start_search_date="2010-01-01",
+    intraday_loader=load_intraday_prices,
+):
+    start = pd.Timestamp(start_search_date).date()
+    end = pd.Timestamp(through_date).date()
+    cursor = start
+    while cursor <= end:
+        window_end = min(cursor + timedelta(days=13), end)
+        payload = intraday_loader(
+            config.symbol,
+            cursor.isoformat(),
+            window_end.isoformat(),
+            feed=config.intraday_feed,
+            allow_iex=config.allow_iex,
+            cache_dir=config.cache_dir,
+            chunk_days=config.chunk_days,
+        )
+        frame = payload[0] if isinstance(payload, tuple) else payload
+        frame = _normalize_timestamp_index(frame)
+        if not frame.empty:
+            return frame.index.min().date()
+        cursor = window_end + timedelta(days=1)
+    raise RuntimeError("Unable to locate earliest available Alpaca 1-minute SPY bar in search range")
 
 
 def _safe_sharpe(returns):
@@ -120,10 +364,6 @@ def _price_at(minute_prices, timestamp):
         value = minute_prices.loc[timestamp, "close"]
         return float(value)
     return None
-
-
-def _daily_date(ts):
-    return pd.Timestamp(ts).tz_convert(EASTERN_TZ).date()
 
 
 def _compute_comparisons(schedule, daily_prices, minute_prices):
@@ -189,9 +429,25 @@ def run_overnight_hold_backtest(
     if schedule.empty:
         raise RuntimeError("No official NYSE sessions found for the requested period")
 
-    intraday_prices = _normalize_timestamp_index(intraday_loader(strategy_config.symbol, start_date, end_date))
-    daily_prices = daily_loader(strategy_config.symbol, start_date, end_date)
-    daily_prices = daily_prices.sort_index()
+    try:
+        intraday_payload = intraday_loader(
+            strategy_config.symbol,
+            start_date,
+            end_date,
+            feed=strategy_config.intraday_feed,
+            allow_iex=strategy_config.allow_iex,
+            cache_dir=strategy_config.cache_dir,
+            chunk_days=strategy_config.chunk_days,
+        )
+    except TypeError:
+        intraday_payload = intraday_loader(strategy_config.symbol, start_date, end_date)
+    if isinstance(intraday_payload, tuple):
+        intraday_raw, intraday_meta = intraday_payload
+    else:
+        intraday_raw, intraday_meta = intraday_payload, {"source": "custom", "feed_used": "custom", "iex_only": False}
+
+    intraday_prices = _normalize_timestamp_index(intraday_raw)
+    daily_prices = daily_loader(strategy_config.symbol, start_date, end_date).sort_index()
 
     schedule_rows = list(schedule.itertuples())
     if len(schedule_rows) < 2:
@@ -219,6 +475,8 @@ def run_overnight_hold_backtest(
 
     trades = []
     skipped = 0
+    missing_entry = 0
+    missing_exit = 0
     equity = strategy_config.initial_capital
     equity_points = []
 
@@ -231,7 +489,14 @@ def run_overnight_hold_backtest(
 
         entry_price = _price_at(intraday_prices, entry_ts)
         exit_price = _price_at(intraday_prices, exit_ts)
-        if entry_price is None or exit_price is None or entry_price <= 0:
+        missing = False
+        if entry_price is None or entry_price <= 0:
+            missing_entry += 1
+            missing = True
+        if exit_price is None:
+            missing_exit += 1
+            missing = True
+        if missing:
             skipped += 1
             continue
 
@@ -287,8 +552,11 @@ def run_overnight_hold_backtest(
         "start_date": str(start_date),
         "end_date": str(end_date),
         "data_source": {
-            "intraday": "yfinance",
+            "intraday": intraday_meta.get("source", "custom"),
             "daily": "yfinance",
+            "feed_used": intraday_meta.get("feed_used", "custom"),
+            "iex_only": bool(intraday_meta.get("iex_only", False)),
+            "note": intraday_meta.get("note", ""),
         },
         "earliest_bar": actual_earliest_bar.isoformat() if actual_earliest_bar is not None else None,
         "latest_bar": actual_latest_bar.isoformat() if actual_latest_bar is not None else None,
@@ -296,6 +564,9 @@ def run_overnight_hold_backtest(
         "required_latest": last_required_exit.isoformat(),
         "trades": trades,
         "skipped_trades": skipped,
+        "missing_entry_trades": missing_entry,
+        "missing_exit_trades": missing_exit,
+        "complete_trades": len(trades),
         "number_of_trades": len(trades),
         "total_return": float(total_return),
         "annualized_return": float(annualized),
