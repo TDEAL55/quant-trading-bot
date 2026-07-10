@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -68,6 +69,38 @@ def _emit_runner_log(event, **fields):
     print(" ".join(parts), flush=True)
 
 
+def _safe_error_message(exc):
+    text = str(exc)
+    if not text:
+        return ""
+
+    # Remove common secret-bearing key/value fragments.
+    patterns = [
+        r"(?i)(api[_-]?key\s*[=:]\s*)([^\s,;]+)",
+        r"(?i)(api[_-]?secret\s*[=:]\s*)([^\s,;]+)",
+        r"(?i)(authorization\s*[=:]\s*)([^\s,;]+)",
+        r"(?i)(token\s*[=:]\s*)([^\s,;]+)",
+        r"(?i)(account(?:[_-]?(?:id|number))?\s*[=:]\s*)([^\s,;]+)",
+    ]
+    safe = text
+    for pattern in patterns:
+        safe = re.sub(pattern, r"\1[REDACTED]", safe)
+
+    # Mask standalone long numeric identifiers.
+    safe = re.sub(r"\b\d{8,}\b", "[REDACTED]", safe)
+
+    return safe[:200]
+
+
+def _emit_paper_run_error(stage, exc):
+    _emit_runner_log(
+        "PAPER_RUN_ERROR",
+        PAPER_RUN_STAGE=stage,
+        PAPER_RUN_ERROR_TYPE=type(exc).__name__,
+        PAPER_RUN_ERROR_MESSAGE=_safe_error_message(exc),
+    )
+
+
 def run_two_week_paper_runner(
     start_day=None,
     env_path=None,
@@ -125,6 +158,7 @@ def run_two_week_paper_runner(
 
     for day_offset in range(days):
         current_day = start + timedelta(days=day_offset)
+        paper_run_stage = "day_started"
         summary = {
             "date": current_day.isoformat(),
             "account_status": "unavailable",
@@ -145,8 +179,11 @@ def run_two_week_paper_runner(
             if mode == "LIVE":
                 raise RuntimeError("LIVE mode detected; stopping immediately")
 
+            paper_run_stage = "account_fetch"
             account = client.get_account()
+            paper_run_stage = "clock_fetch"
             clock = client.get_clock()
+            paper_run_stage = "positions_fetch"
             positions = client.get_all_positions()
 
             account_status = str(getattr(account, "status", "unknown"))
@@ -225,6 +262,7 @@ def run_two_week_paper_runner(
                 logger.info("two_week_paper_runner day=%s skipped reason=data missing", summary["date"])
                 continue
 
+            paper_run_stage = "signal_generation"
             signal = signal_generator(day_prices["close"], 20, 50)
             summary["signal"] = signal
 
@@ -244,6 +282,7 @@ def run_two_week_paper_runner(
                 logger.info("two_week_paper_runner day=%s skipped reason=duplicate order detected", summary["date"])
                 continue
 
+            paper_run_stage = "order_manager_init"
             manager = order_manager_factory(
                 mode="PAPER",
                 dry_run=dry_run,
@@ -253,6 +292,7 @@ def run_two_week_paper_runner(
             if submit_enabled:
                 _emit_runner_log("PAPER_ORDER_SUBMIT_STARTED", date=summary["date"], symbol="SPY", notional=10.0)
             try:
+                paper_run_stage = "order_submit"
                 order_result = manager.place_order(command="BUY $10 of SPY", order_type="market")
             except Exception:
                 order_result = {
@@ -293,13 +333,19 @@ def run_two_week_paper_runner(
             )
 
         except Exception as exc:
+            _emit_paper_run_error(paper_run_stage, exc)
             summary["decision"] = "skip"
             summary["order_submitted_or_skipped"] = "skipped"
             summary["reason"] = "error"
-            summary["errors"] = str(exc)
+            summary["errors"] = f"{type(exc).__name__}: {_safe_error_message(exc)}"
             summaries.append(summary)
             _write_daily_summary(summary, summaries_dir)
-            logger.error("two_week_paper_runner day=%s failed: %s", summary["date"], exc)
+            logger.error(
+                "two_week_paper_runner day=%s failed stage=%s type=%s",
+                summary["date"],
+                paper_run_stage,
+                type(exc).__name__,
+            )
 
     if review_required:
         os.environ["REVIEW_REQUIRED"] = "true"

@@ -239,3 +239,45 @@ def test_buy_signal_submits_real_paper_order_and_logs(monkeypatch, tmp_path, cap
     ]
     assert report_path.exists()
     assert (output_dir / "2026-07-01.md").exists()
+
+
+def test_logs_exact_error_between_submission_enabled_and_submit_started(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+
+    output_dir = tmp_path / "daily_summaries"
+    report_path = tmp_path / "TWO_WEEK_REPORT.md"
+
+    def failing_order_manager_factory(**kwargs):
+        raise RuntimeError("authorization=Bearer abcd account_number=123456789 ALPACA_API_KEY=secret-key")
+
+    result = two_week_paper_runner.run_two_week_paper_runner(
+        start_day=date(2026, 7, 1),
+        days=1,
+        output_dir=output_dir,
+        report_path=report_path,
+        dry_run=False,
+        submit_enabled=True,
+        trading_client_factory=lambda **kwargs: MockTradingClient(is_open=True),
+        market_data_loader=lambda *args, **kwargs: fake_prices(),
+        signal_generator=lambda *args, **kwargs: "buy",
+        order_manager_factory=failing_order_manager_factory,
+    )
+
+    output = capsys.readouterr().out.splitlines()
+
+    assert result["days_processed"] == 1
+    assert output[0] == "PAPER_ORDER_SUBMISSION_ENABLED"
+    assert any(line.startswith("PAPER_RUN_ERROR PAPER_RUN_STAGE=order_manager_init") for line in output)
+    assert any("PAPER_RUN_ERROR_TYPE=RuntimeError" in line for line in output)
+    assert any("PAPER_RUN_ERROR_MESSAGE=" in line for line in output)
+    assert not any(line.startswith("PAPER_ORDER_SUBMIT_STARTED") for line in output)
+    assert "secret-key" not in "\n".join(output)
+    assert "123456789" not in "\n".join(output)
+
+    summary_text = (output_dir / "2026-07-01.md").read_text(encoding="utf-8")
+    assert "reason: error" in summary_text
+    assert "RuntimeError:" in summary_text
+    assert "secret-key" not in summary_text
+    assert "123456789" not in summary_text
