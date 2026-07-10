@@ -1,4 +1,3 @@
-import json
 import os
 import re
 from datetime import datetime
@@ -64,21 +63,6 @@ def _today_eastern(now=None):
     return current.astimezone(EASTERN_TZ).date().isoformat()
 
 
-def _read_last_run(marker_path):
-    if not marker_path.exists():
-        return None
-    try:
-        data = json.loads(marker_path.read_text(encoding="utf-8"))
-        return data.get("market_date")
-    except Exception:
-        return None
-
-
-def _write_last_run(marker_path, market_date):
-    marker_path.parent.mkdir(parents=True, exist_ok=True)
-    marker_path.write_text(json.dumps({"market_date": market_date}, indent=2) + "\n", encoding="utf-8")
-
-
 def run_railway_job(now=None):
     """Run a single safe paper-trading cycle for Railway scheduled execution."""
     stage = "startup"
@@ -97,18 +81,6 @@ def run_railway_job(now=None):
         _emit_railway_log("STATE_CHECK", **_state_directory_check())
 
         market_date = _today_eastern(now)
-        marker_path = Path(os.getenv("RAILWAY_RUN_MARKER_PATH", ".railway_last_run.json"))
-        last_run_date = _read_last_run(marker_path)
-
-        if last_run_date == market_date:
-            logger.info("railway_start skipped: already ran for market_date=%s", market_date)
-            _emit_railway_log("RAILWAY_JOB_COMPLETED", market_date=market_date, status="skipped")
-            return {
-                "ran": False,
-                "market_date": market_date,
-                "reason": "already ran for market day",
-                "report_path": None,
-            }
 
         stage = "account_check"
         _emit_railway_log("ACCOUNT_CHECK_STARTED")
@@ -124,8 +96,6 @@ def run_railway_job(now=None):
             submit_enabled=True,
         )
 
-        stage = "marker_write"
-        _write_last_run(marker_path, market_date)
         stage = "report_checker"
         _emit_railway_log("REPORT_CHECKER_STARTED")
         try:

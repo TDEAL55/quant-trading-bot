@@ -1,6 +1,4 @@
-import json
 from datetime import datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -23,12 +21,11 @@ def test_requires_paper_mode(monkeypatch):
         railway_start.run_railway_job(now=datetime(2026, 7, 8, 9, 0, tzinfo=EASTERN_TZ))
 
 
-def test_skips_if_already_ran_for_market_day(monkeypatch, tmp_path):
-    marker = tmp_path / "marker.json"
-    marker.write_text(json.dumps({"market_date": "2026-07-08"}), encoding="utf-8")
-
+def test_two_invocations_same_day_both_reach_runner(monkeypatch, tmp_path):
     monkeypatch.setenv("TRADING_MODE", "PAPER")
-    monkeypatch.setenv("RAILWAY_RUN_MARKER_PATH", str(marker))
+    state_path = tmp_path / "state" / "paper_daily_state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("PAPER_DAILY_STATE_PATH", str(state_path))
 
     calls = {"count": 0}
 
@@ -38,20 +35,19 @@ def test_skips_if_already_ran_for_market_day(monkeypatch, tmp_path):
 
     monkeypatch.setattr(railway_start, "run_two_week_paper_runner", fake_runner)
 
-    result = railway_start.run_railway_job(now=datetime(2026, 7, 8, 9, 0, tzinfo=EASTERN_TZ))
+    first = railway_start.run_railway_job(now=datetime(2026, 7, 8, 9, 0, tzinfo=EASTERN_TZ))
+    second = railway_start.run_railway_job(now=datetime(2026, 7, 8, 9, 1, tzinfo=EASTERN_TZ))
 
-    assert result["ran"] is False
-    assert result["reason"] == "already ran for market day"
-    assert calls["count"] == 0
+    assert first["ran"] is True
+    assert second["ran"] is True
+    assert calls["count"] == 2
 
 
 def test_emits_railway_markers_on_success(monkeypatch, tmp_path, capsys):
-    marker = tmp_path / "marker.json"
     state_path = tmp_path / "state" / "paper_daily_state.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setenv("TRADING_MODE", "PAPER")
-    monkeypatch.setenv("RAILWAY_RUN_MARKER_PATH", str(marker))
     monkeypatch.setenv("PAPER_DAILY_STATE_PATH", str(state_path))
     monkeypatch.setenv("ALPACA_API_KEY", "key-secret-value")
     monkeypatch.setenv("ALPACA_API_SECRET", "secret-secret-value")
@@ -103,12 +99,10 @@ def test_emits_railway_markers_on_success(monkeypatch, tmp_path, capsys):
 
 
 def test_report_checker_failure_is_reported_without_retry(monkeypatch, tmp_path, capsys):
-    marker = tmp_path / "marker.json"
     state_path = tmp_path / "state" / "paper_daily_state.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setenv("TRADING_MODE", "PAPER")
-    monkeypatch.setenv("RAILWAY_RUN_MARKER_PATH", str(marker))
     monkeypatch.setenv("PAPER_DAILY_STATE_PATH", str(state_path))
 
     calls = {"runner": 0}
@@ -161,10 +155,7 @@ def test_main_reports_safe_failure(monkeypatch, capsys):
 
 
 def test_startup_runtime_error_after_market_check_reports_stage_and_safe_message(monkeypatch, tmp_path, capsys):
-    marker = tmp_path / "marker.json"
-
     monkeypatch.setenv("TRADING_MODE", "PAPER")
-    monkeypatch.setenv("RAILWAY_RUN_MARKER_PATH", str(marker))
     monkeypatch.setenv("PAPER_DAILY_STATE_PATH", str(tmp_path / "paper_daily_state.json"))
 
     def failing_runner(**kwargs):
@@ -190,11 +181,8 @@ def test_startup_runtime_error_after_market_check_reports_stage_and_safe_message
     assert "abc123" not in failed
 
 
-def test_runs_one_day_and_writes_marker(monkeypatch, tmp_path):
-    marker = tmp_path / "marker.json"
-
+def test_runs_one_day_with_expected_runner_args(monkeypatch):
     monkeypatch.setenv("TRADING_MODE", "PAPER")
-    monkeypatch.setenv("RAILWAY_RUN_MARKER_PATH", str(marker))
 
     captured = {}
 
@@ -217,6 +205,3 @@ def test_runs_one_day_and_writes_marker(monkeypatch, tmp_path):
     assert captured["load_env_file"] is False
     assert captured["dry_run"] is False
     assert captured["submit_enabled"] is True
-    assert marker.exists()
-    marker_data = json.loads(marker.read_text(encoding="utf-8"))
-    assert marker_data["market_date"] == "2026-07-08"
