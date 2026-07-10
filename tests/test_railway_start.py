@@ -61,11 +61,20 @@ def test_emits_railway_markers_on_success(monkeypatch, tmp_path, capsys):
             "report_path": "TWO_WEEK_REPORT.md",
         }
 
+    def fake_report_checker(summary_dir=None, print_fn=print):
+        print_fn("latest report date: 2026-07-08")
+        print_fn("did bot run?: yes")
+        print_fn("did it submit an order?: yes")
+        print_fn("submitted=True")
+        print_fn("order_id: paper-order-1")
+        print_fn("stop_reason: approved")
+        print_fn("review_required: False")
+
     monkeypatch.setattr(railway_start, "run_two_week_paper_runner", fake_runner)
+    monkeypatch.setattr(railway_start.report_checker, "check_latest_report", fake_report_checker)
 
     result = railway_start.run_railway_job(now=datetime(2026, 7, 8, 9, 0, tzinfo=EASTERN_TZ))
     output = capsys.readouterr().out.splitlines()
-    expected_summary = Path(railway_start.__file__).resolve().parent / "daily_summaries" / "2026-07-08.md"
 
     assert result["ran"] is True
     assert output == [
@@ -74,10 +83,59 @@ def test_emits_railway_markers_on_success(monkeypatch, tmp_path, capsys):
         "PAPER_MODE_CONFIRMED",
         "ACCOUNT_CHECK_STARTED",
         "MARKET_CHECK_STARTED",
+        "REPORT_CHECKER_STARTED",
+        "latest report date: 2026-07-08",
+        "did bot run?: yes",
+        "did it submit an order?: yes",
+        "submitted=True",
+        "order_id: paper-order-1",
+        "stop_reason: approved",
+        "review_required: False",
+        "REPORT_CHECKER_COMPLETED",
         "RAILWAY_JOB_COMPLETED market_date=2026-07-08 status=completed",
     ]
     assert "key-secret-value" not in "\n".join(output)
     assert "secret-secret-value" not in "\n".join(output)
+
+
+def test_report_checker_failure_is_reported_without_retry(monkeypatch, tmp_path, capsys):
+    marker = tmp_path / "marker.json"
+
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("RAILWAY_RUN_MARKER_PATH", str(marker))
+
+    calls = {"runner": 0}
+
+    def fake_runner(**kwargs):
+        calls["runner"] += 1
+        return {
+            "days_processed": 1,
+            "review_required": False,
+            "stop_reason": "completed",
+            "report_path": "TWO_WEEK_REPORT.md",
+        }
+
+    def failing_report_checker(summary_dir=None, print_fn=print):
+        raise RuntimeError("report checker boom")
+
+    monkeypatch.setattr(railway_start, "run_two_week_paper_runner", fake_runner)
+    monkeypatch.setattr(railway_start.report_checker, "check_latest_report", failing_report_checker)
+
+    result = railway_start.run_railway_job(now=datetime(2026, 7, 8, 9, 0, tzinfo=EASTERN_TZ))
+    output = capsys.readouterr().out.splitlines()
+
+    assert result["ran"] is True
+    assert calls["runner"] == 1
+    assert output == [
+        "RAILWAY_JOB_STARTED",
+        "TRADING_MODE value=PAPER",
+        "PAPER_MODE_CONFIRMED",
+        "ACCOUNT_CHECK_STARTED",
+        "MARKET_CHECK_STARTED",
+        "REPORT_CHECKER_STARTED",
+        "REPORT_CHECKER_FAILED",
+        "RAILWAY_JOB_COMPLETED market_date=2026-07-08 status=completed",
+    ]
 
 
 def test_main_reports_safe_failure(monkeypatch, capsys):

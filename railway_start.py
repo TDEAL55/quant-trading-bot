@@ -5,6 +5,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from logger_setup import logger
+import report_checker
 from two_week_paper_runner import run_two_week_paper_runner
 
 
@@ -82,6 +83,15 @@ def run_railway_job(now=None):
     )
 
     _write_last_run(marker_path, market_date)
+    _emit_railway_log("REPORT_CHECKER_STARTED")
+    try:
+        report_checker.check_latest_report(
+            summary_dir=Path(__file__).resolve().parent / "daily_summaries",
+            print_fn=print,
+        )
+        _emit_railway_log("REPORT_CHECKER_COMPLETED")
+    except Exception:
+        _emit_railway_log("REPORT_CHECKER_FAILED")
     logger.info(
         "railway_start completed market_date=%s days_processed=%s review_required=%s",
         market_date,
