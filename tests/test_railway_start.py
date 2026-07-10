@@ -47,9 +47,12 @@ def test_skips_if_already_ran_for_market_day(monkeypatch, tmp_path):
 
 def test_emits_railway_markers_on_success(monkeypatch, tmp_path, capsys):
     marker = tmp_path / "marker.json"
+    state_path = tmp_path / "state" / "paper_daily_state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setenv("TRADING_MODE", "PAPER")
     monkeypatch.setenv("RAILWAY_RUN_MARKER_PATH", str(marker))
+    monkeypatch.setenv("PAPER_DAILY_STATE_PATH", str(state_path))
     monkeypatch.setenv("ALPACA_API_KEY", "key-secret-value")
     monkeypatch.setenv("ALPACA_API_SECRET", "secret-secret-value")
 
@@ -81,6 +84,7 @@ def test_emits_railway_markers_on_success(monkeypatch, tmp_path, capsys):
         "RAILWAY_JOB_STARTED",
         "TRADING_MODE value=PAPER",
         "PAPER_MODE_CONFIRMED",
+        "STATE_CHECK STATE_PATH_CONFIGURED=True STATE_DIRECTORY_EXISTS=True STATE_DIRECTORY_WRITABLE=True",
         "ACCOUNT_CHECK_STARTED",
         "MARKET_CHECK_STARTED",
         "REPORT_CHECKER_STARTED",
@@ -100,9 +104,12 @@ def test_emits_railway_markers_on_success(monkeypatch, tmp_path, capsys):
 
 def test_report_checker_failure_is_reported_without_retry(monkeypatch, tmp_path, capsys):
     marker = tmp_path / "marker.json"
+    state_path = tmp_path / "state" / "paper_daily_state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setenv("TRADING_MODE", "PAPER")
     monkeypatch.setenv("RAILWAY_RUN_MARKER_PATH", str(marker))
+    monkeypatch.setenv("PAPER_DAILY_STATE_PATH", str(state_path))
 
     calls = {"runner": 0}
 
@@ -130,6 +137,7 @@ def test_report_checker_failure_is_reported_without_retry(monkeypatch, tmp_path,
         "RAILWAY_JOB_STARTED",
         "TRADING_MODE value=PAPER",
         "PAPER_MODE_CONFIRMED",
+        "STATE_CHECK STATE_PATH_CONFIGURED=True STATE_DIRECTORY_EXISTS=True STATE_DIRECTORY_WRITABLE=True",
         "ACCOUNT_CHECK_STARTED",
         "MARKET_CHECK_STARTED",
         "REPORT_CHECKER_STARTED",
@@ -148,8 +156,38 @@ def test_main_reports_safe_failure(monkeypatch, capsys):
     output = capsys.readouterr().out.splitlines()
 
     assert exit_code == 1
-    assert output[-1] == "RAILWAY_JOB_FAILED error=RuntimeError"
+    assert output == []
     assert "secret-value" not in "\n".join(output)
+
+
+def test_startup_runtime_error_after_market_check_reports_stage_and_safe_message(monkeypatch, tmp_path, capsys):
+    marker = tmp_path / "marker.json"
+
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("RAILWAY_RUN_MARKER_PATH", str(marker))
+    monkeypatch.setenv("PAPER_DAILY_STATE_PATH", str(tmp_path / "paper_daily_state.json"))
+
+    def failing_runner(**kwargs):
+        raise RuntimeError("Missing required Alpaca credentials ALPACA_API_KEY=secret-value authorization=Bearer abc123")
+
+    monkeypatch.setattr(railway_start, "run_two_week_paper_runner", failing_runner)
+
+    with pytest.raises(RuntimeError, match="Missing required Alpaca credentials"):
+        railway_start.run_railway_job(now=datetime(2026, 7, 8, 9, 0, tzinfo=EASTERN_TZ))
+
+    output = capsys.readouterr().out.splitlines()
+    assert output[0] == "RAILWAY_JOB_STARTED"
+    assert "PAPER_MODE_CONFIRMED" in output
+    assert "ACCOUNT_CHECK_STARTED" in output
+    assert "MARKET_CHECK_STARTED" in output
+    failed_lines = [line for line in output if line.startswith("RAILWAY_JOB_FAILED ")]
+    assert len(failed_lines) == 1
+    failed = failed_lines[0]
+    assert "RAILWAY_JOB_STAGE=paper_runner_start" in failed
+    assert "RAILWAY_JOB_ERROR_TYPE=RuntimeError" in failed
+    assert "RAILWAY_JOB_ERROR_MESSAGE=" in failed
+    assert "secret-value" not in failed
+    assert "abc123" not in failed
 
 
 def test_runs_one_day_and_writes_marker(monkeypatch, tmp_path):
