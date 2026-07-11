@@ -118,14 +118,17 @@ class MockOrderManager:
         }
 
 
-def fake_prices(start="2025-01-01", periods=220):
+def fake_prices(start="2026-01-01", periods=220):
     idx = pd.date_range(start=start, periods=periods, freq="D")
     return pd.DataFrame({"close": pd.Series(range(periods), index=idx, dtype=float)})
 
 
-def fake_prices_with_last_close(last_close, start="2025-01-01", periods=220):
+def fake_prices_with_last_close(last_close, start="2026-01-01", periods=220):
     frame = fake_prices(start=start, periods=periods)
-    frame.iloc[-1, frame.columns.get_loc("close")] = float(last_close)
+    eval_day = pd.Timestamp("2026-07-01")
+    eligible = frame.index[frame.index <= eval_day]
+    target_index = eligible[-1] if len(eligible) else frame.index[-1]
+    frame.loc[target_index, "close"] = float(last_close)
     return frame
 
 
@@ -218,7 +221,7 @@ def test_data_missing_skips_safely(monkeypatch, tmp_path):
 
     assert result["days_processed"] == 14
     sample_summary = sorted(output_dir.glob("*.md"))[0].read_text(encoding="utf-8")
-    assert "reason: data missing" in sample_summary
+    assert "reason: market data missing" in sample_summary
 
 
 def test_buy_signal_uses_existing_strategy_and_submits_at_most_one_per_day(monkeypatch, tmp_path):
@@ -559,6 +562,107 @@ def test_preflight_is_read_only_and_does_not_submit(monkeypatch, tmp_path, capsy
     assert "PAPER_ACCOUNT_AUTHENTICATED" in output
     assert "PAPER_PREFLIGHT_COMPLETED" in output
     assert client.submit_calls == 0
+
+
+def test_signal_diagnostics_buy_path(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+
+    two_week_paper_runner.run_two_week_paper_runner(
+        start_day=date(2026, 7, 1),
+        days=1,
+        output_dir=tmp_path / "summaries",
+        report_path=tmp_path / "report.md",
+        dry_run=True,
+        submit_enabled=False,
+        trading_client_factory=lambda **kwargs: MockTradingClient(is_open=True, clock_timestamp=datetime(2026, 7, 1, 10, 0, 0)),
+        market_data_loader=lambda *args, **kwargs: fake_prices_with_last_close(100.0),
+        signal_generator=lambda *args, **kwargs: "buy",
+        order_manager_factory=lambda **kwargs: MockOrderManager(**kwargs),
+    )
+
+    output = capsys.readouterr().out.splitlines()
+    assert any(line.startswith("SIGNAL_EVALUATION_STARTED symbol=SPY") for line in output)
+    assert any("latest_market_data_timestamp=" in line for line in output if line.startswith("SIGNAL_EVALUATION_STARTED"))
+    assert any("latest_price=" in line for line in output if line.startswith("SIGNAL_EVALUATION_STARTED"))
+    assert any("short_moving_average=" in line for line in output if line.startswith("SIGNAL_EVALUATION_STARTED"))
+    assert any("long_moving_average=" in line for line in output if line.startswith("SIGNAL_EVALUATION_STARTED"))
+    assert "SIGNAL_EVALUATION_COMPLETED generated_signal=BUY" in output
+
+
+def test_signal_diagnostics_hold_path(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+
+    two_week_paper_runner.run_two_week_paper_runner(
+        start_day=date(2026, 7, 1),
+        days=1,
+        output_dir=tmp_path / "summaries",
+        report_path=tmp_path / "report.md",
+        dry_run=True,
+        submit_enabled=False,
+        trading_client_factory=lambda **kwargs: MockTradingClient(is_open=True, clock_timestamp=datetime(2026, 7, 1, 10, 0, 0)),
+        market_data_loader=lambda *args, **kwargs: fake_prices_with_last_close(100.0),
+        signal_generator=lambda *args, **kwargs: "hold",
+        order_manager_factory=lambda **kwargs: MockOrderManager(**kwargs),
+    )
+
+    output = capsys.readouterr().out.splitlines()
+    assert any(line.startswith("SIGNAL_EVALUATION_STARTED symbol=SPY") for line in output)
+    assert "SIGNAL_EVALUATION_COMPLETED generated_signal=HOLD" in output
+
+
+def test_missing_data_blocks_trading_with_clear_reason(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+
+    two_week_paper_runner.run_two_week_paper_runner(
+        start_day=date(2026, 7, 1),
+        days=1,
+        output_dir=tmp_path / "summaries",
+        report_path=tmp_path / "report.md",
+        dry_run=True,
+        submit_enabled=False,
+        trading_client_factory=lambda **kwargs: MockTradingClient(is_open=True, clock_timestamp=datetime(2026, 7, 1, 10, 0, 0)),
+        market_data_loader=lambda *args, **kwargs: pd.DataFrame({"close": []}),
+        signal_generator=lambda *args, **kwargs: "buy",
+        order_manager_factory=lambda **kwargs: MockOrderManager(**kwargs),
+    )
+
+    output = capsys.readouterr().out
+    assert "MARKET_DATA_BLOCKED reason=missing" in output
+    summary = (tmp_path / "summaries" / "2026-07-01.md").read_text(encoding="utf-8")
+    assert "reason: market data missing" in summary
+
+
+def test_stale_data_blocks_trading_with_clear_reason(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+
+    stale_idx = pd.date_range(start="2026-06-20", periods=10, freq="D")
+    stale_data = pd.DataFrame({"close": pd.Series(range(10), index=stale_idx, dtype=float)})
+
+    two_week_paper_runner.run_two_week_paper_runner(
+        start_day=date(2026, 7, 1),
+        days=1,
+        output_dir=tmp_path / "summaries",
+        report_path=tmp_path / "report.md",
+        dry_run=True,
+        submit_enabled=False,
+        trading_client_factory=lambda **kwargs: MockTradingClient(is_open=True, clock_timestamp=datetime(2026, 7, 1, 10, 0, 0)),
+        market_data_loader=lambda *args, **kwargs: stale_data,
+        signal_generator=lambda *args, **kwargs: "buy",
+        order_manager_factory=lambda **kwargs: MockOrderManager(**kwargs),
+    )
+
+    output = capsys.readouterr().out
+    assert "MARKET_DATA_BLOCKED reason=stale" in output
+    summary = (tmp_path / "summaries" / "2026-07-01.md").read_text(encoding="utf-8")
+    assert "reason: market data stale" in summary
 
 
 def test_state_survives_new_runner_instance(monkeypatch, tmp_path):

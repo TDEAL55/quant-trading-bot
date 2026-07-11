@@ -111,6 +111,41 @@ def _emit_paper_run_error(stage, exc):
     )
 
 
+def _safe_number(value, digits=6):
+    try:
+        return round(float(value), digits)
+    except (TypeError, ValueError):
+        return None
+
+
+def _compute_signal_diagnostics(price_series):
+    if price_series is None or price_series.empty:
+        return {
+            "latest_timestamp": None,
+            "latest_price": None,
+            "short_ma": None,
+            "long_ma": None,
+        }
+
+    latest_ts = price_series.index[-1]
+    latest_price = _safe_number(price_series.iloc[-1])
+    short_ma = _safe_number(price_series.rolling(20).mean().iloc[-1])
+    long_ma = _safe_number(price_series.rolling(50).mean().iloc[-1])
+    return {
+        "latest_timestamp": latest_ts,
+        "latest_price": latest_price,
+        "short_ma": short_ma,
+        "long_ma": long_ma,
+    }
+
+
+def _normalized_signal(signal):
+    text = str(signal or "").strip().upper()
+    if text in {"BUY", "SELL", "HOLD"}:
+        return text
+    return text or "UNKNOWN"
+
+
 def _daily_state_path():
     configured = os.getenv("PAPER_DAILY_STATE_PATH")
     if configured:
@@ -459,24 +494,55 @@ def run_two_week_paper_runner(
 
             if not hasattr(prices.index, "date"):
                 summary["decision"] = "skip"
-                summary["reason"] = "data missing"
+                summary["reason"] = "market data missing"
+                _emit_runner_log("MARKET_DATA_BLOCKED", reason="missing")
                 summaries.append(summary)
                 _write_daily_summary(summary, summaries_dir)
-                logger.info("two_week_paper_runner day=%s skipped reason=data missing", summary["date"])
+                logger.info("two_week_paper_runner day=%s skipped reason=market data missing", summary["date"])
                 continue
 
             day_prices = prices[prices.index.date <= current_day]
             if day_prices.empty or "close" not in day_prices.columns:
                 summary["decision"] = "skip"
-                summary["reason"] = "data missing"
+                summary["reason"] = "market data missing"
+                _emit_runner_log("MARKET_DATA_BLOCKED", reason="missing")
                 summaries.append(summary)
                 _write_daily_summary(summary, summaries_dir)
-                logger.info("two_week_paper_runner day=%s skipped reason=data missing", summary["date"])
+                logger.info("two_week_paper_runner day=%s skipped reason=market data missing", summary["date"])
+                continue
+
+            diagnostics = _compute_signal_diagnostics(day_prices["close"])
+            latest_ts = diagnostics["latest_timestamp"]
+            latest_ts_date = latest_ts.date() if hasattr(latest_ts, "date") else None
+            if latest_ts is None or latest_ts_date is None or latest_ts_date < current_day:
+                summary["decision"] = "skip"
+                summary["reason"] = "market data stale"
+                _emit_runner_log(
+                    "MARKET_DATA_BLOCKED",
+                    reason="stale",
+                    symbol="SPY",
+                    latest_market_data_timestamp=latest_ts,
+                )
+                summaries.append(summary)
+                _write_daily_summary(summary, summaries_dir)
+                logger.info("two_week_paper_runner day=%s skipped reason=market data stale", summary["date"])
                 continue
 
             paper_run_stage = "signal_generation"
+            _emit_runner_log(
+                "SIGNAL_EVALUATION_STARTED",
+                symbol="SPY",
+                latest_market_data_timestamp=diagnostics["latest_timestamp"],
+                latest_price=diagnostics["latest_price"],
+                short_moving_average=diagnostics["short_ma"],
+                long_moving_average=diagnostics["long_ma"],
+            )
             signal = signal_generator(day_prices["close"], 20, 50)
             summary["signal"] = signal
+            _emit_runner_log(
+                "SIGNAL_EVALUATION_COMPLETED",
+                generated_signal=_normalized_signal(signal),
+            )
 
             if signal != "buy":
                 summary["decision"] = "skip"
