@@ -5,7 +5,7 @@ This project is a research-only Python bot for exploring quantitative trading id
 ## Current project status
 - Verified working modules: market data download, moving-average strategy, backtest, paper broker adapter, simulation runner, dashboard, trade journal, replay engine, and error handling.
 - Safety protections: LIVE mode is blocked, the broker adapter is read-only, and simulation-only decisions are logged locally.
-- Verification: the full test suite currently passes with 31 tests.
+- Verification: the full test suite currently passes in CI/local for the active branch.
 
 ## What it does
 - Downloads historical price data
@@ -69,7 +69,9 @@ This project can run as a Railway scheduled worker in paper-trading mode only.
 ### Files used by Railway
 - `Procfile` with worker entrypoint: `python railway_start.py`
 - `railway_start.py` runs exactly one safe market-day cycle by calling `run_two_week_paper_runner(days=1)`
-- `railway_start.py` uses a marker file (`.railway_last_run.json`) to avoid duplicate same-day runs
+- `two_week_paper_runner.py` keeps JSON daily safety state at `PAPER_DAILY_STATE_PATH` (or default local/cloud path)
+- `monitoring_recorder.py` writes sanitized monitoring rows to PostgreSQL when `DATABASE_URL` is configured
+- `dashboard_app.py` is a read-only Streamlit dashboard that reads PostgreSQL only
 
 ### Required Railway environment variables
 Set these in Railway service variables (do not commit credentials):
@@ -77,10 +79,13 @@ Set these in Railway service variables (do not commit credentials):
 - `TRADING_MODE=PAPER`
 - `ALPACA_API_KEY=<your_paper_key>`
 - `ALPACA_API_SECRET=<your_paper_secret>`
+- `DATABASE_URL=<railway_postgres_url>`
+- `DASHBOARD_PASSWORD=<strong_password_for_dashboard_access>`
 
 Optional:
 
-- `RAILWAY_RUN_MARKER_PATH=.railway_last_run.json`
+- `PAPER_DAILY_STATE_PATH=/app/state/paper_daily_state.json`
+- `BOT_RUN_ID=<optional_external_run_id_for_idempotency>`
 
 ### Scheduler setup in Railway
 Create a Railway cron/scheduled job that triggers once per market day. Recommended schedule:
@@ -88,3 +93,44 @@ Create a Railway cron/scheduled job that triggers once per market day. Recommend
 - Weekdays once per day before/around market open, e.g. `55 9 * * 1-5` (configure timezone in Railway)
 
 The runner performs a market-open check and skips safely when closed.
+
+## Read-only monitoring dashboard (v1)
+
+### Architecture
+- Worker writes sanitized run snapshots to PostgreSQL after each run.
+- Dashboard reads PostgreSQL only.
+- Dashboard never receives Alpaca API credentials.
+- Existing JSON safety state remains active for order limits/cooldowns.
+
+### Security guarantees
+- Read-only UI. No buy/sell/cancel/submit actions.
+- PAPER mode only. LIVE remains blocked.
+- Password gate via `DASHBOARD_PASSWORD` env variable only.
+- Sanitized monitoring fields (no API keys/secrets/authorization headers/account numbers/full order IDs).
+- Monitoring DB write failures are non-blocking and cannot trigger extra orders.
+
+### Database setup
+Schema migration file:
+- `migrations/001_monitoring_schema.sql`
+
+Tables:
+- `bot_runs`
+- `signal_snapshots`
+- `paper_account_snapshots`
+- `sanitized_order_events`
+
+Retention helper SQL is available in `MonitoringDatabase.retention_sql()` and is not auto-executed.
+
+### Local run (worker + dashboard)
+1. Set environment variables:
+	- `TRADING_MODE=PAPER`
+	- `ALPACA_API_KEY=...`
+	- `ALPACA_API_SECRET=...`
+	- `DATABASE_URL=...`
+	- `DASHBOARD_PASSWORD=...`
+2. Start worker once:
+	- `python railway_start.py`
+3. Start dashboard:
+	- `streamlit run dashboard_app.py`
+
+The dashboard must not be connected to LIVE mode or any order-submission endpoint.

@@ -4,6 +4,7 @@ import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from alpaca.trading.client import TradingClient
 from dotenv import load_dotenv
@@ -12,6 +13,7 @@ from logger_setup import logger
 from market_data import download_price_data
 from paper_order import create_paper_order_manager
 from strategy import generate_signal
+from monitoring_recorder import MonitoringRecorder, mask_identifier
 
 
 MAX_SUBMITTED_ORDERS_PER_DAY = 3
@@ -109,6 +111,23 @@ def _emit_paper_run_error(stage, exc):
         PAPER_RUN_ERROR_TYPE=type(exc).__name__,
         PAPER_RUN_ERROR_MESSAGE=_safe_error_message(exc),
     )
+
+
+def _safe_monitoring_call(recorder, method_name, **payload):
+    if recorder is None:
+        return
+    method = getattr(recorder, method_name, None)
+    if not callable(method):
+        return
+    try:
+        method(payload)
+    except Exception as exc:
+        _emit_runner_log(
+            "MONITORING_DB_WARNING",
+            stage=method_name,
+            error_type=type(exc).__name__,
+            error_message=_safe_error_message(exc),
+        )
 
 
 def _safe_number(value, digits=6):
@@ -282,6 +301,7 @@ def run_two_week_paper_runner(
     market_data_loader=download_price_data,
     signal_generator=generate_signal,
     order_manager_factory=create_paper_order_manager,
+    monitoring_recorder_factory=MonitoringRecorder.from_env,
     dry_run=True,
     submit_enabled=False,
 ):
@@ -305,6 +325,33 @@ def run_two_week_paper_runner(
         raise RuntimeError("Missing required Alpaca credentials")
 
     client = trading_client_factory(api_key=api_key, secret_key=api_secret, paper=True)
+
+    run_id = os.getenv("BOT_RUN_ID") or f"run-{uuid4().hex}"
+    recorder = None
+    if callable(monitoring_recorder_factory):
+        try:
+            recorder = monitoring_recorder_factory(print_fn=print)
+            if hasattr(recorder, "run_id"):
+                recorder.run_id = run_id
+            if hasattr(recorder, "ensure_schema"):
+                try:
+                    recorder.ensure_schema()
+                except Exception as exc:
+                    _emit_runner_log(
+                        "MONITORING_DB_WARNING",
+                        stage="ensure_schema",
+                        error_type=type(exc).__name__,
+                        error_message=_safe_error_message(exc),
+                    )
+        except Exception as exc:
+            _emit_runner_log(
+                "MONITORING_DB_WARNING",
+                stage="recorder_init",
+                error_type=type(exc).__name__,
+                error_message=_safe_error_message(exc),
+            )
+            recorder = None
+
     preflight_account, preflight_clock = _emit_preflight_logs(client)
 
     state_path = _daily_state_path()
@@ -451,6 +498,26 @@ def run_two_week_paper_runner(
                 for position in positions
             ]
 
+            pending_order_count = 0
+            get_orders = getattr(client, "get_orders", None)
+            if callable(get_orders):
+                try:
+                    pending_order_count = len(get_orders() or [])
+                except Exception:
+                    pending_order_count = 0
+
+            _safe_monitoring_call(
+                recorder,
+                "record_account_snapshot",
+                account_status=account_status,
+                portfolio_value=portfolio_value,
+                cash=cash,
+                buying_power=buying_power,
+                open_positions=len(summary["positions"]),
+                unrealized_paper_pl=summary["total_pl"] if isinstance(summary["total_pl"], float) else 0.0,
+                pending_orders=pending_order_count,
+            )
+
             if portfolio_value is not None:
                 if baseline_portfolio_value is None:
                     baseline_portfolio_value = portfolio_value
@@ -470,6 +537,18 @@ def run_two_week_paper_runner(
                 summary["decision"] = "stop"
                 summary["reason"] = "daily loss limit hit"
                 summary["errors"] = "REVIEW_REQUIRED"
+                _safe_monitoring_call(
+                    recorder,
+                    "record_signal_snapshot",
+                    market_date=summary["date"],
+                    market_open=market_open,
+                    symbol="SPY",
+                    generated_signal="HOLD",
+                    trade_or_skip_reason=summary["reason"],
+                    daily_loss_stop_status="triggered",
+                    max_daily_orders=MAX_SUBMITTED_ORDERS_PER_DAY,
+                    max_daily_submitted_notional=MAX_SUBMITTED_NOTIONAL_PER_DAY,
+                )
                 summaries.append(summary)
                 _write_daily_summary(summary, summaries_dir)
                 stop_reason = "daily loss limit hit"
@@ -479,6 +558,18 @@ def run_two_week_paper_runner(
                 summary["decision"] = "stop"
                 summary["reason"] = "total loss limit hit"
                 summary["errors"] = "REVIEW_REQUIRED"
+                _safe_monitoring_call(
+                    recorder,
+                    "record_signal_snapshot",
+                    market_date=summary["date"],
+                    market_open=market_open,
+                    symbol="SPY",
+                    generated_signal="HOLD",
+                    trade_or_skip_reason=summary["reason"],
+                    daily_loss_stop_status="triggered",
+                    max_daily_orders=MAX_SUBMITTED_ORDERS_PER_DAY,
+                    max_daily_submitted_notional=MAX_SUBMITTED_NOTIONAL_PER_DAY,
+                )
                 summaries.append(summary)
                 _write_daily_summary(summary, summaries_dir)
                 stop_reason = "total loss limit hit"
@@ -487,6 +578,17 @@ def run_two_week_paper_runner(
             if not market_open:
                 summary["decision"] = "skip"
                 summary["reason"] = "market closed"
+                _safe_monitoring_call(
+                    recorder,
+                    "record_signal_snapshot",
+                    market_date=summary["date"],
+                    market_open=False,
+                    symbol="SPY",
+                    generated_signal="HOLD",
+                    trade_or_skip_reason=summary["reason"],
+                    max_daily_orders=MAX_SUBMITTED_ORDERS_PER_DAY,
+                    max_daily_submitted_notional=MAX_SUBMITTED_NOTIONAL_PER_DAY,
+                )
                 summaries.append(summary)
                 _write_daily_summary(summary, summaries_dir)
                 logger.info("two_week_paper_runner day=%s skipped reason=market closed", summary["date"])
@@ -496,6 +598,17 @@ def run_two_week_paper_runner(
                 summary["decision"] = "skip"
                 summary["reason"] = "market data missing"
                 _emit_runner_log("MARKET_DATA_BLOCKED", reason="missing")
+                _safe_monitoring_call(
+                    recorder,
+                    "record_signal_snapshot",
+                    market_date=summary["date"],
+                    market_open=True,
+                    symbol="SPY",
+                    generated_signal="HOLD",
+                    trade_or_skip_reason=summary["reason"],
+                    max_daily_orders=MAX_SUBMITTED_ORDERS_PER_DAY,
+                    max_daily_submitted_notional=MAX_SUBMITTED_NOTIONAL_PER_DAY,
+                )
                 summaries.append(summary)
                 _write_daily_summary(summary, summaries_dir)
                 logger.info("two_week_paper_runner day=%s skipped reason=market data missing", summary["date"])
@@ -506,6 +619,17 @@ def run_two_week_paper_runner(
                 summary["decision"] = "skip"
                 summary["reason"] = "market data missing"
                 _emit_runner_log("MARKET_DATA_BLOCKED", reason="missing")
+                _safe_monitoring_call(
+                    recorder,
+                    "record_signal_snapshot",
+                    market_date=summary["date"],
+                    market_open=True,
+                    symbol="SPY",
+                    generated_signal="HOLD",
+                    trade_or_skip_reason=summary["reason"],
+                    max_daily_orders=MAX_SUBMITTED_ORDERS_PER_DAY,
+                    max_daily_submitted_notional=MAX_SUBMITTED_NOTIONAL_PER_DAY,
+                )
                 summaries.append(summary)
                 _write_daily_summary(summary, summaries_dir)
                 logger.info("two_week_paper_runner day=%s skipped reason=market data missing", summary["date"])
@@ -523,6 +647,21 @@ def run_two_week_paper_runner(
                     symbol="SPY",
                     latest_market_data_timestamp=latest_ts,
                 )
+                _safe_monitoring_call(
+                    recorder,
+                    "record_signal_snapshot",
+                    market_date=summary["date"],
+                    market_open=True,
+                    latest_market_data_timestamp=str(latest_ts) if latest_ts is not None else None,
+                    symbol="SPY",
+                    latest_price=diagnostics["latest_price"],
+                    short_moving_average=diagnostics["short_ma"],
+                    long_moving_average=diagnostics["long_ma"],
+                    generated_signal="HOLD",
+                    trade_or_skip_reason=summary["reason"],
+                    max_daily_orders=MAX_SUBMITTED_ORDERS_PER_DAY,
+                    max_daily_submitted_notional=MAX_SUBMITTED_NOTIONAL_PER_DAY,
+                )
                 summaries.append(summary)
                 _write_daily_summary(summary, summaries_dir)
                 logger.info("two_week_paper_runner day=%s skipped reason=market data stale", summary["date"])
@@ -539,14 +678,43 @@ def run_two_week_paper_runner(
             )
             signal = signal_generator(day_prices["close"], 20, 50)
             summary["signal"] = signal
+            normalized_signal = _normalized_signal(signal)
             _emit_runner_log(
                 "SIGNAL_EVALUATION_COMPLETED",
-                generated_signal=_normalized_signal(signal),
+                generated_signal=normalized_signal,
+            )
+
+            _safe_monitoring_call(
+                recorder,
+                "record_signal_snapshot",
+                market_date=summary["date"],
+                market_open=True,
+                latest_market_data_timestamp=str(diagnostics["latest_timestamp"]) if diagnostics["latest_timestamp"] is not None else None,
+                symbol="SPY",
+                latest_price=diagnostics["latest_price"],
+                short_moving_average=diagnostics["short_ma"],
+                long_moving_average=diagnostics["long_ma"],
+                generated_signal=normalized_signal,
+                trade_or_skip_reason="signal evaluated",
+                max_daily_orders=MAX_SUBMITTED_ORDERS_PER_DAY,
+                max_daily_submitted_notional=MAX_SUBMITTED_NOTIONAL_PER_DAY,
             )
 
             if signal != "buy":
                 summary["decision"] = "skip"
                 summary["reason"] = "signal not buy"
+                _safe_monitoring_call(
+                    recorder,
+                    "record_order_event",
+                    market_date=summary["date"],
+                    signal=normalized_signal,
+                    submitted=False,
+                    symbol="SPY",
+                    notional=ORDER_NOTIONAL,
+                    safe_order_status="skipped",
+                    stop_reason=summary["reason"],
+                    review_required=review_required,
+                )
                 summaries.append(summary)
                 _write_daily_summary(summary, summaries_dir)
                 logger.info("two_week_paper_runner day=%s skipped reason=signal not buy", summary["date"])
@@ -575,6 +743,19 @@ def run_two_week_paper_runner(
                 _emit_runner_log("DAILY_ORDER_LIMIT_REACHED", limit="order_count", value=daily_order_count)
                 summary["decision"] = "skip"
                 summary["reason"] = "daily order count limit reached"
+                _safe_monitoring_call(
+                    recorder,
+                    "record_signal_snapshot",
+                    market_date=summary["date"],
+                    market_open=True,
+                    symbol="SPY",
+                    generated_signal=normalized_signal,
+                    trade_or_skip_reason=summary["reason"],
+                    daily_submitted_order_count=daily_order_count,
+                    max_daily_orders=MAX_SUBMITTED_ORDERS_PER_DAY,
+                    daily_submitted_notional=daily_submitted_notional,
+                    max_daily_submitted_notional=MAX_SUBMITTED_NOTIONAL_PER_DAY,
+                )
                 summaries.append(summary)
                 _write_daily_summary(summary, summaries_dir)
                 continue
@@ -587,6 +768,19 @@ def run_two_week_paper_runner(
                 )
                 summary["decision"] = "skip"
                 summary["reason"] = "daily submitted notional limit reached"
+                _safe_monitoring_call(
+                    recorder,
+                    "record_signal_snapshot",
+                    market_date=summary["date"],
+                    market_open=True,
+                    symbol="SPY",
+                    generated_signal=normalized_signal,
+                    trade_or_skip_reason=summary["reason"],
+                    daily_submitted_order_count=daily_order_count,
+                    max_daily_orders=MAX_SUBMITTED_ORDERS_PER_DAY,
+                    daily_submitted_notional=daily_submitted_notional,
+                    max_daily_submitted_notional=MAX_SUBMITTED_NOTIONAL_PER_DAY,
+                )
                 summaries.append(summary)
                 _write_daily_summary(summary, summaries_dir)
                 continue
@@ -596,6 +790,20 @@ def run_two_week_paper_runner(
                 _emit_runner_log("DUPLICATE_SIGNAL_BLOCKED", signal_identifier=signal_id)
                 summary["decision"] = "skip"
                 summary["reason"] = "duplicate signal detected"
+                _safe_monitoring_call(
+                    recorder,
+                    "record_signal_snapshot",
+                    market_date=summary["date"],
+                    market_open=True,
+                    symbol="SPY",
+                    generated_signal=normalized_signal,
+                    trade_or_skip_reason=summary["reason"],
+                    daily_submitted_order_count=daily_order_count,
+                    max_daily_orders=MAX_SUBMITTED_ORDERS_PER_DAY,
+                    daily_submitted_notional=daily_submitted_notional,
+                    max_daily_submitted_notional=MAX_SUBMITTED_NOTIONAL_PER_DAY,
+                    duplicate_signal_status="blocked",
+                )
                 summaries.append(summary)
                 _write_daily_summary(summary, summaries_dir)
                 continue
@@ -604,6 +812,20 @@ def run_two_week_paper_runner(
             if _has_pending_or_unfilled_order(client, orders):
                 summary["decision"] = "skip"
                 summary["reason"] = "pending or unfilled order exists"
+                _safe_monitoring_call(
+                    recorder,
+                    "record_signal_snapshot",
+                    market_date=summary["date"],
+                    market_open=True,
+                    symbol="SPY",
+                    generated_signal=normalized_signal,
+                    trade_or_skip_reason=summary["reason"],
+                    pending_order_status="blocked",
+                    daily_submitted_order_count=daily_order_count,
+                    max_daily_orders=MAX_SUBMITTED_ORDERS_PER_DAY,
+                    daily_submitted_notional=daily_submitted_notional,
+                    max_daily_submitted_notional=MAX_SUBMITTED_NOTIONAL_PER_DAY,
+                )
                 summaries.append(summary)
                 _write_daily_summary(summary, summaries_dir)
                 continue
@@ -620,6 +842,20 @@ def run_two_week_paper_runner(
                         _emit_runner_log("ORDER_COOLDOWN_ACTIVE", remaining_minutes=max(0, remaining))
                         summary["decision"] = "skip"
                         summary["reason"] = "cooldown active"
+                        _safe_monitoring_call(
+                            recorder,
+                            "record_signal_snapshot",
+                            market_date=summary["date"],
+                            market_open=True,
+                            symbol="SPY",
+                            generated_signal=normalized_signal,
+                            trade_or_skip_reason=summary["reason"],
+                            cooldown_status="active",
+                            daily_submitted_order_count=daily_order_count,
+                            max_daily_orders=MAX_SUBMITTED_ORDERS_PER_DAY,
+                            daily_submitted_notional=daily_submitted_notional,
+                            max_daily_submitted_notional=MAX_SUBMITTED_NOTIONAL_PER_DAY,
+                        )
                         summaries.append(summary)
                         _write_daily_summary(summary, summaries_dir)
                         continue
@@ -651,12 +887,12 @@ def run_two_week_paper_runner(
                     "status": order_result.get("status", order_result.get("reason", "unknown")),
                 }
                 if submitted:
-                    result_fields["order_id"] = order_result.get("order_id", "N/A")
+                    result_fields["order_id"] = mask_identifier(order_result.get("order_id", "N/A"))
                 _emit_runner_log("PAPER_ORDER_SUBMIT_RESULT", **result_fields)
 
             order_record = {
                 "signal_identifier": signal_id,
-                "order_id": order_result.get("order_id"),
+                "order_id": mask_identifier(order_result.get("order_id")),
                 "timestamp": _to_iso_timestamp(_clock_timestamp(clock)),
                 "status": order_result.get("status", order_result.get("reason", "unknown")),
                 "submitted": bool(order_result.get("submitted")),
@@ -676,6 +912,41 @@ def run_two_week_paper_runner(
             if summary["reason"] == "duplicate order rejected":
                 summary["reason"] = "duplicate order detected"
 
+            _safe_monitoring_call(
+                recorder,
+                "record_signal_snapshot",
+                market_date=summary["date"],
+                market_open=True,
+                latest_market_data_timestamp=str(diagnostics["latest_timestamp"]) if diagnostics["latest_timestamp"] is not None else None,
+                symbol="SPY",
+                latest_price=diagnostics["latest_price"],
+                short_moving_average=diagnostics["short_ma"],
+                long_moving_average=diagnostics["long_ma"],
+                generated_signal=normalized_signal,
+                trade_or_skip_reason=summary["reason"],
+                daily_submitted_order_count=day_state.get("daily_order_count", daily_order_count),
+                max_daily_orders=MAX_SUBMITTED_ORDERS_PER_DAY,
+                daily_submitted_notional=day_state.get("daily_submitted_notional", daily_submitted_notional),
+                max_daily_submitted_notional=MAX_SUBMITTED_NOTIONAL_PER_DAY,
+                cooldown_status="inactive",
+                duplicate_signal_status="clear",
+                pending_order_status="clear",
+                daily_loss_stop_status="clear",
+            )
+            _safe_monitoring_call(
+                recorder,
+                "record_order_event",
+                market_date=summary["date"],
+                signal=normalized_signal,
+                submitted=order_record["submitted"],
+                symbol="SPY",
+                notional=ORDER_NOTIONAL,
+                safe_order_status=order_record["status"],
+                stop_reason=summary["reason"],
+                review_required=review_required,
+                order_id_masked=order_record["order_id"],
+            )
+
             summaries.append(summary)
             _write_daily_summary(summary, summaries_dir)
             logger.info(
@@ -693,6 +964,20 @@ def run_two_week_paper_runner(
             summary["order_submitted_or_skipped"] = "skipped"
             summary["reason"] = "error"
             summary["errors"] = f"{type(exc).__name__}: {_safe_error_message(exc)}"
+            _safe_monitoring_call(
+                recorder,
+                "record_order_event",
+                market_date=summary["date"],
+                signal=_normalized_signal(summary.get("signal")),
+                submitted=False,
+                symbol="SPY",
+                notional=ORDER_NOTIONAL,
+                safe_order_status="error",
+                stop_reason=summary["reason"],
+                review_required=review_required,
+                safe_error_type=type(exc).__name__,
+                safe_error_message=_safe_error_message(exc),
+            )
             summaries.append(summary)
             _write_daily_summary(summary, summaries_dir)
             logger.error(
@@ -706,7 +991,38 @@ def run_two_week_paper_runner(
         os.environ["REVIEW_REQUIRED"] = "true"
 
     _write_final_report(final_report, summaries, review_required, stop_reason)
+
+    last_summary = summaries[-1] if summaries else {}
+    last_market_status = "open" if last_summary.get("reason") not in {"market closed"} else "closed"
+    if not summaries:
+        bot_status = "error"
+    elif review_required or last_summary.get("reason") in {"daily loss limit hit", "total loss limit hit", "state corrupted", "state init failed", "error"}:
+        bot_status = "error"
+    elif last_summary.get("decision") == "skip":
+        bot_status = "warning"
+    else:
+        bot_status = "healthy"
+
+    _safe_monitoring_call(
+        recorder,
+        "finalize_run",
+        run_timestamp=datetime.now(timezone.utc).isoformat(),
+        market_date=(start_day or date.today()).isoformat(),
+        trading_mode=mode,
+        market_status=last_market_status,
+        bot_status=bot_status,
+        review_required=review_required,
+        stop_reason=stop_reason,
+        safe_error_type="" if bot_status != "error" else "RuntimeError",
+        safe_error_message=_safe_error_message(last_summary.get("errors", "")),
+        submitted=(last_summary.get("order_submitted_or_skipped") == "submitted") if last_summary else False,
+        symbol="SPY",
+        notional=ORDER_NOTIONAL if last_summary else 0.0,
+        safe_order_status=last_summary.get("reason", "unknown"),
+    )
+
     return {
+        "run_id": run_id,
         "review_required": review_required,
         "stop_reason": stop_reason,
         "days_processed": len(summaries),

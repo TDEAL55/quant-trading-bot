@@ -6,3 +6,5 @@ yfinance==1.5.1
 pytest==9.1.1
 alpaca-py
 pandas-market-calendars
+streamlit
+psycopg[binary]

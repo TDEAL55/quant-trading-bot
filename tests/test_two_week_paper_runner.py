@@ -286,7 +286,7 @@ def test_buy_signal_submits_real_paper_order_and_logs(monkeypatch, tmp_path, cap
     assert any(line.startswith("DAILY_ORDER_COUNT value=") for line in output)
     assert any(line.startswith("DAILY_SUBMITTED_NOTIONAL value=") for line in output)
     assert "PAPER_ORDER_SUBMIT_STARTED date=2026-07-01 symbol=SPY notional=10.0" in output
-    assert any(line.startswith("PAPER_ORDER_SUBMIT_RESULT submitted=True status=accepted order_id=paper-order-") for line in output)
+    assert any(line.startswith("PAPER_ORDER_SUBMIT_RESULT submitted=True status=accepted order_id=") for line in output)
     assert "DAILY_SUMMARY_CREATED date=2026-07-01 path=" + str(output_dir / "2026-07-01.md") in output
     assert report_path.exists()
     assert (output_dir / "2026-07-01.md").exists()
