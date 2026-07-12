@@ -1,5 +1,6 @@
 from monitoring_db import MonitoringDatabase
 from monitoring_recorder import MonitoringRecorder
+import dashboard_app
 
 
 def test_dashboard_queries_work_with_sample_sanitized_records(tmp_path):
@@ -87,3 +88,35 @@ def test_dashboard_queries_work_with_sample_sanitized_records(tmp_path):
     assert latest_account["account_status"] == "ACTIVE"
     assert len(orders) == 1
     assert "xyz987654" not in str(orders[0]["order_id_masked"])
+
+    latest_success = db.fetch_latest_successful_run()
+    view = dashboard_app.build_dashboard_view_model(latest_run, latest_success, latest_signal, latest_account)
+    assert view["bot_health"]["label"] == "Healthy"
+    assert view["market_status"]["label"] == "Open"
+    assert view["generated_signal"] == "BUY"
+    assert view["portfolio_value"] == "$1,005.00"
+    assert view["cash"] == "$995.00"
+    assert view["buying_power"] == "$1,000.00"
+    assert view["unrealized_paper_pl"] == "$5.00"
+
+
+def test_dashboard_view_model_handles_warning_error_and_market_closed_states():
+    warning_view = dashboard_app.build_dashboard_view_model(
+        {"bot_status": "warning", "review_required": 0, "trading_mode": "PAPER"},
+        {},
+        {"market_open": 0, "generated_signal": "HOLD"},
+        {},
+    )
+    assert warning_view["bot_health"]["label"] == "Warning"
+    assert warning_view["market_status"]["label"] == "Closed"
+    assert warning_view["generated_signal"] == "HOLD"
+    assert warning_view["latest_spy_price"] == "Waiting for market data"
+
+    error_view = dashboard_app.build_dashboard_view_model(
+        {"bot_status": "error", "review_required": 1, "trading_mode": "PAPER"},
+        {},
+        {"market_open": 1, "generated_signal": "SELL"},
+        {},
+    )
+    assert error_view["bot_health"]["label"] == "Error"
+    assert error_view["generated_signal"] == "SELL"
