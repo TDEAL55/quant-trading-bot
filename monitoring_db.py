@@ -58,6 +58,45 @@ class MonitoringDatabase:
             return query.replace("?", "%s")
         return query
 
+    def _rollback_safe(self):
+        if not self.enabled:
+            return
+        with contextlib.suppress(Exception):
+            self.conn.rollback()
+
+    def _migration_files(self) -> list[Path]:
+        migrations_dir = Path(__file__).resolve().parent / "migrations"
+        return sorted(migrations_dir.glob("*.sql"), key=lambda p: p.name)
+
+    def _should_run_migration(self, migration_path: Path) -> bool:
+        name = migration_path.name.lower()
+        if self.engine == "sqlite" and "postgres" in name:
+            return False
+        return True
+
+    def execute_script(self, sql_text: str):
+        if not self.enabled:
+            return
+        if self.engine == "sqlite":
+            try:
+                self.conn.executescript(sql_text)
+                self.conn.commit()
+            except Exception:
+                self._rollback_safe()
+                raise
+            return
+
+        cur = self.conn.cursor()
+        try:
+            cur.execute(sql_text)
+            self.conn.commit()
+        except Exception:
+            self._rollback_safe()
+            raise
+        finally:
+            with contextlib.suppress(Exception):
+                cur.close()
+
     def execute(self, query: str, params: tuple[Any, ...] | None = None):
         if not self.enabled:
             return
@@ -65,10 +104,13 @@ class MonitoringDatabase:
         cur = self.conn.cursor()
         try:
             cur.execute(self._adapt_query(query), params)
+            self.conn.commit()
+        except Exception:
+            self._rollback_safe()
+            raise
         finally:
             with contextlib.suppress(Exception):
                 cur.close()
-        self.conn.commit()
 
     def query_all(self, query: str, params: tuple[Any, ...] | None = None) -> list[dict[str, Any]]:
         if not self.enabled:
@@ -78,6 +120,9 @@ class MonitoringDatabase:
         try:
             cur.execute(self._adapt_query(query), params)
             rows = cur.fetchall()
+        except Exception:
+            self._rollback_safe()
+            raise
         finally:
             with contextlib.suppress(Exception):
                 cur.close()
@@ -98,11 +143,11 @@ class MonitoringDatabase:
     def ensure_schema(self):
         if not self.enabled:
             return
-        schema_path = Path(__file__).resolve().parent / "migrations" / "001_monitoring_schema.sql"
-        sql_text = schema_path.read_text(encoding="utf-8")
-        statements = [stmt.strip() for stmt in sql_text.split(";") if stmt.strip()]
-        for stmt in statements:
-            self.execute(stmt)
+        for migration_path in self._migration_files():
+            if not self._should_run_migration(migration_path):
+                continue
+            sql_text = migration_path.read_text(encoding="utf-8")
+            self.execute_script(sql_text)
 
     def insert_bot_run(self, payload: dict[str, Any]):
         self.execute(
