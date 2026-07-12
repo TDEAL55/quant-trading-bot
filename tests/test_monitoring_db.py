@@ -5,6 +5,33 @@ import pytest
 from monitoring_db import MonitoringDatabase
 
 
+class _FakeCursor:
+    def __init__(self, rows, description=None):
+        self._rows = rows
+        self.description = description
+
+    def execute(self, query, params=()):
+        return None
+
+    def fetchall(self):
+        return self._rows
+
+    def close(self):
+        return None
+
+
+class _FakeConnection:
+    def __init__(self, rows, description=None):
+        self._rows = rows
+        self._description = description
+
+    def cursor(self):
+        return _FakeCursor(self._rows, self._description)
+
+    def rollback(self):
+        return None
+
+
 def test_empty_database_queries_return_safe_defaults(tmp_path):
     db = MonitoringDatabase(database_url=f"sqlite:///{tmp_path / 'monitoring.db'}")
     db.ensure_schema()
@@ -141,3 +168,65 @@ def test_postgres_identity_migration_covers_all_tables():
     assert "ALTER TABLE IF EXISTS signal_snapshots ALTER COLUMN id SET DEFAULT nextval('signal_snapshots_id_seq')" in migration_text
     assert "ALTER TABLE IF EXISTS paper_account_snapshots ALTER COLUMN id SET DEFAULT nextval('paper_account_snapshots_id_seq')" in migration_text
     assert "ALTER TABLE IF EXISTS sanitized_order_events ALTER COLUMN id SET DEFAULT nextval('sanitized_order_events_id_seq')" in migration_text
+
+
+def test_query_all_converts_postgres_tuple_rows_to_dicts():
+    db = MonitoringDatabase()
+    db.engine = "postgres"
+    db.conn = _FakeConnection(
+        rows=[("run-1", "PAPER"), ("run-2", "PAPER")],
+        description=[("run_id",), ("trading_mode",)],
+    )
+
+    rows = db.query_all("SELECT run_id, trading_mode FROM bot_runs")
+    assert rows == [
+        {"run_id": "run-1", "trading_mode": "PAPER"},
+        {"run_id": "run-2", "trading_mode": "PAPER"},
+    ]
+
+
+def test_query_all_accepts_postgres_dict_rows():
+    db = MonitoringDatabase()
+    db.engine = "postgres"
+    db.conn = _FakeConnection(
+        rows=[{"run_id": "run-1", "bot_status": "healthy"}],
+        description=[("run_id",), ("bot_status",)],
+    )
+
+    rows = db.query_all("SELECT run_id, bot_status FROM bot_runs")
+    assert rows == [{"run_id": "run-1", "bot_status": "healthy"}]
+
+
+def test_query_all_supports_sqlite_row_results(tmp_path):
+    db = MonitoringDatabase(database_url=f"sqlite:///{tmp_path / 'monitoring.db'}")
+    db.ensure_schema()
+    db.insert_bot_run(
+        {
+            "run_id": "run-sqlite-row",
+            "run_timestamp": "2026-07-12T15:00:00+00:00",
+            "market_date": "2026-07-12",
+            "trading_mode": "PAPER",
+            "market_status": "open",
+            "bot_status": "healthy",
+            "review_required": False,
+            "stop_reason": "completed",
+            "safe_error_type": "",
+            "safe_error_message": "",
+            "submitted": False,
+            "symbol": "SPY",
+            "notional": 0.0,
+            "safe_order_status": "skipped",
+        }
+    )
+
+    rows = db.query_all("SELECT run_id, bot_status FROM bot_runs WHERE run_id = ?", ("run-sqlite-row",))
+    assert rows == [{"run_id": "run-sqlite-row", "bot_status": "healthy"}]
+
+
+def test_query_one_returns_none_for_empty_results():
+    db = MonitoringDatabase()
+    db.engine = "postgres"
+    db.conn = _FakeConnection(rows=[], description=[("run_id",)])
+
+    assert db.query_all("SELECT run_id FROM bot_runs") == []
+    assert db.query_one("SELECT run_id FROM bot_runs") is None

@@ -6,8 +6,10 @@ from typing import Any
 
 try:
     import psycopg
+    from psycopg.rows import dict_row
 except Exception:  # pragma: no cover - optional dependency for tests/local runs.
     psycopg = None
+    dict_row = None
 
 
 def _is_postgres_url(url: str) -> bool:
@@ -39,7 +41,10 @@ class MonitoringDatabase:
         if _is_postgres_url(self.database_url):
             if psycopg is None:
                 raise RuntimeError("psycopg is required for PostgreSQL DATABASE_URL")
-            self.conn = psycopg.connect(self.database_url)
+            kwargs = {}
+            if dict_row is not None:
+                kwargs["row_factory"] = dict_row
+            self.conn = psycopg.connect(self.database_url, **kwargs)
             self.engine = "postgres"
             return
 
@@ -117,8 +122,10 @@ class MonitoringDatabase:
             return []
         params = params or ()
         cur = self.conn.cursor()
+        description = None
         try:
             cur.execute(self._adapt_query(query), params)
+            description = cur.description
             rows = cur.fetchall()
         except Exception:
             self._rollback_safe()
@@ -126,14 +133,45 @@ class MonitoringDatabase:
         finally:
             with contextlib.suppress(Exception):
                 cur.close()
+        return self._rows_to_dicts(rows, description)
+
+    def _rows_to_dicts(self, rows: list[Any], description: Any) -> list[dict[str, Any]]:
+        if not rows:
+            return []
+
+        column_names = []
+        if description:
+            for col in description:
+                if hasattr(col, "name"):
+                    column_names.append(col.name)
+                elif isinstance(col, (tuple, list)) and col:
+                    column_names.append(col[0])
+                else:
+                    column_names.append(str(col))
+
         result = []
         for row in rows:
             if isinstance(row, sqlite3.Row):
                 result.append(dict(row))
-            elif hasattr(row, "_mapping"):
-                result.append(dict(row._mapping))
-            else:
+                continue
+            if isinstance(row, dict):
                 result.append(dict(row))
+                continue
+            if hasattr(row, "_mapping"):
+                result.append(dict(row._mapping))
+                continue
+            if isinstance(row, (tuple, list)):
+                if column_names:
+                    result.append({name: value for name, value in zip(column_names, row)})
+                else:
+                    result.append({str(i): value for i, value in enumerate(row)})
+                continue
+
+            # Fallback for uncommon row objects.
+            with contextlib.suppress(Exception):
+                result.append(dict(row))
+                continue
+            result.append({"value": row})
         return result
 
     def query_one(self, query: str, params: tuple[Any, ...] | None = None) -> dict[str, Any] | None:
