@@ -90,33 +90,80 @@ def test_dashboard_queries_work_with_sample_sanitized_records(tmp_path):
     assert "xyz987654" not in str(orders[0]["order_id_masked"])
 
     latest_success = db.fetch_latest_successful_run()
-    view = dashboard_app.build_dashboard_view_model(latest_run, latest_success, latest_signal, latest_account)
+    payload = {
+        "db_connected": True,
+        "latest_run": latest_run,
+        "latest_success": latest_success,
+        "latest_signal": latest_signal,
+        "latest_account": latest_account,
+        "recent_runs": db.fetch_recent_runs(limit=20),
+        "recent_orders": orders,
+        "portfolio_history": list(reversed(db.fetch_portfolio_history(limit=50))),
+        "signal_history": list(reversed(db.fetch_signal_history(limit=50))),
+        "order_count_by_day": list(reversed(db.fetch_order_count_by_day(limit=50))),
+    }
+    view = dashboard_app.build_dashboard_view_model(payload)
     assert view["bot_health"]["label"] == "Healthy"
     assert view["market_status"]["label"] == "Open"
     assert view["generated_signal"] == "BUY"
-    assert view["portfolio_value"] == "$1,005.00"
-    assert view["cash"] == "$995.00"
-    assert view["buying_power"] == "$1,000.00"
-    assert view["unrealized_paper_pl"] == "$5.00"
+    assert dashboard_app.format_currency(view["portfolio_value"]) == "$1,005.00"
+    assert dashboard_app.format_currency(view["cash"]) == "$995.00"
+    assert dashboard_app.format_currency(view["buying_power"]) == "$1,000.00"
+    assert dashboard_app.format_currency(view["unrealized_paper_pl"]) == "$5.00"
+    assert dashboard_app.format_currency(view["today_pl"]).startswith("$")
+    assert dashboard_app.format_currency(view["total_pl"]).startswith("$")
 
 
 def test_dashboard_view_model_handles_warning_error_and_market_closed_states():
-    warning_view = dashboard_app.build_dashboard_view_model(
-        {"bot_status": "warning", "review_required": 0, "trading_mode": "PAPER"},
-        {},
-        {"market_open": 0, "generated_signal": "HOLD"},
-        {},
-    )
+    warning_payload = {
+        "db_connected": True,
+        "latest_run": {"bot_status": "warning", "review_required": 0, "trading_mode": "PAPER"},
+        "latest_success": {},
+        "latest_signal": {"market_open": 0, "generated_signal": "HOLD"},
+        "latest_account": {},
+        "recent_runs": [],
+        "recent_orders": [],
+        "portfolio_history": [],
+        "signal_history": [],
+        "order_count_by_day": [],
+    }
+    warning_view = dashboard_app.build_dashboard_view_model(warning_payload)
     assert warning_view["bot_health"]["label"] == "Warning"
     assert warning_view["market_status"]["label"] == "Closed"
     assert warning_view["generated_signal"] == "HOLD"
-    assert warning_view["latest_spy_price"] == "Waiting for market data"
+    assert warning_view["latest_spy_price"] == "Waiting for next market-hours run"
 
-    error_view = dashboard_app.build_dashboard_view_model(
-        {"bot_status": "error", "review_required": 1, "trading_mode": "PAPER"},
-        {},
-        {"market_open": 1, "generated_signal": "SELL"},
-        {},
-    )
+    error_payload = {
+        "db_connected": True,
+        "latest_run": {"bot_status": "error", "review_required": 1, "trading_mode": "PAPER"},
+        "latest_success": {},
+        "latest_signal": {"market_open": 1, "generated_signal": "SELL"},
+        "latest_account": {},
+        "recent_runs": [],
+        "recent_orders": [],
+        "portfolio_history": [],
+        "signal_history": [],
+        "order_count_by_day": [],
+    }
+    error_view = dashboard_app.build_dashboard_view_model(error_payload)
     assert error_view["bot_health"]["label"] == "Error"
     assert error_view["generated_signal"] == "SELL"
+
+
+def test_positive_and_negative_pl_formatting():
+    history_payload = {
+        "db_connected": True,
+        "latest_run": {"bot_status": "healthy", "review_required": 0, "trading_mode": "PAPER"},
+        "latest_success": {},
+        "latest_signal": {"market_open": 1, "generated_signal": "BUY"},
+        "latest_account": {"portfolio_value": 950.0, "cash": 950.0, "buying_power": 950.0, "unrealized_paper_pl": -50.0},
+        "recent_runs": [],
+        "recent_orders": [],
+        "portfolio_history": [{"portfolio_value": 1000.0}, {"portfolio_value": 950.0}],
+        "signal_history": [],
+        "order_count_by_day": [],
+    }
+    view = dashboard_app.build_dashboard_view_model(history_payload)
+    assert view["today_pl"] == -50.0
+    assert view["total_pl"] == -50.0
+    assert dashboard_app.format_currency(view["today_pl"]) == "$-50.00"

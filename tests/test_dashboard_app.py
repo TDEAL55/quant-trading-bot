@@ -51,21 +51,31 @@ def test_currency_formatting():
 
 
 def test_market_waiting_message_for_missing_values():
-    assert dashboard_app.market_display_value(None, {"market_open": 0}) == "Waiting for market data"
-    assert dashboard_app.market_display_value(None, {"market_open": 1}) == "Waiting for market data"
+    assert dashboard_app.market_display_value(None, {"market_open": 0}) == "Waiting for next market-hours run"
+    assert dashboard_app.market_display_value(None, {"market_open": 1}) == "Waiting for next market-hours run"
 
 
 def test_empty_state_messages():
-    messages = dashboard_app.empty_state_messages(recent_runs=[], signal_history=[], recent_orders=[], open_positions=0)
+    payload = {"recent_runs": [], "recent_orders": [], "signal_history": []}
+    view = {"open_positions": 0}
+    messages = dashboard_app.empty_state_messages(payload, view)
     assert "No monitoring records available yet" in messages
     assert "No paper orders yet" in messages
     assert "No signal history yet" in messages
     assert "No open positions" in messages
 
 
+def test_format_percent_and_mobile_layout_helpers():
+    assert dashboard_app.format_percent(1.25) == "+1.25%"
+    assert dashboard_app.format_percent(-1.25) == "-1.25%"
+    assert dashboard_app.is_mobile_layout(320) is True
+    assert dashboard_app.is_mobile_layout(1080) is False
+
+
 class _FakeContainer:
-    def __init__(self, streamlit_ref):
+    def __init__(self, streamlit_ref, button_return=False):
         self._st = streamlit_ref
+        self._button_return = button_return
 
     def __enter__(self):
         return self
@@ -87,15 +97,24 @@ class _FakeContainer:
 
     def button(self, label, help=None):
         self._st._calls.append(("button", label, help))
-        return False
+        return self._button_return
+
+    def selectbox(self, label, options):
+        self._st._calls.append(("selectbox", label, options))
+        return options[0]
+
+    def text_input(self, label, value="", type="default"):
+        self._st._calls.append(("container_text_input", label, value, type))
+        return value
 
 
 class _FakeStreamlit(_FakeContainer):
-    def __init__(self):
-        super().__init__(self)
+    def __init__(self, button_return=False):
+        super().__init__(self, button_return=button_return)
         self._calls = []
         self.session_state = {}
-        self.sidebar = _FakeContainer(self)
+        self.sidebar = _FakeContainer(self, button_return=button_return)
+        self._button_return = button_return
 
     def set_page_config(self, **kwargs):
         self._calls.append(("set_page_config", kwargs))
@@ -125,7 +144,11 @@ class _FakeStreamlit(_FakeContainer):
             size = count
         else:
             size = len(list(count))
-        return [_FakeContainer(self) for _ in range(size)]
+        return [_FakeContainer(self, button_return=self._button_return) for _ in range(size)]
+
+    def tabs(self, names):
+        self._calls.append(("tabs", names))
+        return [_FakeContainer(self, button_return=self._button_return) for _ in names]
 
     def progress(self, value):
         self._calls.append(("progress", value))
@@ -138,6 +161,9 @@ class _FakeStreamlit(_FakeContainer):
 
     def bar_chart(self, value):
         self._calls.append(("bar_chart", value))
+
+    def plotly_chart(self, value, use_container_width=False):
+        self._calls.append(("plotly_chart", use_container_width))
 
     def info(self, message):
         self._calls.append(("info", message))
@@ -237,20 +263,56 @@ class _FakeDatabase:
 def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch):
     fake_st = _FakeStreamlit()
     monkeypatch.setattr(dashboard_app, "st", fake_st)
-    monkeypatch.setattr(dashboard_app, "MonitoringDatabase", _FakeDatabase)
+    monkeypatch.setattr(dashboard_app, "_cached_payload", lambda database_url: {
+        "db_connected": True,
+        "latest_run": _FakeDatabase().fetch_latest_bot_run(),
+        "latest_success": _FakeDatabase().fetch_latest_successful_run(),
+        "latest_signal": _FakeDatabase().fetch_latest_signal_snapshot(),
+        "latest_account": _FakeDatabase().fetch_latest_account_snapshot(),
+        "recent_runs": _FakeDatabase().fetch_recent_runs(),
+        "recent_orders": _FakeDatabase().fetch_recent_order_events(),
+        "portfolio_history": list(reversed(_FakeDatabase().fetch_portfolio_history())),
+        "signal_history": list(reversed(_FakeDatabase().fetch_signal_history())),
+        "order_count_by_day": list(reversed(_FakeDatabase().fetch_order_count_by_day())),
+    })
     monkeypatch.setenv("TRADING_MODE", "PAPER")
     monkeypatch.setenv("DASHBOARD_PASSWORD", "test-pass")
 
     dashboard_app.render_dashboard(database_url="postgresql://example")
 
-    headers = [call[1] for call in fake_st._calls if call[0] == "header"]
-    assert "Top Status" in headers
-    assert "Bot Status" in headers
-    assert "Market and Signal" in headers
-    assert "Daily Safety Limits" in headers
-    assert "Alpaca Paper Account" in headers
-    assert "Run History" in headers
-    assert "Charts" in headers
+    tabs_calls = [call for call in fake_st._calls if call[0] == "tabs"]
+    assert tabs_calls
+    assert tabs_calls[0][1] == ["Overview", "Strategy", "Account", "Orders", "Performance", "System Health", "Research"]
     assert any(call[0] == "dataframe" for call in fake_st._calls)
     assert any(call[0] == "line_chart" for call in fake_st._calls)
     assert any(call[0] == "bar_chart" for call in fake_st._calls)
+
+
+def test_refresh_calls_cache_clear_and_rerun_without_trading_actions(monkeypatch):
+    fake_st = _FakeStreamlit(button_return=True)
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+    monkeypatch.setattr(dashboard_app, "_cached_payload", lambda database_url: {
+        "db_connected": True,
+        "latest_run": {},
+        "latest_success": {},
+        "latest_signal": {},
+        "latest_account": {},
+        "recent_runs": [],
+        "recent_orders": [],
+        "portfolio_history": [],
+        "signal_history": [],
+        "order_count_by_day": [],
+    })
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "test-pass")
+
+    class _CacheData:
+        @staticmethod
+        def clear():
+            fake_st._calls.append(("cache_clear",))
+
+    fake_st.cache_data = _CacheData()
+    dashboard_app.render_dashboard(database_url="postgresql://example")
+
+    assert any(call[0] == "cache_clear" for call in fake_st._calls)
+    assert any(call[0] == "rerun" for call in fake_st._calls)

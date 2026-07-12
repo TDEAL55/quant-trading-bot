@@ -8,3 +8,4 @@ alpaca-py
 pandas-market-calendars
 streamlit
 psycopg[binary]
+plotly
