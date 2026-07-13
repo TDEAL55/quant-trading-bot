@@ -317,7 +317,7 @@ def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch)
 
     tabs_calls = [call for call in fake_st._calls if call[0] == "tabs"]
     assert tabs_calls
-    assert tabs_calls[0][1] == ["Overview", "Strategy", "Account", "Orders", "Performance", "System Health", "Notification Center", "Architecture", "Research"]
+    assert tabs_calls[0][1] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research"]
     assert any(call[0] == "dataframe" for call in fake_st._calls)
     assert any(call[0] == "line_chart" for call in fake_st._calls)
     assert any(call[0] == "bar_chart" for call in fake_st._calls)

@@ -26,6 +26,13 @@ except Exception:  # pragma: no cover
     st_autorefresh = None
 
 from monitoring_db import MonitoringDatabase
+from dashboard_data import fetch_dashboard_payload
+from dashboard_exports import export_daily_activity, export_performance_summary, export_sanitized_orders, export_signal_history, export_system_health
+from dashboard_charts import build_line_chart, build_market_chart
+from dashboard_components import build_palette, status_style
+from dashboard_models import build_normalized_view_model
+from dashboard_sanitization import sanitize_identifier, sanitize_text
+from dashboard_status import classify_market_clock, format_est
 
 
 MAX_DAILY_ORDERS = 3
@@ -97,28 +104,14 @@ def format_countdown(delta: timedelta) -> str:
 
 
 def build_market_clock(now_et: datetime | None = None) -> dict[str, Any]:
-    now_et = now_et or datetime.now(EASTERN_TZ)
-    is_day = _is_market_day(now_et)
-    is_open = is_day and MARKET_OPEN_ET <= now_et.time() < MARKET_CLOSE_ET
-    if is_open:
-        target = _next_market_close(now_et)
-        return {
-            "label": "MARKET OPEN",
-            "style": "healthy",
-            "is_open": True,
-            "countdown_label": "Closes in",
-            "countdown": format_countdown(target - now_et),
-            "time_text": now_et.strftime("%Y-%m-%d %I:%M:%S %p ET"),
-        }
-
-    target = _next_market_open(now_et)
+    clock = classify_market_clock(now_et)
     return {
-        "label": "MARKET CLOSED",
-        "style": "neutral",
-        "is_open": False,
-        "countdown_label": "Opens in",
-        "countdown": format_countdown(target - now_et),
-        "time_text": now_et.strftime("%Y-%m-%d %I:%M:%S %p ET"),
+        "label": clock.get("label", "MARKET CLOSED"),
+        "style": "healthy" if clock.get("is_open") else "neutral",
+        "is_open": bool(clock.get("is_open")),
+        "countdown_label": clock.get("countdown_label", "Opens in"),
+        "countdown": clock.get("countdown_text", "00:00:00"),
+        "time_text": clock.get("timestamp", format_timestamp_eastern(now_et)),
     }
 
 
@@ -272,21 +265,7 @@ def has_write_capability(module_text: str) -> bool:
 
 
 def _safe_text(value, fallback=""):
-    text = str(value or "").strip()
-    if not text:
-        return fallback
-    patterns = [
-        r"(?i)(api[_-]?key\s*[=:]\s*)([^\s,;]+)",
-        r"(?i)(api[_-]?secret\s*[=:]\s*)([^\s,;]+)",
-        r"(?i)(authorization\s*[=:]\s*)(?:bearer\s+)?([^\s,;]+)",
-        r"(?i)(token\s*[=:]\s*)([^\s,;]+)",
-        r"(?i)(account(?:[_-]?(?:id|number))?\s*[=:]\s*)([^\s,;]+)",
-    ]
-    safe = text
-    for pattern in patterns:
-        safe = re.sub(pattern, r"\1[REDACTED]", safe)
-    safe = re.sub(r"\b\d{8,}\b", "[REDACTED]", safe)
-    return safe
+    return sanitize_text(value, fallback)
 
 
 def _as_bool(value):
@@ -335,18 +314,7 @@ def friendly_status_text(value: Any, fallback="Unknown"):
 
 
 def format_timestamp_eastern(value, fallback="Waiting for the next market-hours update"):
-    text = str(value or "").strip()
-    if not text:
-        return fallback
-    try:
-        normalized = text.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(normalized)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        dt_est = dt.astimezone(EASTERN_TZ)
-        return dt_est.strftime("%Y-%m-%d %I:%M:%S %p ET")
-    except Exception:
-        return text
+    return format_est(value, fallback)
 
 
 def classify_bot_health(latest_run):
@@ -496,6 +464,7 @@ def load_research_summary():
 
 
 def build_dashboard_view_model(payload):
+    normalized_vm = build_normalized_view_model(payload)
     latest_run = payload.get("latest_run") or {}
     latest_success = payload.get("latest_success") or {}
     latest_signal = payload.get("latest_signal") or {}
@@ -574,40 +543,29 @@ def build_dashboard_view_model(payload):
             "remaining_order_capacity": remaining_order_capacity,
             "latest_stop_reason": _safe_text(latest_run.get("stop_reason"), "Waiting for the next market-hours update"),
         },
+        "risk_matrix": normalized_vm.risk_matrix,
+        "operations": normalized_vm.operations,
+        "intelligence": normalized_vm.intelligence,
+        "freshness": normalized_vm.freshness,
     }
 
 
 def _fetch_payload_uncached(database_url: str | None):
-    db = MonitoringDatabase(database_url=database_url or os.getenv("DATABASE_URL"))
-    payload = {
-        "db_connected": db.enabled,
-        "latest_run": {},
-        "latest_success": {},
-        "latest_signal": {},
-        "latest_account": {},
-        "recent_runs": [],
-        "recent_orders": [],
-        "portfolio_history": [],
-        "signal_history": [],
-        "order_count_by_day": [],
-    }
-
-    if not db.enabled:
-        return payload
-
     try:
-        db.ensure_schema()
-        payload["latest_run"] = db.fetch_latest_bot_run() or {}
-        payload["latest_success"] = db.fetch_latest_successful_run() or {}
-        payload["latest_signal"] = db.fetch_latest_signal_snapshot() or {}
-        payload["latest_account"] = db.fetch_latest_account_snapshot() or {}
-        payload["recent_runs"] = db.fetch_recent_runs(limit=100)
-        payload["recent_orders"] = db.fetch_recent_order_events(limit=250)
-        payload["portfolio_history"] = list(reversed(db.fetch_portfolio_history(limit=500)))
-        payload["signal_history"] = list(reversed(db.fetch_signal_history(limit=500)))
-        payload["order_count_by_day"] = list(reversed(db.fetch_order_count_by_day(limit=365)))
+        payload = fetch_dashboard_payload(database_url or os.getenv("DATABASE_URL"), database_factory=MonitoringDatabase)
     except Exception:
-        payload["db_connected"] = False
+        payload = {
+            "db_connected": False,
+            "latest_run": {},
+            "latest_success": {},
+            "latest_signal": {},
+            "latest_account": {},
+            "recent_runs": [],
+            "recent_orders": [],
+            "portfolio_history": [],
+            "signal_history": [],
+            "order_count_by_day": [],
+        }
     return payload
 
 
@@ -617,13 +575,13 @@ def clear_dashboard_cache():
 
 
 def apply_dashboard_css(theme_name="Midnight Blue"):
-    palette = _theme_palette(theme_name)
+    palette = build_palette(theme_name)
     st.markdown(
         f"""
         <style>
         .stApp {{
-            background: {palette['bg']};
-            color: {palette['text']};
+            background: {palette.page_bg};
+            color: {palette.primary_text};
         }}
         .main .block-container {{
             padding-top: 1.2rem;
@@ -633,13 +591,13 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             font-size: 1.1rem;
             letter-spacing: 0.28rem;
             font-weight: 800;
-            color: {palette['accent']};
+            color: {palette.positive};
             margin-bottom: 0.3rem;
             text-transform: uppercase;
-            text-shadow: 0 0 14px {palette['grid']};
+            text-shadow: 0 0 14px {palette.accent_glow};
         }}
         .dq-subtitle {{
-            color: {palette['subtle']};
+            color: {palette.secondary_text};
             margin-top: -0.4rem;
             margin-bottom: 0.8rem;
             font-size: 0.82rem;
@@ -650,8 +608,8 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             border-radius: 999px;
             padding: 0.26rem 0.68rem;
             background: rgba(255, 255, 255, 0.05);
-            border: 1px solid {palette['grid']};
-            color: {palette['text']};
+            border: 1px solid {palette.border};
+            color: {palette.primary_text};
             font-weight: 600;
             font-size: 0.72rem;
         }}
@@ -659,8 +617,8 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             position: relative;
             overflow: hidden;
             border-radius: 12px;
-            border: 1px solid {palette['grid']};
-            background: rgba(6, 11, 20, 0.35);
+            border: 1px solid {palette.border};
+            background: {palette.panel_bg};
             margin-bottom: 0.85rem;
             padding: 0.45rem 0;
         }}
@@ -673,17 +631,17 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             animation: dqTickerMove 22s linear infinite;
         }}
         .dq-ticker-item {{
-            color: {palette['text']};
+            color: {palette.primary_text};
             font-size: 0.82rem;
             letter-spacing: 0.01rem;
         }}
         .dq-ticker-label {{
-            color: {palette['subtle']};
+            color: {palette.secondary_text};
             margin-right: 0.25rem;
         }}
         .dq-card {{
-            background: {palette['panel']};
-            border: 1px solid {palette['grid']};
+            background: {palette.elevated_bg};
+            border: 1px solid {palette.border};
             box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
             border-radius: 16px;
             padding: 0.95rem 1.05rem;
@@ -699,7 +657,7 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             content: "";
             position: absolute;
             inset: 0;
-            background-image: linear-gradient(to right, {palette['grid']} 1px, transparent 1px), linear-gradient(to bottom, {palette['grid']} 1px, transparent 1px);
+            background-image: linear-gradient(to right, {palette.border} 1px, transparent 1px), linear-gradient(to bottom, {palette.border} 1px, transparent 1px);
             background-size: 30px 30px;
             opacity: 0.35;
             pointer-events: none;
@@ -708,16 +666,16 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             font-size: 2.05rem;
             font-weight: 800;
             margin-top: 0.3rem;
-            color: {palette['text']};
+            color: {palette.primary_text};
         }}
         .dq-label {{
-            color: {palette['subtle']};
+            color: {palette.secondary_text};
             font-size: 0.8rem;
             letter-spacing: 0.06rem;
             text-transform: uppercase;
         }}
         .dq-value {{
-            color: {palette['text']};
+            color: {palette.primary_text};
             font-size: 1.06rem;
             font-weight: 650;
         }}
@@ -727,7 +685,7 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             padding: 0.35rem 0.7rem;
             background: rgba(33, 196, 107, 0.22);
             border: 1px solid rgba(33, 196, 107, 0.48);
-            color: #72e4ab;
+            color: {palette.positive};
             font-weight: 700;
         }}
         .dq-pulse {{
@@ -741,7 +699,7 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
         .dq-badge-neutral {{
             background: rgba(138, 150, 168, 0.22);
             border-color: rgba(138, 150, 168, 0.55);
-            color: #d4dae3;
+            color: {palette.neutral};
         }}
         .dq-orb {{
             width: 114px;
@@ -763,11 +721,11 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             margin-right: 0.45rem;
         }}
         .dq-market-open {{
-            background: #21c46b;
+            background: {palette.positive};
             animation: dqPulse 1.7s infinite;
         }}
         .dq-market-closed {{
-            background: #8a96a8;
+            background: {palette.neutral};
         }}
         .dq-alert {{
             border-radius: 12px;
@@ -786,7 +744,7 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             animation: dqShimmer 1.3s linear infinite;
         }}
         .dq-timeline-item {{
-            border-left: 2px solid {palette['grid']};
+            border-left: 2px solid {palette.border};
             padding-left: 0.7rem;
             margin-bottom: 0.7rem;
         }}
@@ -801,8 +759,8 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
         .dq-empty-state {{
             border-radius: 14px;
             padding: 0.9rem;
-            border: 1px dashed {palette['grid']};
-            color: {palette['subtle']};
+            border: 1px dashed {palette.border};
+            color: {palette.secondary_text};
             background: rgba(6, 11, 20, 0.25);
         }}
         [data-testid="stDataFrame"], .stTable {{
@@ -956,10 +914,22 @@ def render_sidebar(payload):
     with st.sidebar:
         st.subheader("DEAL QUANT")
         st.markdown("Read-only controls")
-        theme = st.selectbox("Theme", ["Midnight Blue", "Black Terminal"])
-        st.session_state["dashboard_theme"] = theme
-        refresh_choice = st.selectbox("Auto-refresh", ["Off", "30 seconds", "60 seconds", "5 minutes"])
-        st.session_state["dashboard_auto_refresh"] = refresh_choice
+        mode_options = ["Standard Mode", "Focus Mode", "Presentation Mode"]
+        mode = st.selectbox("Dashboard mode", mode_options)
+        if mode not in mode_options:
+            mode = st.session_state.get("dashboard_mode", "Standard Mode")
+        st.session_state["dashboard_mode"] = mode
+        if mode != "Presentation Mode":
+            theme_options = ["Midnight Blue", "Black Terminal", "Arctic Glass"]
+            theme = st.selectbox("Theme", theme_options)
+            if theme not in theme_options:
+                theme = st.session_state.get("dashboard_theme", "Midnight Blue")
+            st.session_state["dashboard_theme"] = theme
+            refresh_choice = st.selectbox("Auto-refresh", ["Off", "30 seconds", "60 seconds", "5 minutes"])
+            st.session_state["dashboard_auto_refresh"] = refresh_choice
+        else:
+            st.session_state["dashboard_theme"] = st.session_state.get("dashboard_theme", "Midnight Blue")
+            st.session_state["dashboard_auto_refresh"] = "Off"
         st.write(f"Environment: {friendly_status_text(os.getenv('TRADING_MODE', 'PAPER'))}")
         st.write(f"Database connected: {'yes' if payload.get('db_connected') else 'no'}")
         st.write(f"Last data refresh: {format_timestamp_eastern(st.session_state.get('dashboard_last_refresh'))}")
@@ -1028,40 +998,15 @@ def render_spy_chart(payload, view):
         st.info("Waiting for the next market-hours update")
         return
 
-    if go is None:
+    market_fig = build_market_chart(candles, title="SPY")
+    if market_fig is None:
         st.line_chart({"price": [item["close"] for item in candles]})
         return
 
     buy_points, sell_points = _build_order_markers(payload.get("recent_orders") or [])
-    fig = go.Figure()
-    fig.add_trace(
-        go.Candlestick(
-            x=[item["timestamp"] for item in candles],
-            open=[item["open"] for item in candles],
-            high=[item["high"] for item in candles],
-            low=[item["low"] for item in candles],
-            close=[item["close"] for item in candles],
-            name="SPY",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=[item["timestamp"] for item in candles],
-            y=[item.get("short_ma") for item in candles],
-            mode="lines",
-            name="Short MA",
-            line={"color": "#21c46b", "width": 1.5},
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=[item["timestamp"] for item in candles],
-            y=[item.get("long_ma") for item in candles],
-            mode="lines",
-            name="Long MA",
-            line={"color": "#f1c75b", "width": 1.5},
-        )
-    )
+    fig = market_fig
+    fig.add_trace(go.Scatter(x=[item["timestamp"] for item in candles], y=[item.get("short_ma") for item in candles], mode="lines", name="Short MA", line={"color": "#21c46b", "width": 1.5}))
+    fig.add_trace(go.Scatter(x=[item["timestamp"] for item in candles], y=[item.get("long_ma") for item in candles], mode="lines", name="Long MA", line={"color": "#f1c75b", "width": 1.5}))
 
     if buy_points:
         fig.add_trace(
@@ -1089,32 +1034,34 @@ def render_spy_chart(payload, view):
 
 
 def render_strategy_page(payload, view):
-    left, right = st.columns([1.6, 2.4])
-    left.markdown("### Moving-Average Crossover")
-    _metric_card(left, "Current Signal", view["generated_signal"], view["signal"]["style"])
-    ma_state = "Bullish crossover" if view["ma_distance"] > 0 else "Bearish crossover" if view["ma_distance"] < 0 else "Neutral crossover"
-    _metric_card(left, "Crossover State", ma_state, "buy" if view["ma_distance"] > 0 else "sell" if view["ma_distance"] < 0 else "hold")
-    _metric_card(left, "MA Distance", f"{_as_float(view['ma_distance'], 0.0):.4f}", "neutral")
+    decision, metrics = st.columns([1.25, 2.75])
+    decision.markdown("### Signal Decision")
+    decision.markdown(f"<div class='dq-card'><div class='dq-label'>Current decision</div><div class='dq-value'>{view['generated_signal']}</div></div>", unsafe_allow_html=True)
+    decision.markdown(f"<div class='dq-card'><div class='dq-label'>Rule-based signal</div><div class='dq-value'>Not a price prediction</div></div>", unsafe_allow_html=True)
+    decision.markdown(f"<div class='dq-card'><div class='dq-label'>Crossover state</div><div class='dq-value'>{'Bullish' if view['ma_distance'] > 0 else 'Bearish' if view['ma_distance'] < 0 else 'Neutral'}</div></div>", unsafe_allow_html=True)
 
-    strength = view.get("signal_strength", {"value": 0.0, "percent": 0, "description": "Informational only"})
-    left.markdown("#### Signal Strength Meter")
-    left.progress(strength["value"])
-    left.caption(f"{strength['percent']}% - {strength['description']}")
-
-    right.markdown("### Why this signal")
-    reason_lines = [
-        f"Latest SPY price: {view['latest_spy_price']}",
-        f"Short MA: {view['short_moving_average']}",
-        f"Long MA: {view['long_moving_average']}",
-        f"Trade/skip reason: {view['trade_or_skip_reason']}",
-        f"Cooldown status: {view['cooldown_status']}",
-        f"Pending-order status: {view['pending_order_status']}",
-        "Signal visualization is informational only, not a prediction.",
+    metrics.markdown("### Strategy Inputs")
+    rows = [
+        ("Current price", view["latest_spy_price"]),
+        ("Short MA", view["short_moving_average"]),
+        ("Long MA", view["long_moving_average"]),
+        ("MA spread", f"{_as_float(view['ma_distance'], 0.0):.4f}"),
+        ("Data freshness", view["latest_market_data_timestamp"]),
+        ("Signal reason", view["trade_or_skip_reason"]),
     ]
-    for line in reason_lines:
-        right.markdown(f"- {_safe_text(line)}")
+    for label, value in rows:
+        metrics.markdown(f"- **{_safe_text(label)}:** {_safe_text(value, 'Not available')}")
 
-    render_spy_chart(payload, view)
+    if payload.get("signal_history"):
+        chart_rows = []
+        for row in payload.get("signal_history")[-80:]:
+            chart_rows.append({
+                "timestamp": _parse_iso(row.get("snapshot_timestamp")) or datetime.now(timezone.utc),
+                "value": _as_float(row.get("latest_price"), 0.0),
+            })
+        _safe_plotly_chart(build_line_chart(chart_rows, "SPY price snapshots", "value"), "Signal chart unavailable")
+    else:
+        _empty_state("More paper-trading history is needed before this metric is meaningful.")
 
 
 def render_account_page(payload, view):
@@ -1164,66 +1111,16 @@ def render_account_page(payload, view):
                 style,
             )
     else:
-        _empty_state("100% Cash - Waiting for a valid signal")
+        _empty_state("No open paper positions. The bot is waiting for a valid rule-based entry signal.")
 
 
-def render_strategy_page(payload, view):
-    signal_col, detail_col = st.columns([1.8, 2.2])
-    signal_col.markdown("### Strategy Signal")
-    _metric_card(signal_col, "Current Signal", view["generated_signal"], view["signal"]["style"])
-    ma_state = "Bullish crossover" if view["ma_distance"] > 0 else "Bearish crossover" if view["ma_distance"] < 0 else "Neutral crossover"
-    _metric_card(signal_col, "Crossover State", ma_state, "buy" if view["ma_distance"] > 0 else "sell" if view["ma_distance"] < 0 else "hold")
-
-    detail_col.markdown("### Live Inputs")
-    detail_col.markdown(f"**Latest SPY price:** {view['latest_spy_price']}")
-    detail_col.markdown(f"**Short moving average:** {view['short_moving_average']}")
-    detail_col.markdown(f"**Long moving average:** {view['long_moving_average']}")
-    detail_col.markdown(f"**MA distance:** {format_currency(view['ma_distance'])}")
-    detail_col.markdown(f"**Latest market-data timestamp:** {view['latest_market_data_timestamp']}")
-    detail_col.markdown(f"**Trade/skip reason:** {view['trade_or_skip_reason']}")
-
-    signal_history = payload.get("signal_history") or []
-    if signal_history:
-        if px is not None:
-            fig = px.scatter(signal_history, x="snapshot_timestamp", y="generated_signal", title="Signal History")
-            _safe_plotly_chart(fig, "Signal history is temporarily unavailable")
-        else:
-            st.dataframe(signal_history)
-    else:
-        st.info("Waiting for the next market-hours update")
-
-
-def render_account_page(payload, view):
-    acc_cols = st.columns(3)
-    acc_cols[0].metric("Portfolio Value", format_currency(view["portfolio_value"]))
-    acc_cols[0].metric("Cash", format_currency(view["cash"]))
-    acc_cols[1].metric("Buying Power", format_currency(view["buying_power"]))
-    acc_cols[1].metric("Unrealized P/L", format_currency(view["unrealized_paper_pl"]))
-    acc_cols[2].metric("Realized P/L", format_currency(view["realized_paper_pl"]))
-    acc_cols[2].metric("Account Status", view["account_status"])
-
-    latest_account = payload.get("latest_account") or {}
-    positions = latest_account.get("positions") if isinstance(latest_account, dict) else None
-    if isinstance(positions, list) and positions:
-        st.markdown("### Open Positions")
-        for position in positions:
-            pcols = st.columns(2)
-            pnl = _as_float(position.get("unrealized_pl"), 0.0)
-            style = "buy" if pnl >= 0 else "sell"
-            _metric_card(
-                pcols[0],
-                str(position.get("symbol", "Position")),
-                f"Qty {position.get('quantity', 'N/A')} | MV {format_currency(position.get('market_value', 0.0))}",
-                style,
-            )
-            _metric_card(
-                pcols[1],
-                "Entry / Current / Unrealized",
-                f"{format_currency(position.get('average_entry_price', 0.0))} / {format_currency(position.get('current_price', 0.0))} / {format_currency(pnl)}",
-                style,
-            )
-    else:
-        st.info("No open positions")
+def render_risk_page(payload, view):
+    st.markdown("### Risk-Control Matrix")
+    rows = view.get("risk_matrix") or []
+    if not rows:
+        _empty_state("Risk data is not available right now.")
+        return
+    st.dataframe(rows)
 
 
 def render_orders_page(payload):
@@ -1264,7 +1161,7 @@ def render_performance_page(payload):
     order_count_by_day = payload.get("order_count_by_day") or []
 
     if len(history) < 2:
-        st.info("Waiting for the next market-hours update")
+        st.info("More paper-trading history is needed before this metric is meaningful.")
         return
 
     values = [_as_float(item.get("portfolio_value"), 0.0) for item in history]
@@ -1281,22 +1178,22 @@ def render_performance_page(payload):
         drawdown.append(dd)
 
     st.subheader("Portfolio Value")
-    if px is not None:
-        _safe_plotly_chart(px.line(x=list(range(len(values))), y=values, labels={"x": "Samples", "y": "Portfolio Value"}), "Portfolio chart unavailable")
-    else:
-        st.line_chart({"portfolio_value": values})
+    portfolio_fig = build_line_chart([{ "timestamp": idx, "value": value } for idx, value in enumerate(values)], "Portfolio Value", "value", "timestamp")
+    _safe_plotly_chart(portfolio_fig, "Portfolio chart unavailable")
 
     st.subheader("Daily Paper P/L")
     st.line_chart({"daily_pl": daily_pl})
 
     st.subheader("Cumulative P/L")
-    st.line_chart({"cumulative_pl": cumulative})
+    cumulative_fig = build_line_chart([{ "timestamp": idx, "value": value } for idx, value in enumerate(cumulative)], "Cumulative P/L", "value", "timestamp")
+    _safe_plotly_chart(cumulative_fig, "Cumulative P/L chart unavailable")
 
     if len(values) > 3:
         st.subheader("Drawdown")
-        st.line_chart({"drawdown_percent": drawdown})
+        drawdown_fig = build_line_chart([{ "timestamp": idx, "value": value } for idx, value in enumerate(drawdown)], "Drawdown", "value", "timestamp")
+        _safe_plotly_chart(drawdown_fig, "Drawdown chart unavailable")
     else:
-        st.info("Not enough data for drawdown chart")
+        st.info("More paper-trading history is needed before this metric is meaningful.")
 
     if signal_history:
         dist = {"BUY": 0, "HOLD": 0, "SELL": 0}
@@ -1319,7 +1216,7 @@ def render_performance_page(payload):
         st.subheader("Win/Loss Summary")
         st.write(f"Wins: {wins} | Losses: {losses}")
     else:
-        st.info("Not enough completed trade history for win/loss summary")
+        st.info("More paper-trading history is needed before this metric is meaningful.")
 
 
 def _event_style(level):
@@ -1355,6 +1252,21 @@ def build_activity_timeline(payload, view):
     if view.get("latest_safe_error_message"):
         events.append({"event": f"Warning/Error: {_safe_text(view.get('latest_safe_error_message'))}", "time": view.get("last_run_timestamp"), "level": "warning"})
     return events[:24]
+
+
+def build_activity_feed(payload, view):
+    feed = []
+    for item in build_activity_timeline(payload, view):
+        feed.append(
+            {
+                "timestamp": item.get("time"),
+                "event": item.get("event"),
+                "status": item.get("level"),
+                "category": "Trading" if "Order" in str(item.get("event", "")) or "Signal" in str(item.get("event", "")) else "Infrastructure",
+                "detail": item.get("event"),
+            }
+        )
+    return feed
 
 
 def render_system_health_page(payload, view):
@@ -1456,11 +1368,17 @@ def render_architecture_page(payload, view):
         "Streamlit dashboard",
     ]
     cols = st.columns(2)
+    palette = build_palette(st.session_state.get("dashboard_theme", "Midnight Blue"))
     for idx, component in enumerate(components):
         status = statuses.get(component, "warning")
         style = "healthy" if status == "healthy" else "warning" if status == "warning" else "error"
         value = "Healthy" if status == "healthy" else "Warning" if status == "warning" else "Offline"
-        _metric_card(cols[idx % 2], component, value, style)
+        status_color = status_style(value.lower(), palette)
+        cols[idx % 2].markdown(f"<div class='dq-card'><div class='dq-label'>{component}</div><div class='dq-value' style='color:{status_color};'>{value}</div></div>", unsafe_allow_html=True)
+
+
+render_operations_page = render_system_health_page
+render_alerts_page = render_notification_center
 
 
 def render_mission_control_summary(view):
@@ -1536,6 +1454,21 @@ def render_research_page():
     _metric_card(cols[2], "Break-even Cost", metrics["break_even_cost"], "warning")
     _metric_card(cols[3], "Drawdown", metrics["drawdown"], "sell")
     _metric_card(cols[4], "Sharpe Ratio", metrics["sharpe_ratio"], "healthy")
+    st.caption("The overnight research study is informational only and is not connected to the SPY paper runner.")
+
+    st.markdown("### Read-only exports")
+    export_payload = st.session_state.get("dashboard_export_payload") or {}
+    activity_csv = export_daily_activity(export_payload.get("activity", []))
+    signals_csv = export_signal_history(export_payload.get("signals", []))
+    orders_csv = export_sanitized_orders(export_payload.get("orders", []))
+    health_csv = export_system_health(export_payload.get("health", []))
+    perf_csv = export_performance_summary(export_payload.get("performance", []))
+    if hasattr(st, "download_button"):
+        st.download_button("Daily activity CSV", activity_csv, file_name="daily_activity.csv", mime="text/csv")
+        st.download_button("Signal history CSV", signals_csv, file_name="signal_history.csv", mime="text/csv")
+        st.download_button("Sanitized order-events CSV", orders_csv, file_name="order_events.csv", mime="text/csv")
+        st.download_button("System-health report", health_csv, file_name="system_health.csv", mime="text/csv")
+        st.download_button("Paper-performance summary", perf_csv, file_name="performance_summary.csv", mime="text/csv")
 
 
 def render_dashboard(database_url: str | None = None):
@@ -1578,6 +1511,13 @@ def render_dashboard(database_url: str | None = None):
         }
 
     view = build_dashboard_view_model(payload)
+    st.session_state["dashboard_export_payload"] = {
+        "activity": build_activity_feed(payload, view),
+        "signals": payload.get("signal_history") or [],
+        "orders": payload.get("recent_orders") or [],
+        "health": [{"component": component, "status": status, "timestamp": view.get("last_run_timestamp"), "reason": "Read only"} for component, status in _component_status(payload, view).items()],
+        "performance": [{"metric": "portfolio_value", "value": view.get("portfolio_value")}, {"metric": "today_pl", "value": view.get("today_pl")}, {"metric": "total_pl", "value": view.get("total_pl")}],
+    }
     render_sidebar(payload)
     apply_dashboard_css(st.session_state.get("dashboard_theme", "Midnight Blue"))
 
@@ -1594,24 +1534,24 @@ def render_dashboard(database_url: str | None = None):
     render_header(payload, view)
     render_alert_banner(payload, view)
 
-    tabs = st.tabs(["Overview", "Strategy", "Account", "Orders", "Performance", "System Health", "Notification Center", "Architecture", "Research"])
+    tabs = st.tabs(["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research"])
 
     with tabs[0]:
         render_overview_page(payload, view)
     with tabs[1]:
         render_strategy_page(payload, view)
     with tabs[2]:
-        render_account_page(payload, view)
+        render_risk_page(payload, view)
     with tabs[3]:
-        render_orders_page(payload)
+        render_account_page(payload, view)
     with tabs[4]:
-        render_performance_page(payload)
+        render_orders_page(payload)
     with tabs[5]:
-        render_system_health_page(payload, view)
+        render_performance_page(payload)
     with tabs[6]:
-        render_notification_center(payload, view)
+        render_operations_page(payload, view)
     with tabs[7]:
-        render_architecture_page(payload, view)
+        render_alerts_page(payload, view)
     with tabs[8]:
         render_research_page()
 
