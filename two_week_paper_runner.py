@@ -14,6 +14,7 @@ from market_data import download_price_data
 from paper_order import create_paper_order_manager
 from strategy import generate_signal
 from monitoring_recorder import MonitoringRecorder, mask_identifier
+from discord_notifier import DiscordNotifier
 
 
 MAX_SUBMITTED_ORDERS_PER_DAY = 3
@@ -113,7 +114,7 @@ def _emit_paper_run_error(stage, exc):
     )
 
 
-def _safe_monitoring_call(recorder, method_name, **payload):
+def _safe_monitoring_call(recorder, method_name, alert_notifier=None, run_id=None, market_date=None, **payload):
     if recorder is None:
         return
     method = getattr(recorder, method_name, None)
@@ -128,6 +129,73 @@ def _safe_monitoring_call(recorder, method_name, **payload):
             error_type=type(exc).__name__,
             error_message=_safe_error_message(exc),
         )
+        if alert_notifier is None:
+            try:
+                alert_notifier = DiscordNotifier.from_env(print_fn=print)
+            except Exception:
+                alert_notifier = None
+        if alert_notifier is not None:
+            event_market_date = market_date or payload.get("market_date")
+            _safe_discord_database_error(
+                alert_notifier,
+                event_id=f"{run_id or 'run'}:db_error:{method_name}:{event_market_date or 'na'}",
+                stage=method_name,
+                error_type=type(exc).__name__,
+                error_message=_safe_error_message(exc),
+            )
+
+
+def _safe_discord_alert(notifier, event, event_id, **fields):
+    if notifier is None:
+        return False
+    send_alert = getattr(notifier, "send_alert", None)
+    if not callable(send_alert):
+        return False
+    try:
+        return bool(send_alert(event, event_id, **fields))
+    except Exception as exc:
+        _emit_runner_log("DISCORD_ALERT_FAILED", type=type(exc).__name__, alert_event=event)
+        return False
+
+
+def _safe_discord_database_error(notifier, event_id, stage, error_type, error_message):
+    if notifier is None:
+        return False
+    notify_database_error = getattr(notifier, "notify_database_error", None)
+    if callable(notify_database_error):
+        try:
+            return bool(notify_database_error(event_id, stage=stage, error_type=error_type, error_message=error_message))
+        except Exception as exc:
+            _emit_runner_log("DISCORD_ALERT_FAILED", type=type(exc).__name__, alert_event="database_error")
+            return False
+    return _safe_discord_alert(
+        notifier,
+        "database_error",
+        event_id,
+        stage=stage,
+        error_type=error_type,
+        error_message=error_message,
+    )
+
+
+def _safe_discord_bot_error(notifier, event_id, error_type, error_message, **fields):
+    if notifier is None:
+        return False
+    notify_error = getattr(notifier, "notify_error", None)
+    if callable(notify_error):
+        try:
+            return bool(notify_error(event_id, error_type=error_type, error_message=error_message, **fields))
+        except Exception as exc:
+            _emit_runner_log("DISCORD_ALERT_FAILED", type=type(exc).__name__, alert_event="bot_error")
+            return False
+    return _safe_discord_alert(
+        notifier,
+        "bot_error",
+        event_id,
+        error_type=error_type,
+        error_message=error_message,
+        **fields,
+    )
 
 
 def _safe_number(value, digits=6):
@@ -302,6 +370,7 @@ def run_two_week_paper_runner(
     signal_generator=generate_signal,
     order_manager_factory=create_paper_order_manager,
     monitoring_recorder_factory=MonitoringRecorder.from_env,
+    discord_notifier_factory=DiscordNotifier.from_env,
     dry_run=True,
     submit_enabled=False,
 ):
@@ -351,6 +420,18 @@ def run_two_week_paper_runner(
                 error_message=_safe_error_message(exc),
             )
             recorder = None
+
+    notifier = None
+    if callable(discord_notifier_factory):
+        try:
+            notifier = discord_notifier_factory(print_fn=print)
+        except Exception as exc:
+            _emit_runner_log(
+                "DISCORD_ALERT_FAILED",
+                type=type(exc).__name__,
+                alert_event="notifier_init",
+            )
+            notifier = None
 
     preflight_account, preflight_clock = _emit_preflight_logs(client)
 
@@ -445,6 +526,9 @@ def run_two_week_paper_runner(
     stop_reason = "completed"
     previous_portfolio_value = None
     baseline_portfolio_value = None
+    signals_observed = 0
+    buy_signal_blocks = 0
+    orders_submitted_total = 0
 
     for day_offset in range(days):
         current_day = start + timedelta(days=day_offset)
@@ -549,6 +633,24 @@ def run_two_week_paper_runner(
                     max_daily_orders=MAX_SUBMITTED_ORDERS_PER_DAY,
                     max_daily_submitted_notional=MAX_SUBMITTED_NOTIONAL_PER_DAY,
                 )
+                _safe_discord_alert(
+                    notifier,
+                    "buy_signal_blocked",
+                    f"{run_id}:{summary['date']}:loss_stop_daily",
+                    reason="loss stop",
+                    signal="BUY",
+                    symbol="SPY",
+                    timestamp=_to_iso_timestamp(_clock_timestamp(clock)),
+                )
+                _safe_discord_alert(
+                    notifier,
+                    "review_required",
+                    f"{run_id}:{summary['date']}:review_required_daily_loss",
+                    reason=summary["reason"],
+                    review_required=True,
+                    timestamp=_to_iso_timestamp(_clock_timestamp(clock)),
+                )
+                buy_signal_blocks += 1
                 summaries.append(summary)
                 _write_daily_summary(summary, summaries_dir)
                 stop_reason = "daily loss limit hit"
@@ -570,6 +672,24 @@ def run_two_week_paper_runner(
                     max_daily_orders=MAX_SUBMITTED_ORDERS_PER_DAY,
                     max_daily_submitted_notional=MAX_SUBMITTED_NOTIONAL_PER_DAY,
                 )
+                _safe_discord_alert(
+                    notifier,
+                    "buy_signal_blocked",
+                    f"{run_id}:{summary['date']}:loss_stop_total",
+                    reason="loss stop",
+                    signal="BUY",
+                    symbol="SPY",
+                    timestamp=_to_iso_timestamp(_clock_timestamp(clock)),
+                )
+                _safe_discord_alert(
+                    notifier,
+                    "review_required",
+                    f"{run_id}:{summary['date']}:review_required_total_loss",
+                    reason=summary["reason"],
+                    review_required=True,
+                    timestamp=_to_iso_timestamp(_clock_timestamp(clock)),
+                )
+                buy_signal_blocks += 1
                 summaries.append(summary)
                 _write_daily_summary(summary, summaries_dir)
                 stop_reason = "total loss limit hit"
@@ -598,6 +718,16 @@ def run_two_week_paper_runner(
                 summary["decision"] = "skip"
                 summary["reason"] = "market data missing"
                 _emit_runner_log("MARKET_DATA_BLOCKED", reason="missing")
+                _safe_discord_alert(
+                    notifier,
+                    "buy_signal_blocked",
+                    f"{run_id}:{summary['date']}:missing_data_index",
+                    reason="missing data",
+                    signal="BUY",
+                    symbol="SPY",
+                    timestamp=_to_iso_timestamp(_clock_timestamp(clock)),
+                )
+                buy_signal_blocks += 1
                 _safe_monitoring_call(
                     recorder,
                     "record_signal_snapshot",
@@ -619,6 +749,16 @@ def run_two_week_paper_runner(
                 summary["decision"] = "skip"
                 summary["reason"] = "market data missing"
                 _emit_runner_log("MARKET_DATA_BLOCKED", reason="missing")
+                _safe_discord_alert(
+                    notifier,
+                    "buy_signal_blocked",
+                    f"{run_id}:{summary['date']}:missing_data_day_prices",
+                    reason="missing data",
+                    signal="BUY",
+                    symbol="SPY",
+                    timestamp=_to_iso_timestamp(_clock_timestamp(clock)),
+                )
+                buy_signal_blocks += 1
                 _safe_monitoring_call(
                     recorder,
                     "record_signal_snapshot",
@@ -647,6 +787,16 @@ def run_two_week_paper_runner(
                     symbol="SPY",
                     latest_market_data_timestamp=latest_ts,
                 )
+                _safe_discord_alert(
+                    notifier,
+                    "buy_signal_blocked",
+                    f"{run_id}:{summary['date']}:stale_data",
+                    reason="stale data",
+                    signal="BUY",
+                    symbol="SPY",
+                    timestamp=_to_iso_timestamp(_clock_timestamp(clock)),
+                )
+                buy_signal_blocks += 1
                 _safe_monitoring_call(
                     recorder,
                     "record_signal_snapshot",
@@ -679,6 +829,7 @@ def run_two_week_paper_runner(
             signal = signal_generator(day_prices["close"], 20, 50)
             summary["signal"] = signal
             normalized_signal = _normalized_signal(signal)
+            signals_observed += 1
             _emit_runner_log(
                 "SIGNAL_EVALUATION_COMPLETED",
                 generated_signal=normalized_signal,
@@ -743,6 +894,16 @@ def run_two_week_paper_runner(
                 _emit_runner_log("DAILY_ORDER_LIMIT_REACHED", limit="order_count", value=daily_order_count)
                 summary["decision"] = "skip"
                 summary["reason"] = "daily order count limit reached"
+                _safe_discord_alert(
+                    notifier,
+                    "buy_signal_blocked",
+                    f"{run_id}:{summary['date']}:daily_order_limit",
+                    reason="daily order limit",
+                    signal="BUY",
+                    symbol="SPY",
+                    timestamp=_to_iso_timestamp(_clock_timestamp(clock)),
+                )
+                buy_signal_blocks += 1
                 _safe_monitoring_call(
                     recorder,
                     "record_signal_snapshot",
@@ -768,6 +929,16 @@ def run_two_week_paper_runner(
                 )
                 summary["decision"] = "skip"
                 summary["reason"] = "daily submitted notional limit reached"
+                _safe_discord_alert(
+                    notifier,
+                    "buy_signal_blocked",
+                    f"{run_id}:{summary['date']}:daily_notional_limit",
+                    reason="daily notional limit",
+                    signal="BUY",
+                    symbol="SPY",
+                    timestamp=_to_iso_timestamp(_clock_timestamp(clock)),
+                )
+                buy_signal_blocks += 1
                 _safe_monitoring_call(
                     recorder,
                     "record_signal_snapshot",
@@ -790,6 +961,16 @@ def run_two_week_paper_runner(
                 _emit_runner_log("DUPLICATE_SIGNAL_BLOCKED", signal_identifier=signal_id)
                 summary["decision"] = "skip"
                 summary["reason"] = "duplicate signal detected"
+                _safe_discord_alert(
+                    notifier,
+                    "buy_signal_blocked",
+                    f"{run_id}:{summary['date']}:duplicate_signal",
+                    reason="duplicate signal",
+                    signal="BUY",
+                    symbol="SPY",
+                    timestamp=_to_iso_timestamp(_clock_timestamp(clock)),
+                )
+                buy_signal_blocks += 1
                 _safe_monitoring_call(
                     recorder,
                     "record_signal_snapshot",
@@ -812,6 +993,16 @@ def run_two_week_paper_runner(
             if _has_pending_or_unfilled_order(client, orders):
                 summary["decision"] = "skip"
                 summary["reason"] = "pending or unfilled order exists"
+                _safe_discord_alert(
+                    notifier,
+                    "buy_signal_blocked",
+                    f"{run_id}:{summary['date']}:pending_order",
+                    reason="pending order",
+                    signal="BUY",
+                    symbol="SPY",
+                    timestamp=_to_iso_timestamp(_clock_timestamp(clock)),
+                )
+                buy_signal_blocks += 1
                 _safe_monitoring_call(
                     recorder,
                     "record_signal_snapshot",
@@ -842,6 +1033,16 @@ def run_two_week_paper_runner(
                         _emit_runner_log("ORDER_COOLDOWN_ACTIVE", remaining_minutes=max(0, remaining))
                         summary["decision"] = "skip"
                         summary["reason"] = "cooldown active"
+                        _safe_discord_alert(
+                            notifier,
+                            "buy_signal_blocked",
+                            f"{run_id}:{summary['date']}:cooldown",
+                            reason="cooldown",
+                            signal="BUY",
+                            symbol="SPY",
+                            timestamp=_to_iso_timestamp(_clock_timestamp(clock)),
+                        )
+                        buy_signal_blocks += 1
                         _safe_monitoring_call(
                             recorder,
                             "record_signal_snapshot",
@@ -903,6 +1104,30 @@ def run_two_week_paper_runner(
             if order_record["submitted"]:
                 day_state["daily_order_count"] = daily_order_count + 1
                 day_state["daily_submitted_notional"] = round(daily_submitted_notional + ORDER_NOTIONAL, 4)
+                orders_submitted_total += 1
+                _safe_discord_alert(
+                    notifier,
+                    "paper_order_submitted",
+                    f"{run_id}:{summary['date']}:submitted:{signal_id}",
+                    symbol="SPY",
+                    notional=ORDER_NOTIONAL,
+                    signal=normalized_signal,
+                    order_id=order_record["order_id"],
+                    timestamp=order_record["timestamp"],
+                )
+
+            status_lower = str(order_record.get("status") or "").strip().lower()
+            if status_lower in {"filled", "rejected", "canceled", "cancelled"}:
+                _safe_discord_alert(
+                    notifier,
+                    "paper_order_status",
+                    f"{run_id}:{summary['date']}:status:{signal_id}:{status_lower}",
+                    symbol="SPY",
+                    status=status_lower,
+                    signal=normalized_signal,
+                    order_id=order_record["order_id"],
+                    timestamp=order_record["timestamp"],
+                )
 
             _write_daily_state(state_path, state_payload)
 
@@ -978,6 +1203,14 @@ def run_two_week_paper_runner(
                 safe_error_type=type(exc).__name__,
                 safe_error_message=_safe_error_message(exc),
             )
+            _safe_discord_bot_error(
+                notifier,
+                f"{run_id}:{summary['date']}:bot_error:{paper_run_stage}",
+                error_type=type(exc).__name__,
+                error_message=_safe_error_message(exc),
+                stage=paper_run_stage,
+                timestamp=_to_iso_timestamp(datetime.now(timezone.utc)),
+            )
             summaries.append(summary)
             _write_daily_summary(summary, summaries_dir)
             logger.error(
@@ -1020,6 +1253,33 @@ def run_two_week_paper_runner(
         notional=ORDER_NOTIONAL if last_summary else 0.0,
         safe_order_status=last_summary.get("reason", "unknown"),
     )
+
+    if review_required:
+        _safe_discord_alert(
+            notifier,
+            "review_required",
+            f"{run_id}:review_required:final",
+            reason=stop_reason,
+            review_required=True,
+            timestamp=_to_iso_timestamp(datetime.now(timezone.utc)),
+        )
+
+    if orders_submitted_total > 0 or buy_signal_blocks > 0 or review_required or bot_status == "error":
+        _safe_discord_alert(
+            notifier,
+            "end_of_day_summary",
+            f"{run_id}:summary:{(start_day or date.today()).isoformat()}:{days}",
+            runs_completed=len(summaries),
+            signals_observed=signals_observed,
+            orders_submitted=orders_submitted_total,
+            daily_submitted_notional=round(
+                float(_day_state(state_payload, last_summary.get("date", (start_day or date.today()).isoformat())).get("daily_submitted_notional", 0.0)),
+                4,
+            ) if summaries else 0.0,
+            current_paper_portfolio_value=last_summary.get("portfolio_value", "N/A"),
+            paper_pl=last_summary.get("total_pl", "N/A"),
+            timestamp=_to_iso_timestamp(datetime.now(timezone.utc)),
+        )
 
     return {
         "run_id": run_id,

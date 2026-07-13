@@ -118,6 +118,20 @@ class MockOrderManager:
         }
 
 
+class RecordingDiscordNotifier:
+    def __init__(self):
+        self.events = []
+
+    def send_alert(self, event, event_id, **fields):
+        self.events.append({"event": event, "event_id": event_id, "fields": fields})
+        return True
+
+
+class FailingDiscordNotifier:
+    def send_alert(self, event, event_id, **fields):
+        raise RuntimeError("authorization=Bearer discord-secret")
+
+
 def fake_prices(start="2026-01-01", periods=220):
     idx = pd.date_range(start=start, periods=periods, freq="D")
     return pd.DataFrame({"close": pd.Series(range(periods), index=idx, dtype=float)})
@@ -835,3 +849,76 @@ def test_next_runner_instance_loads_existing_state(monkeypatch, tmp_path, capsys
 
     output = capsys.readouterr().out
     assert "PAPER_DAILY_STATE_LOADED" in output
+
+
+def test_hold_runs_do_not_send_discord_alerts(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+
+    notifier = RecordingDiscordNotifier()
+
+    two_week_paper_runner.run_two_week_paper_runner(
+        start_day=date(2026, 7, 1),
+        days=1,
+        output_dir=tmp_path / "summaries",
+        report_path=tmp_path / "report.md",
+        dry_run=False,
+        submit_enabled=True,
+        trading_client_factory=lambda **kwargs: MockTradingClient(is_open=True, clock_timestamp=datetime(2026, 7, 1, 10, 0, 0)),
+        market_data_loader=lambda *args, **kwargs: fake_prices_with_last_close(100.0),
+        signal_generator=lambda *args, **kwargs: "hold",
+        order_manager_factory=lambda **kwargs: MockOrderManager(**kwargs),
+        discord_notifier_factory=lambda print_fn=print: notifier,
+    )
+
+    assert notifier.events == []
+
+
+def test_submitted_order_sends_single_order_submitted_alert(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+
+    notifier = RecordingDiscordNotifier()
+
+    two_week_paper_runner.run_two_week_paper_runner(
+        start_day=date(2026, 7, 1),
+        days=1,
+        output_dir=tmp_path / "summaries",
+        report_path=tmp_path / "report.md",
+        dry_run=False,
+        submit_enabled=True,
+        trading_client_factory=lambda **kwargs: MockTradingClient(is_open=True, clock_timestamp=datetime(2026, 7, 1, 10, 0, 0)),
+        market_data_loader=lambda *args, **kwargs: fake_prices_with_last_close(100.0),
+        signal_generator=lambda *args, **kwargs: "buy",
+        order_manager_factory=lambda **kwargs: MockOrderManager(**kwargs),
+        discord_notifier_factory=lambda print_fn=print: notifier,
+    )
+
+    order_submitted = [item for item in notifier.events if item["event"] == "paper_order_submitted"]
+    assert len(order_submitted) == 1
+
+
+def test_discord_notification_failure_does_not_affect_trading(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+
+    result = two_week_paper_runner.run_two_week_paper_runner(
+        start_day=date(2026, 7, 1),
+        days=1,
+        output_dir=tmp_path / "summaries",
+        report_path=tmp_path / "report.md",
+        dry_run=False,
+        submit_enabled=True,
+        trading_client_factory=lambda **kwargs: MockTradingClient(is_open=True, clock_timestamp=datetime(2026, 7, 1, 10, 0, 0)),
+        market_data_loader=lambda *args, **kwargs: fake_prices_with_last_close(100.0),
+        signal_generator=lambda *args, **kwargs: "buy",
+        order_manager_factory=lambda **kwargs: MockOrderManager(**kwargs),
+        discord_notifier_factory=lambda print_fn=print: FailingDiscordNotifier(),
+    )
+
+    assert result["days_processed"] == 1
+    summary_text = (tmp_path / "summaries" / "2026-07-01.md").read_text(encoding="utf-8")
+    assert "order submitted or skipped: submitted" in summary_text
