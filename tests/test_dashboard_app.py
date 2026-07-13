@@ -307,7 +307,10 @@ def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch)
         "recent_runs": _FakeDatabase().fetch_recent_runs(),
         "recent_orders": _FakeDatabase().fetch_recent_order_events(),
         "portfolio_history": list(reversed(_FakeDatabase().fetch_portfolio_history())),
-        "signal_history": list(reversed(_FakeDatabase().fetch_signal_history())),
+        "signal_history": [
+            {"snapshot_timestamp": "2026-07-12T14:45:00+00:00", "latest_price": 600.4, "short_moving_average": 599.9, "long_moving_average": 598.8, "generated_signal": "HOLD"},
+            {"snapshot_timestamp": "2026-07-12T15:00:00+00:00", "latest_price": 601.2, "short_moving_average": 600.5, "long_moving_average": 598.4, "generated_signal": "BUY"},
+        ],
         "order_count_by_day": list(reversed(_FakeDatabase().fetch_order_count_by_day())),
     })
     monkeypatch.setenv("TRADING_MODE", "PAPER")
@@ -315,12 +318,11 @@ def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch)
 
     dashboard_app.render_dashboard(database_url="postgresql://example")
 
-    tabs_calls = [call for call in fake_st._calls if call[0] == "tabs"]
-    assert tabs_calls
-    assert tabs_calls[0][1] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research"]
-    assert any(call[0] == "dataframe" for call in fake_st._calls)
-    assert any(call[0] == "line_chart" for call in fake_st._calls)
-    assert any(call[0] == "bar_chart" for call in fake_st._calls)
+    radio_calls = [call for call in fake_st._calls if call[0] == "radio"]
+    assert radio_calls
+    assert radio_calls[0][2] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research"]
+    assert any(call[0] == "markdown" and "DEAL QUANT UI — BUILD 4" in call[1] for call in fake_st._calls)
+    assert any(call[0] == "markdown" and "PRIMARY NAVIGATION" in call[1] for call in fake_st._calls)
 
 
 def test_refresh_calls_cache_clear_and_rerun_without_trading_actions(monkeypatch):
