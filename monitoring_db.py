@@ -339,7 +339,19 @@ class MonitoringDatabase:
 
     def fetch_signal_history(self, limit: int = 500) -> list[dict[str, Any]]:
         return self.query_all(
-            "SELECT snapshot_timestamp, generated_signal FROM signal_snapshots ORDER BY snapshot_timestamp DESC LIMIT ?",
+            """
+            SELECT
+                snapshot_timestamp,
+                generated_signal,
+                latest_price,
+                short_moving_average,
+                long_moving_average,
+                trade_or_skip_reason,
+                market_open
+            FROM signal_snapshots
+            ORDER BY snapshot_timestamp DESC
+            LIMIT ?
+            """,
             (int(limit),),
         )
 

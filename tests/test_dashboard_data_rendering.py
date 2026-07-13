@@ -131,7 +131,7 @@ def test_dashboard_view_model_handles_warning_error_and_market_closed_states():
     assert warning_view["bot_health"]["label"] == "Warning"
     assert warning_view["market_status"]["label"] == "Closed"
     assert warning_view["generated_signal"] == "HOLD"
-    assert warning_view["latest_spy_price"] == "Waiting for next market-hours run"
+    assert warning_view["latest_spy_price"] == "Waiting for the next market-hours update"
 
     error_payload = {
         "db_connected": True,

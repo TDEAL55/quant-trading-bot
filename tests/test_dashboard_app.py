@@ -1,4 +1,6 @@
 from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -51,8 +53,8 @@ def test_currency_formatting():
 
 
 def test_market_waiting_message_for_missing_values():
-    assert dashboard_app.market_display_value(None, {"market_open": 0}) == "Waiting for next market-hours run"
-    assert dashboard_app.market_display_value(None, {"market_open": 1}) == "Waiting for next market-hours run"
+    assert dashboard_app.market_display_value(None, {"market_open": 0}) == "Waiting for the next market-hours update"
+    assert dashboard_app.market_display_value(None, {"market_open": 1}) == "Waiting for the next market-hours update"
 
 
 def test_empty_state_messages():
@@ -70,6 +72,29 @@ def test_format_percent_and_mobile_layout_helpers():
     assert dashboard_app.format_percent(-1.25) == "-1.25%"
     assert dashboard_app.is_mobile_layout(320) is True
     assert dashboard_app.is_mobile_layout(1080) is False
+
+
+def test_market_clock_open_and_closed_states():
+    tz = ZoneInfo("America/New_York")
+    open_dt = datetime(2026, 7, 13, 10, 0, 0, tzinfo=tz)
+    closed_dt = datetime(2026, 7, 12, 10, 0, 0, tzinfo=tz)
+
+    open_clock = dashboard_app.build_market_clock(open_dt)
+    closed_clock = dashboard_app.build_market_clock(closed_dt)
+
+    assert open_clock["label"] == "MARKET OPEN"
+    assert open_clock["is_open"] is True
+    assert closed_clock["label"] == "MARKET CLOSED"
+    assert closed_clock["is_open"] is False
+
+
+def test_signal_strength_meter_boundaries():
+    weak = dashboard_app.build_signal_strength(0.01)
+    strong = dashboard_app.build_signal_strength(9.0)
+
+    assert weak["value"] >= 0.0
+    assert strong["value"] == 1.0
+    assert "Informational" in strong["description"]
 
 
 class _FakeContainer:
@@ -106,6 +131,12 @@ class _FakeContainer:
     def text_input(self, label, value="", type="default"):
         self._st._calls.append(("container_text_input", label, value, type))
         return value
+
+    def progress(self, value):
+        self._st._calls.append(("container_progress", value))
+
+    def caption(self, value):
+        self._st._calls.append(("container_caption", value))
 
 
 class _FakeStreamlit(_FakeContainer):
@@ -149,6 +180,10 @@ class _FakeStreamlit(_FakeContainer):
     def tabs(self, names):
         self._calls.append(("tabs", names))
         return [_FakeContainer(self, button_return=self._button_return) for _ in names]
+
+    def radio(self, label, options, horizontal=False):
+        self._calls.append(("radio", label, options, horizontal))
+        return options[0]
 
     def progress(self, value):
         self._calls.append(("progress", value))
@@ -282,7 +317,7 @@ def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch)
 
     tabs_calls = [call for call in fake_st._calls if call[0] == "tabs"]
     assert tabs_calls
-    assert tabs_calls[0][1] == ["Overview", "Strategy", "Account", "Orders", "Performance", "System Health", "Research"]
+    assert tabs_calls[0][1] == ["Overview", "Strategy", "Account", "Orders", "Performance", "System Health", "Notification Center", "Architecture", "Research"]
     assert any(call[0] == "dataframe" for call in fake_st._calls)
     assert any(call[0] == "line_chart" for call in fake_st._calls)
     assert any(call[0] == "bar_chart" for call in fake_st._calls)
@@ -316,3 +351,38 @@ def test_refresh_calls_cache_clear_and_rerun_without_trading_actions(monkeypatch
 
     assert any(call[0] == "cache_clear" for call in fake_st._calls)
     assert any(call[0] == "rerun" for call in fake_st._calls)
+
+
+def test_notification_builder_and_empty_positions_state():
+    payload = {
+        "db_connected": True,
+        "latest_run": {"run_timestamp": "2026-07-12T15:00:00+00:00", "bot_status": "healthy", "review_required": 0, "trading_mode": "PAPER"},
+        "latest_success": {"run_timestamp": "2026-07-12T15:00:00+00:00"},
+        "latest_signal": {"market_open": 1, "generated_signal": "HOLD", "daily_submitted_order_count": 0, "daily_submitted_notional": 0.0},
+        "latest_account": {"portfolio_value": 1000.0, "cash": 1000.0, "buying_power": 1000.0, "open_positions": 0, "account_status": "ACTIVE"},
+        "recent_runs": [],
+        "recent_orders": [
+            {"submitted": 0, "stop_reason": "daily order limit reached", "event_timestamp": "2026-07-12T15:00:00+00:00", "signal": "BUY", "safe_order_status": "blocked", "symbol": "SPY"}
+        ],
+        "portfolio_history": [{"portfolio_value": 1000.0}],
+        "signal_history": [],
+        "order_count_by_day": [],
+    }
+    view = dashboard_app.build_dashboard_view_model(payload)
+    notices = dashboard_app.build_notification_items(payload, view)
+    assert any(item["severity"] == "Warning" for item in notices)
+    assert view["open_position_value"] == 0.0
+
+
+def test_disconnected_database_payload_is_safe(monkeypatch):
+    class _BrokenDb:
+        def __init__(self, database_url=None):
+            self.enabled = True
+
+        def ensure_schema(self):
+            raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr(dashboard_app, "MonitoringDatabase", _BrokenDb)
+    payload = dashboard_app._fetch_payload_uncached("sqlite:///ignore.db")
+    assert payload["db_connected"] is False
+    assert payload["recent_orders"] == []

@@ -1,6 +1,6 @@
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, time, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -15,6 +15,16 @@ try:
 except Exception:  # pragma: no cover
     px = None
 
+try:
+    import plotly.graph_objects as go
+except Exception:  # pragma: no cover
+    go = None
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:  # pragma: no cover
+    st_autorefresh = None
+
 from monitoring_db import MonitoringDatabase
 
 
@@ -22,6 +32,8 @@ MAX_DAILY_ORDERS = 3
 MAX_DAILY_SUBMITTED_NOTIONAL = 30.0
 DASHBOARD_VERSION = "v2.0"
 EASTERN_TZ = ZoneInfo("America/New_York")
+MARKET_OPEN_ET = time(9, 30)
+MARKET_CLOSE_ET = time(16, 0)
 
 STATUS_COLORS = {
     "healthy": "#21c46b",
@@ -32,6 +44,193 @@ STATUS_COLORS = {
     "hold": "#8a96a8",
     "sell": "#ff5c5c",
 }
+
+THEMES = {
+    "Midnight Blue": {
+        "bg": "radial-gradient(circle at 10% 10%, #1a1e2e 0%, #0e1119 48%, #090c13 100%)",
+        "panel": "linear-gradient(130deg, rgba(22, 28, 42, 0.78), rgba(15, 21, 34, 0.66))",
+        "text": "#e8eefc",
+        "subtle": "#a8b4ca",
+        "accent": "#44a3ff",
+        "grid": "rgba(68, 163, 255, 0.10)",
+    },
+    "Black Terminal": {
+        "bg": "radial-gradient(circle at 20% 0%, #121212 0%, #080808 58%, #040404 100%)",
+        "panel": "linear-gradient(130deg, rgba(14, 14, 14, 0.84), rgba(8, 8, 8, 0.74))",
+        "text": "#e8f0e8",
+        "subtle": "#9ab29a",
+        "accent": "#2ecb70",
+        "grid": "rgba(46, 203, 112, 0.10)",
+    },
+}
+
+
+def _theme_palette(theme_name: str):
+    return THEMES.get(theme_name, THEMES["Midnight Blue"])
+
+
+def _is_market_day(dt_et: datetime) -> bool:
+    return dt_et.weekday() < 5
+
+
+def _next_market_open(dt_et: datetime) -> datetime:
+    candidate = dt_et
+    if _is_market_day(candidate) and candidate.time() < MARKET_OPEN_ET:
+        return candidate.replace(hour=MARKET_OPEN_ET.hour, minute=MARKET_OPEN_ET.minute, second=0, microsecond=0)
+
+    candidate = candidate + timedelta(days=1)
+    while not _is_market_day(candidate):
+        candidate += timedelta(days=1)
+    return candidate.replace(hour=MARKET_OPEN_ET.hour, minute=MARKET_OPEN_ET.minute, second=0, microsecond=0)
+
+
+def _next_market_close(dt_et: datetime) -> datetime:
+    return dt_et.replace(hour=MARKET_CLOSE_ET.hour, minute=MARKET_CLOSE_ET.minute, second=0, microsecond=0)
+
+
+def format_countdown(delta: timedelta) -> str:
+    seconds = max(int(delta.total_seconds()), 0)
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def build_market_clock(now_et: datetime | None = None) -> dict[str, Any]:
+    now_et = now_et or datetime.now(EASTERN_TZ)
+    is_day = _is_market_day(now_et)
+    is_open = is_day and MARKET_OPEN_ET <= now_et.time() < MARKET_CLOSE_ET
+    if is_open:
+        target = _next_market_close(now_et)
+        return {
+            "label": "MARKET OPEN",
+            "style": "healthy",
+            "is_open": True,
+            "countdown_label": "Closes in",
+            "countdown": format_countdown(target - now_et),
+            "time_text": now_et.strftime("%Y-%m-%d %I:%M:%S %p ET"),
+        }
+
+    target = _next_market_open(now_et)
+    return {
+        "label": "MARKET CLOSED",
+        "style": "neutral",
+        "is_open": False,
+        "countdown_label": "Opens in",
+        "countdown": format_countdown(target - now_et),
+        "time_text": now_et.strftime("%Y-%m-%d %I:%M:%S %p ET"),
+    }
+
+
+def _parse_iso(value) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        normalized = text.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _timeframe_window(timeframe: str) -> timedelta:
+    if timeframe == "1D":
+        return timedelta(days=1)
+    if timeframe == "5D":
+        return timedelta(days=5)
+    if timeframe == "1M":
+        return timedelta(days=31)
+    return timedelta(days=93)
+
+
+def _bucket_seconds(timeframe: str) -> int:
+    if timeframe == "1D":
+        return 5 * 60
+    if timeframe == "5D":
+        return 30 * 60
+    if timeframe == "1M":
+        return 2 * 60 * 60
+    return 4 * 60 * 60
+
+
+def build_price_points(signal_history, timeframe="1D"):
+    points = []
+    for row in signal_history or []:
+        price = row.get("latest_price")
+        ts = _parse_iso(row.get("snapshot_timestamp"))
+        if ts is None:
+            continue
+        price_number = _as_float(price, None)
+        if price_number is None:
+            continue
+        points.append(
+            {
+                "timestamp": ts,
+                "price": price_number,
+                "short_ma": _as_float(row.get("short_moving_average"), None),
+                "long_ma": _as_float(row.get("long_moving_average"), None),
+                "signal": normalize_signal(row.get("generated_signal", "HOLD")),
+            }
+        )
+
+    if not points:
+        return []
+
+    points.sort(key=lambda x: x["timestamp"])
+    end_time = points[-1]["timestamp"]
+    window = _timeframe_window(timeframe)
+    start_time = end_time - window
+    filtered = [item for item in points if item["timestamp"] >= start_time]
+    return filtered if filtered else points
+
+
+def build_ohlc_series(price_points, timeframe="1D"):
+    if not price_points:
+        return []
+    bucket_seconds = _bucket_seconds(timeframe)
+    buckets = {}
+    for point in price_points:
+        ts = point["timestamp"]
+        epoch = int(ts.timestamp())
+        bucket_epoch = epoch - (epoch % bucket_seconds)
+        bucket = buckets.setdefault(
+            bucket_epoch,
+            {
+                "timestamp": datetime.fromtimestamp(bucket_epoch, tz=timezone.utc),
+                "open": point["price"],
+                "high": point["price"],
+                "low": point["price"],
+                "close": point["price"],
+                "short_ma": point.get("short_ma"),
+                "long_ma": point.get("long_ma"),
+            },
+        )
+        bucket["high"] = max(bucket["high"], point["price"])
+        bucket["low"] = min(bucket["low"], point["price"])
+        bucket["close"] = point["price"]
+        if point.get("short_ma") is not None:
+            bucket["short_ma"] = point["short_ma"]
+        if point.get("long_ma") is not None:
+            bucket["long_ma"] = point["long_ma"]
+
+    candles = [buckets[key] for key in sorted(buckets.keys())]
+    for candle in candles:
+        candle["timestamp"] = candle["timestamp"].astimezone(EASTERN_TZ)
+    return candles
+
+
+def build_signal_strength(ma_distance_value):
+    distance = abs(_as_float(ma_distance_value, 0.0))
+    max_distance = 2.0
+    strength = min(distance / max_distance, 1.0)
+    return {
+        "value": strength,
+        "percent": int(round(strength * 100)),
+        "description": "Informational only - based on moving-average separation",
+    }
 
 
 if st is not None and hasattr(st, "cache_data"):
@@ -79,7 +278,7 @@ def _safe_text(value, fallback=""):
     patterns = [
         r"(?i)(api[_-]?key\s*[=:]\s*)([^\s,;]+)",
         r"(?i)(api[_-]?secret\s*[=:]\s*)([^\s,;]+)",
-        r"(?i)(authorization\s*[=:]\s*)([^\s,;]+)",
+        r"(?i)(authorization\s*[=:]\s*)(?:bearer\s+)?([^\s,;]+)",
         r"(?i)(token\s*[=:]\s*)([^\s,;]+)",
         r"(?i)(account(?:[_-]?(?:id|number))?\s*[=:]\s*)([^\s,;]+)",
     ]
@@ -135,7 +334,7 @@ def friendly_status_text(value: Any, fallback="Unknown"):
     return text.title()
 
 
-def format_timestamp_eastern(value, fallback="Waiting for the next market-hours run"):
+def format_timestamp_eastern(value, fallback="Waiting for the next market-hours update"):
     text = str(value or "").strip()
     if not text:
         return fallback
@@ -179,7 +378,7 @@ def classify_signal(signal):
 
 def market_display_value(value, latest_signal):
     if value is None:
-        return "Waiting for next market-hours run"
+        return "Waiting for the next market-hours update"
     if not _as_bool((latest_signal or {}).get("market_open")):
         return value
     return value
@@ -243,7 +442,7 @@ def build_run_history_rows(recent_runs, recent_orders):
                 "Symbol": run.get("symbol", "SPY"),
                 "Notional": format_currency(run.get("notional"), "$0.00"),
                 "Order Status": friendly_status_text(run.get("safe_order_status"), "Unknown"),
-                "Stop Reason": _safe_text(run.get("stop_reason", ""), "Waiting for the next market-hours run"),
+                "Stop Reason": _safe_text(run.get("stop_reason", ""), "Waiting for the next market-hours update"),
                 "Review Required": bool(_as_bool(run.get("review_required"))),
                 "Safe Error Message": _safe_text(run.get("safe_error_message", ""), ""),
             }
@@ -307,6 +506,27 @@ def build_dashboard_view_model(payload):
     market_text, market_style = classify_market_status(latest_signal)
     signal_text, signal_style = classify_signal(latest_signal.get("generated_signal"))
     daily_pl, total_pl = calculate_daily_and_total_pl(portfolio_history)
+    previous_portfolio = _as_float(portfolio_history[-2].get("portfolio_value"), 0.0) if len(portfolio_history) >= 2 else None
+
+    signal_history = payload.get("signal_history") or []
+    recent_prices = [
+        _as_float(item.get("latest_price"), None)
+        for item in signal_history
+        if _as_float(item.get("latest_price"), None) is not None
+    ]
+    previous_price = recent_prices[-2] if len(recent_prices) >= 2 else None
+
+    mission_signal_counts = {"BUY": 0, "HOLD": 0, "SELL": 0}
+    for item in signal_history:
+        normalized = normalize_signal(item.get("generated_signal"))
+        mission_signal_counts[normalized] = mission_signal_counts.get(normalized, 0) + 1
+
+    recent_orders = payload.get("recent_orders") or []
+    blocked_orders = len([o for o in recent_orders if not _as_bool(o.get("submitted"))])
+    submitted_orders = len([o for o in recent_orders if _as_bool(o.get("submitted"))])
+    daily_notional_used = _as_float(latest_signal.get("daily_submitted_notional"), 0.0)
+    remaining_order_capacity = max(MAX_DAILY_ORDERS - int(latest_signal.get("daily_submitted_order_count") or 0), 0)
+    open_position_value = max(_as_float(latest_account.get("portfolio_value"), 0.0) - _as_float(latest_account.get("cash"), 0.0), 0.0)
 
     return {
         "bot_health": {"label": bot_health_text, "style": bot_health_style},
@@ -315,18 +535,18 @@ def build_dashboard_view_model(payload):
         "last_successful_run": format_timestamp_eastern(latest_success.get("run_timestamp")),
         "trading_mode": friendly_status_text(latest_run.get("trading_mode"), "Paper"),
         "review_required": bool(_as_bool(latest_run.get("review_required"))),
-        "latest_stop_reason": _safe_text(latest_run.get("stop_reason"), "Waiting for the next market-hours run"),
+        "latest_stop_reason": _safe_text(latest_run.get("stop_reason"), "Waiting for the next market-hours update"),
         "latest_safe_error_message": _safe_text(latest_run.get("safe_error_message"), ""),
         "last_run_timestamp": format_timestamp_eastern(latest_run.get("run_timestamp")),
         "last_successful_run_timestamp": format_timestamp_eastern(latest_success.get("run_timestamp")),
         "daily_submitted_order_count": int(latest_signal.get("daily_submitted_order_count") or 0),
         "daily_submitted_notional": _as_float(latest_signal.get("daily_submitted_notional"), 0.0),
         "latest_spy_price": market_display_value(latest_signal.get("latest_price"), latest_signal),
-        "latest_market_data_timestamp": format_timestamp_eastern(latest_signal.get("latest_market_data_timestamp"), "Waiting for next market-hours run"),
+        "latest_market_data_timestamp": format_timestamp_eastern(latest_signal.get("latest_market_data_timestamp"), "Waiting for the next market-hours update"),
         "short_moving_average": market_display_value(latest_signal.get("short_moving_average"), latest_signal),
         "long_moving_average": market_display_value(latest_signal.get("long_moving_average"), latest_signal),
         "generated_signal": signal_text,
-        "trade_or_skip_reason": _safe_text(latest_signal.get("trade_or_skip_reason"), "Waiting for next market-hours run"),
+        "trade_or_skip_reason": _safe_text(latest_signal.get("trade_or_skip_reason"), "Waiting for the next market-hours update"),
         "cooldown_status": friendly_status_text(latest_signal.get("cooldown_status"), "Unknown"),
         "duplicate_signal_status": friendly_status_text(latest_signal.get("duplicate_signal_status"), "Unknown"),
         "pending_order_status": friendly_status_text(latest_signal.get("pending_order_status"), "Unknown"),
@@ -341,6 +561,19 @@ def build_dashboard_view_model(payload):
         "today_pl": daily_pl,
         "total_pl": total_pl,
         "ma_distance": moving_average_distance(latest_signal.get("short_moving_average"), latest_signal.get("long_moving_average")),
+        "previous_portfolio_value": previous_portfolio,
+        "previous_spy_price": previous_price,
+        "signal_strength": build_signal_strength(moving_average_distance(latest_signal.get("short_moving_average"), latest_signal.get("long_moving_average"))),
+        "open_position_value": open_position_value,
+        "mission_summary": {
+            "runs_completed": len(payload.get("recent_runs") or []),
+            "signal_counts": mission_signal_counts,
+            "submitted_orders": submitted_orders,
+            "blocked_orders": blocked_orders,
+            "daily_notional_used": daily_notional_used,
+            "remaining_order_capacity": remaining_order_capacity,
+            "latest_stop_reason": _safe_text(latest_run.get("stop_reason"), "Waiting for the next market-hours update"),
+        },
     }
 
 
@@ -362,16 +595,19 @@ def _fetch_payload_uncached(database_url: str | None):
     if not db.enabled:
         return payload
 
-    db.ensure_schema()
-    payload["latest_run"] = db.fetch_latest_bot_run() or {}
-    payload["latest_success"] = db.fetch_latest_successful_run() or {}
-    payload["latest_signal"] = db.fetch_latest_signal_snapshot() or {}
-    payload["latest_account"] = db.fetch_latest_account_snapshot() or {}
-    payload["recent_runs"] = db.fetch_recent_runs(limit=100)
-    payload["recent_orders"] = db.fetch_recent_order_events(limit=250)
-    payload["portfolio_history"] = list(reversed(db.fetch_portfolio_history(limit=500)))
-    payload["signal_history"] = list(reversed(db.fetch_signal_history(limit=500)))
-    payload["order_count_by_day"] = list(reversed(db.fetch_order_count_by_day(limit=365)))
+    try:
+        db.ensure_schema()
+        payload["latest_run"] = db.fetch_latest_bot_run() or {}
+        payload["latest_success"] = db.fetch_latest_successful_run() or {}
+        payload["latest_signal"] = db.fetch_latest_signal_snapshot() or {}
+        payload["latest_account"] = db.fetch_latest_account_snapshot() or {}
+        payload["recent_runs"] = db.fetch_recent_runs(limit=100)
+        payload["recent_orders"] = db.fetch_recent_order_events(limit=250)
+        payload["portfolio_history"] = list(reversed(db.fetch_portfolio_history(limit=500)))
+        payload["signal_history"] = list(reversed(db.fetch_signal_history(limit=500)))
+        payload["order_count_by_day"] = list(reversed(db.fetch_order_count_by_day(limit=365)))
+    except Exception:
+        payload["db_connected"] = False
     return payload
 
 
@@ -380,97 +616,262 @@ def clear_dashboard_cache():
         st.cache_data.clear()
 
 
-def apply_dashboard_css():
+def apply_dashboard_css(theme_name="Midnight Blue"):
+    palette = _theme_palette(theme_name)
     st.markdown(
-        """
+        f"""
         <style>
-        .stApp {
-            background: radial-gradient(circle at 10% 10%, #1a1e2e 0%, #0e1119 48%, #090c13 100%);
-            color: #e8eefc;
-        }
-        .dq-logo {
-            font-size: 0.85rem;
-            letter-spacing: 0.2rem;
-            font-weight: 700;
-            color: #44a3ff;
-            margin-bottom: 0.4rem;
-        }
-        .dq-subtitle {
-            color: #a9b7d0;
-            margin-top: -0.6rem;
-            margin-bottom: 1rem;
-        }
-        .dq-badge {
+        .stApp {{
+            background: {palette['bg']};
+            color: {palette['text']};
+        }}
+        .main .block-container {{
+            padding-top: 1.2rem;
+            max-width: 1280px;
+        }}
+        .dq-logo {{
+            font-size: 1.1rem;
+            letter-spacing: 0.28rem;
+            font-weight: 800;
+            color: {palette['accent']};
+            margin-bottom: 0.3rem;
+            text-transform: uppercase;
+            text-shadow: 0 0 14px {palette['grid']};
+        }}
+        .dq-subtitle {{
+            color: {palette['subtle']};
+            margin-top: -0.4rem;
+            margin-bottom: 0.8rem;
+            font-size: 0.82rem;
+            letter-spacing: 0.12rem;
+        }}
+        .dq-theme-badge {{
+            display: inline-block;
+            border-radius: 999px;
+            padding: 0.26rem 0.68rem;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid {palette['grid']};
+            color: {palette['text']};
+            font-weight: 600;
+            font-size: 0.72rem;
+        }}
+        .dq-ticker {{
+            position: relative;
+            overflow: hidden;
+            border-radius: 12px;
+            border: 1px solid {palette['grid']};
+            background: rgba(6, 11, 20, 0.35);
+            margin-bottom: 0.85rem;
+            padding: 0.45rem 0;
+        }}
+        .dq-ticker-track {{
+            display: inline-flex;
+            gap: 1.8rem;
+            align-items: center;
+            padding-left: 1rem;
+            white-space: nowrap;
+            animation: dqTickerMove 22s linear infinite;
+        }}
+        .dq-ticker-item {{
+            color: {palette['text']};
+            font-size: 0.82rem;
+            letter-spacing: 0.01rem;
+        }}
+        .dq-ticker-label {{
+            color: {palette['subtle']};
+            margin-right: 0.25rem;
+        }}
+        .dq-card {{
+            background: {palette['panel']};
+            border: 1px solid {palette['grid']};
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+            border-radius: 16px;
+            padding: 0.95rem 1.05rem;
+            margin-bottom: 0.75rem;
+            animation: dqFadeIn 0.32s ease-in;
+        }}
+        .dq-hero {{
+            position: relative;
+            overflow: hidden;
+            background: linear-gradient(135deg, rgba(18, 34, 56, 0.62), rgba(8, 16, 30, 0.38));
+        }}
+        .dq-hero::after {{
+            content: "";
+            position: absolute;
+            inset: 0;
+            background-image: linear-gradient(to right, {palette['grid']} 1px, transparent 1px), linear-gradient(to bottom, {palette['grid']} 1px, transparent 1px);
+            background-size: 30px 30px;
+            opacity: 0.35;
+            pointer-events: none;
+        }}
+        .dq-hero-value {{
+            font-size: 2.05rem;
+            font-weight: 800;
+            margin-top: 0.3rem;
+            color: {palette['text']};
+        }}
+        .dq-label {{
+            color: {palette['subtle']};
+            font-size: 0.8rem;
+            letter-spacing: 0.06rem;
+            text-transform: uppercase;
+        }}
+        .dq-value {{
+            color: {palette['text']};
+            font-size: 1.06rem;
+            font-weight: 650;
+        }}
+        .dq-badge {{
             display: inline-block;
             border-radius: 999px;
             padding: 0.35rem 0.7rem;
-            background: rgba(33, 196, 107, 0.25);
-            border: 1px solid rgba(33, 196, 107, 0.55);
+            background: rgba(33, 196, 107, 0.22);
+            border: 1px solid rgba(33, 196, 107, 0.48);
             color: #72e4ab;
             font-weight: 700;
-            box-shadow: 0 0 12px rgba(33, 196, 107, 0.45);
-        }
-        .dq-card {
-            background: linear-gradient(130deg, rgba(22, 28, 42, 0.72), rgba(15, 21, 34, 0.62));
-            border: 1px solid rgba(100, 130, 200, 0.22);
-            box-shadow: 0 6px 22px rgba(0, 0, 0, 0.28);
-            border-radius: 16px;
-            padding: 0.95rem 1.05rem;
-            margin-bottom: 0.7rem;
-            animation: dqFadeIn 0.35s ease-in;
-            transition: all 0.18s ease;
-        }
-        .dq-card:hover {
-            transform: translateY(-1px);
-            border-color: rgba(100, 160, 255, 0.38);
-        }
-        .dq-label {
-            color: #a8b4ca;
-            font-size: 0.83rem;
-            letter-spacing: 0.02rem;
-        }
-        .dq-value {
-            color: #f4f8ff;
-            font-size: 1.06rem;
-            font-weight: 600;
-        }
-        .dq-pulse {
+        }}
+        .dq-pulse {{
             width: 10px;
             height: 10px;
             border-radius: 50%;
             display: inline-block;
             margin-right: 0.4rem;
             animation: dqPulse 1.8s infinite;
-        }
-        .dq-alert {
+        }}
+        .dq-badge-neutral {{
+            background: rgba(138, 150, 168, 0.22);
+            border-color: rgba(138, 150, 168, 0.55);
+            color: #d4dae3;
+        }}
+        .dq-orb {{
+            width: 114px;
+            height: 114px;
+            border-radius: 999px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: 1.1rem;
+            margin: 0 auto;
+            box-shadow: inset 0 0 30px rgba(255, 255, 255, 0.08), 0 0 20px rgba(0, 0, 0, 0.3);
+        }}
+        .dq-market-indicator {{
+            width: 10px;
+            height: 10px;
+            border-radius: 999px;
+            display: inline-block;
+            margin-right: 0.45rem;
+        }}
+        .dq-market-open {{
+            background: #21c46b;
+            animation: dqPulse 1.7s infinite;
+        }}
+        .dq-market-closed {{
+            background: #8a96a8;
+        }}
+        .dq-alert {{
             border-radius: 12px;
             border: 1px solid rgba(255, 92, 92, 0.6);
             background: rgba(255, 92, 92, 0.12);
             padding: 0.7rem 0.85rem;
             margin-bottom: 0.8rem;
             color: #ffd2d2;
-        }
-        @keyframes dqPulse {
-            0% { box-shadow: 0 0 0 0 rgba(68, 163, 255, 0.7); }
-            70% { box-shadow: 0 0 0 10px rgba(68, 163, 255, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(68, 163, 255, 0); }
-        }
-        @keyframes dqFadeIn {
-            from { opacity: 0.0; transform: translateY(4px); }
-            to { opacity: 1.0; transform: translateY(0px); }
-        }
+        }}
+        .dq-skeleton {{
+            border-radius: 10px;
+            height: 54px;
+            margin-bottom: 0.55rem;
+            background: linear-gradient(90deg, rgba(255,255,255,0.06), rgba(255,255,255,0.12), rgba(255,255,255,0.06));
+            background-size: 200% 100%;
+            animation: dqShimmer 1.3s linear infinite;
+        }}
+        .dq-timeline-item {{
+            border-left: 2px solid {palette['grid']};
+            padding-left: 0.7rem;
+            margin-bottom: 0.7rem;
+        }}
+        .dq-alert-pill {{
+            display: inline-block;
+            border-radius: 999px;
+            padding: 0.14rem 0.58rem;
+            margin-right: 0.35rem;
+            font-size: 0.72rem;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+        }}
+        .dq-empty-state {{
+            border-radius: 14px;
+            padding: 0.9rem;
+            border: 1px dashed {palette['grid']};
+            color: {palette['subtle']};
+            background: rgba(6, 11, 20, 0.25);
+        }}
+        [data-testid="stDataFrame"], .stTable {{
+            overflow-x: auto !important;
+        }}
+        @media (max-width: 768px) {{
+            .main .block-container {{
+                padding-left: 0.6rem;
+                padding-right: 0.6rem;
+            }}
+            .dq-hero-value {{
+                font-size: 1.6rem;
+            }}
+            .dq-orb {{
+                width: 96px;
+                height: 96px;
+                font-size: 0.95rem;
+            }}
+        }}
+        @keyframes dqPulse {{
+            0% {{ box-shadow: 0 0 0 0 rgba(33, 196, 107, 0.58); }}
+            70% {{ box-shadow: 0 0 0 10px rgba(33, 196, 107, 0); }}
+            100% {{ box-shadow: 0 0 0 0 rgba(33, 196, 107, 0); }}
+        }}
+        @keyframes dqFadeIn {{
+            from {{ opacity: 0.0; transform: translateY(4px); }}
+            to {{ opacity: 1.0; transform: translateY(0px); }}
+        }}
+        @keyframes dqShimmer {{
+            0% {{ background-position: 200% 0; }}
+            100% {{ background-position: -200% 0; }}
+        }}
+        @keyframes dqTickerMove {{
+            0% {{ transform: translateX(0); }}
+            100% {{ transform: translateX(-35%); }}
+        }}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-def _metric_card(container, label, value, style_key="neutral"):
+def _direction_arrow(current_value, previous_value):
+    if previous_value is None:
+        return ""
+    delta = _as_float(current_value, 0.0) - _as_float(previous_value, 0.0)
+    if delta > 0:
+        return "↑"
+    if delta < 0:
+        return "↓"
+    return "→"
+
+
+def _metric_card(container, label, value, style_key="neutral", trend_arrow=""):
     color = STATUS_COLORS.get(style_key, STATUS_COLORS["neutral"])
+    arrow_html = f" <span style='font-size:0.95rem;'>{trend_arrow}</span>" if trend_arrow else ""
     container.markdown(
-        f"<div class='dq-card'><div class='dq-label'>{label}</div><div class='dq-value' style='color:{color};'>{value}</div></div>",
+        f"<div class='dq-card'><div class='dq-label'>{label}</div><div class='dq-value' style='color:{color};'>{value}{arrow_html}</div></div>",
         unsafe_allow_html=True,
     )
+
+
+def _badge(container, text, style="healthy"):
+    css_class = "dq-badge" if style == "healthy" else "dq-badge dq-badge-neutral"
+    container.markdown(f"<span class='{css_class}'>{text}</span>", unsafe_allow_html=True)
+
+
+def _empty_state(message):
+    st.markdown(f"<div class='dq-empty-state'>{message}</div>", unsafe_allow_html=True)
 
 
 def _safe_plotly_chart(fig, fallback_message):
@@ -483,15 +884,32 @@ def _safe_plotly_chart(fig, fallback_message):
         st.info(fallback_message)
 
 
-def render_header(payload):
-    now_eastern = datetime.now(EASTERN_TZ).strftime("%Y-%m-%d %I:%M:%S %p ET")
+def render_loading_skeleton():
+    st.markdown("<div class='dq-skeleton'></div><div class='dq-skeleton'></div><div class='dq-skeleton'></div>", unsafe_allow_html=True)
+
+
+def render_header(payload, view):
+    clock = build_market_clock()
     if "dashboard_last_refresh" not in st.session_state:
         st.session_state["dashboard_last_refresh"] = datetime.now(timezone.utc).isoformat()
 
-    left, mid, right = st.columns([6, 2, 2])
+    left, mid, right = st.columns([5.2, 2.2, 2.6])
     left.markdown("<div class='dq-logo'>DEAL QUANT</div>", unsafe_allow_html=True)
     left.title("DEAL QUANT COMMAND CENTER")
-    left.markdown("<div class='dq-subtitle'>Automated Paper Trading Intelligence</div>", unsafe_allow_html=True)
+    left.markdown("<div class='dq-subtitle'>AUTOMATED PAPER MARKET INTELLIGENCE</div>", unsafe_allow_html=True)
+
+    ticker_items = [
+        f"<span class='dq-ticker-item'><span class='dq-ticker-label'>SPY</span>{format_currency(view.get('latest_spy_price')) if isinstance(view.get('latest_spy_price'), (int, float)) else view.get('latest_spy_price')}</span>",
+        f"<span class='dq-ticker-item'><span class='dq-ticker-label'>Signal</span>{view.get('generated_signal', 'HOLD')}</span>",
+        f"<span class='dq-ticker-item'><span class='dq-ticker-label'>Market</span>{clock['label']}</span>",
+        f"<span class='dq-ticker-item'><span class='dq-ticker-label'>Portfolio</span>{format_currency(view.get('portfolio_value'))} {_direction_arrow(view.get('portfolio_value'), view.get('previous_portfolio_value'))}</span>",
+        f"<span class='dq-ticker-item'><span class='dq-ticker-label'>Today P/L</span>{format_currency(view.get('today_pl'))} {_direction_arrow(view.get('today_pl'), 0.0)}</span>",
+        f"<span class='dq-ticker-item'><span class='dq-ticker-label'>Orders Used</span>{view.get('daily_submitted_order_count', 0)} / {MAX_DAILY_ORDERS}</span>",
+    ]
+    left.markdown(
+        "<div class='dq-ticker'><div class='dq-ticker-track'>" + "".join(ticker_items + ticker_items) + "</div></div>",
+        unsafe_allow_html=True,
+    )
 
     online_color = STATUS_COLORS["healthy"] if payload.get("db_connected") else STATUS_COLORS["error"]
     online_text = "ONLINE" if payload.get("db_connected") else "OFFLINE"
@@ -499,9 +917,14 @@ def render_header(payload):
         f"<span class='dq-pulse' style='background:{online_color};'></span><span class='dq-value'>{online_text}</span>",
         unsafe_allow_html=True,
     )
-    mid.markdown("<div class='dq-badge'>PAPER TRADING</div>", unsafe_allow_html=True)
+    _badge(mid, "PAPER ONLY")
+    mid.markdown(f"<span class='dq-theme-badge'>{st.session_state.get('dashboard_theme', 'Midnight Blue')}</span>", unsafe_allow_html=True)
 
-    right.metric("Eastern Time", now_eastern)
+    market_indicator = "dq-market-open" if clock["is_open"] else "dq-market-closed"
+    right.markdown(
+        f"<div class='dq-card'><div class='dq-label'>Eastern Time</div><div class='dq-value'>{clock['time_text']}</div><div class='dq-label'><span class='dq-market-indicator {market_indicator}'></span>{clock['label']} | {clock['countdown_label']} {clock['countdown']}</div></div>",
+        unsafe_allow_html=True,
+    )
     right.metric("Last Refresh", format_timestamp_eastern(st.session_state.get("dashboard_last_refresh")))
     if right.button("Refresh", help="Refresh dashboard data only"):
         clear_dashboard_cache()
@@ -533,37 +956,215 @@ def render_sidebar(payload):
     with st.sidebar:
         st.subheader("DEAL QUANT")
         st.markdown("Read-only controls")
+        theme = st.selectbox("Theme", ["Midnight Blue", "Black Terminal"])
+        st.session_state["dashboard_theme"] = theme
+        refresh_choice = st.selectbox("Auto-refresh", ["Off", "30 seconds", "60 seconds", "5 minutes"])
+        st.session_state["dashboard_auto_refresh"] = refresh_choice
         st.write(f"Environment: {friendly_status_text(os.getenv('TRADING_MODE', 'PAPER'))}")
         st.write(f"Database connected: {'yes' if payload.get('db_connected') else 'no'}")
         st.write(f"Last data refresh: {format_timestamp_eastern(st.session_state.get('dashboard_last_refresh'))}")
+        st.write(f"Last DB refresh: {format_timestamp_eastern(st.session_state.get('dashboard_last_db_refresh'))}")
         st.caption("No trading controls")
         st.caption(f"Dashboard version {DASHBOARD_VERSION}")
 
 
 def render_overview_page(payload, view):
+    hero, signal_col = st.columns([3.5, 1.2])
+    hero.markdown(
+        f"""
+        <div class='dq-card dq-hero'>
+            <div class='dq-label'>Portfolio Value</div>
+            <div class='dq-hero-value'>{format_currency(view['portfolio_value'])} {_direction_arrow(view.get('portfolio_value'), view.get('previous_portfolio_value'))}</div>
+            <div class='dq-value'>Today P/L: <span style='color:{STATUS_COLORS['buy'] if view['today_pl'] >= 0 else STATUS_COLORS['sell']};'>{format_currency(view['today_pl'])}</span> | Total P/L: <span style='color:{STATUS_COLORS['buy'] if view['total_pl'] >= 0 else STATUS_COLORS['sell']};'>{format_currency(view['total_pl'])}</span></div>
+            <div class='dq-label'>Bot Health: {view['bot_health']['label']} | Last Successful Run: {view['last_successful_run']}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    orb_color = STATUS_COLORS.get(view["signal"]["style"], STATUS_COLORS["neutral"])
+    signal_col.markdown(
+        f"<div class='dq-card' style='text-align:center;'><div class='dq-label'>Live Signal</div><div class='dq-orb' style='background:radial-gradient(circle at 35% 25%, {orb_color}, rgba(0,0,0,0.3));'>{view['generated_signal']}</div><div class='dq-label' style='margin-top:0.5rem;'>Informational</div></div>",
+        unsafe_allow_html=True,
+    )
+
     top = st.columns(4)
-    _metric_card(top[0], "Account Equity", format_currency(view["portfolio_value"]), "neutral")
-    _metric_card(top[1], "Today's Paper P/L", format_currency(view["today_pl"]), "buy" if view["today_pl"] >= 0 else "sell")
-    _metric_card(top[2], "Total Paper P/L", format_currency(view["total_pl"]), "buy" if view["total_pl"] >= 0 else "sell")
-    _metric_card(top[3], "Open Positions", view["open_positions"], "neutral")
+    _metric_card(top[0], "Cash", format_currency(view["cash"]), "neutral")
+    _metric_card(top[1], "Buying Power", format_currency(view["buying_power"]), "neutral")
+    _metric_card(top[2], "Orders Used Today", f"{view['daily_submitted_order_count']} / {MAX_DAILY_ORDERS}", "warning")
+    _metric_card(top[3], "Daily Notional Used", f"{format_currency(view['daily_submitted_notional'])} / {format_currency(MAX_DAILY_SUBMITTED_NOTIONAL)}", "warning")
 
-    row2 = st.columns(4)
-    _metric_card(row2[0], "Cash", format_currency(view["cash"]), "neutral")
-    _metric_card(row2[1], "Buying Power", format_currency(view["buying_power"]), "neutral")
-    _metric_card(row2[2], "Current SPY Signal", view["generated_signal"], view["signal"]["style"])
-    _metric_card(row2[3], "Market", view["market_status"]["label"], view["market_status"]["style"])
+    render_mission_control_summary(view)
+    render_achievement_milestones(payload)
 
-    row3 = st.columns(4)
-    _metric_card(row3[0], "Bot Status", view["bot_health"]["label"], view["bot_health"]["style"])
-    _metric_card(row3[1], "Last Successful Run", view["last_successful_run"], "neutral")
-    _metric_card(row3[2], "Daily Orders Used", f"{view['daily_submitted_order_count']} / {MAX_DAILY_ORDERS}", "warning")
-    _metric_card(row3[3], "Daily Notional Used", f"{format_currency(view['daily_submitted_notional'])} / {format_currency(MAX_DAILY_SUBMITTED_NOTIONAL)}", "warning")
 
-    if payload.get("portfolio_history"):
-        trend_vals = [item.get("portfolio_value") for item in payload["portfolio_history"]][-24:]
-        if trend_vals:
-            st.caption("Equity sparkline")
-            st.line_chart({"equity": trend_vals})
+def _build_order_markers(recent_orders):
+    buy_points = []
+    sell_points = []
+    for order in recent_orders or []:
+        ts = _parse_iso(order.get("event_timestamp"))
+        if ts is None:
+            continue
+        signal = normalize_signal(order.get("signal", "HOLD"))
+        if signal == "BUY":
+            buy_points.append(ts.astimezone(EASTERN_TZ))
+        elif signal == "SELL":
+            sell_points.append(ts.astimezone(EASTERN_TZ))
+    return buy_points, sell_points
+
+
+def render_spy_chart(payload, view):
+    st.subheader("Interactive SPY Chart")
+    timeframe = st.radio("Timeframe", ["1D", "5D", "1M", "3M"], horizontal=True)
+
+    signal_history = payload.get("signal_history") or []
+    price_points = build_price_points(signal_history, timeframe=timeframe)
+    if len(price_points) < 2:
+        st.info("Waiting for the next market-hours update")
+        return
+
+    candles = build_ohlc_series(price_points, timeframe=timeframe)
+    if len(candles) < 2:
+        st.info("Waiting for the next market-hours update")
+        return
+
+    if go is None:
+        st.line_chart({"price": [item["close"] for item in candles]})
+        return
+
+    buy_points, sell_points = _build_order_markers(payload.get("recent_orders") or [])
+    fig = go.Figure()
+    fig.add_trace(
+        go.Candlestick(
+            x=[item["timestamp"] for item in candles],
+            open=[item["open"] for item in candles],
+            high=[item["high"] for item in candles],
+            low=[item["low"] for item in candles],
+            close=[item["close"] for item in candles],
+            name="SPY",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[item["timestamp"] for item in candles],
+            y=[item.get("short_ma") for item in candles],
+            mode="lines",
+            name="Short MA",
+            line={"color": "#21c46b", "width": 1.5},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[item["timestamp"] for item in candles],
+            y=[item.get("long_ma") for item in candles],
+            mode="lines",
+            name="Long MA",
+            line={"color": "#f1c75b", "width": 1.5},
+        )
+    )
+
+    if buy_points:
+        fig.add_trace(
+            go.Scatter(
+                x=buy_points,
+                y=[candles[-1]["close"]] * len(buy_points),
+                mode="markers",
+                marker={"symbol": "triangle-up", "size": 10, "color": "#21c46b"},
+                name="BUY markers",
+            )
+        )
+    if sell_points:
+        fig.add_trace(
+            go.Scatter(
+                x=sell_points,
+                y=[candles[-1]["close"]] * len(sell_points),
+                mode="markers",
+                marker={"symbol": "triangle-down", "size": 10, "color": "#ff5c5c"},
+                name="SELL markers",
+            )
+        )
+
+    fig.update_layout(height=420, margin={"l": 10, "r": 10, "t": 10, "b": 10}, xaxis_rangeslider_visible=False)
+    _safe_plotly_chart(fig, "Chart is temporarily unavailable")
+
+
+def render_strategy_page(payload, view):
+    left, right = st.columns([1.6, 2.4])
+    left.markdown("### Moving-Average Crossover")
+    _metric_card(left, "Current Signal", view["generated_signal"], view["signal"]["style"])
+    ma_state = "Bullish crossover" if view["ma_distance"] > 0 else "Bearish crossover" if view["ma_distance"] < 0 else "Neutral crossover"
+    _metric_card(left, "Crossover State", ma_state, "buy" if view["ma_distance"] > 0 else "sell" if view["ma_distance"] < 0 else "hold")
+    _metric_card(left, "MA Distance", f"{_as_float(view['ma_distance'], 0.0):.4f}", "neutral")
+
+    strength = view.get("signal_strength", {"value": 0.0, "percent": 0, "description": "Informational only"})
+    left.markdown("#### Signal Strength Meter")
+    left.progress(strength["value"])
+    left.caption(f"{strength['percent']}% - {strength['description']}")
+
+    right.markdown("### Why this signal")
+    reason_lines = [
+        f"Latest SPY price: {view['latest_spy_price']}",
+        f"Short MA: {view['short_moving_average']}",
+        f"Long MA: {view['long_moving_average']}",
+        f"Trade/skip reason: {view['trade_or_skip_reason']}",
+        f"Cooldown status: {view['cooldown_status']}",
+        f"Pending-order status: {view['pending_order_status']}",
+        "Signal visualization is informational only, not a prediction.",
+    ]
+    for line in reason_lines:
+        right.markdown(f"- {_safe_text(line)}")
+
+    render_spy_chart(payload, view)
+
+
+def render_account_page(payload, view):
+    acc_cols = st.columns(3)
+    acc_cols[0].metric("Portfolio Value", format_currency(view["portfolio_value"]))
+    acc_cols[0].metric("Cash", format_currency(view["cash"]))
+    acc_cols[1].metric("Buying Power", format_currency(view["buying_power"]))
+    acc_cols[1].metric("Unrealized P/L", format_currency(view["unrealized_paper_pl"]))
+    acc_cols[2].metric("Realized P/L", format_currency(view["realized_paper_pl"]))
+    acc_cols[2].metric("Account Status", view["account_status"])
+
+    st.subheader("Portfolio Allocation")
+    if go is not None:
+        position_value = max(view.get("open_position_value", 0.0), 0.0)
+        cash_value = max(view.get("cash", 0.0), 0.0)
+        fig = go.Figure(
+            data=[
+                go.Pie(
+                    labels=["Cash", "Open Positions"],
+                    values=[cash_value, position_value],
+                    hole=0.58,
+                    marker={"colors": ["#44a3ff", "#21c46b"]},
+                )
+            ]
+        )
+        fig.update_layout(height=320, margin={"l": 10, "r": 10, "t": 10, "b": 10})
+        _safe_plotly_chart(fig, "Allocation chart unavailable")
+
+    latest_account = payload.get("latest_account") or {}
+    positions = latest_account.get("positions") if isinstance(latest_account, dict) else None
+    if isinstance(positions, list) and positions:
+        st.markdown("### Position Cards")
+        for position in positions:
+            pcols = st.columns(2)
+            pnl = _as_float(position.get("unrealized_pl"), 0.0)
+            style = "buy" if pnl >= 0 else "sell"
+            _metric_card(
+                pcols[0],
+                str(position.get("symbol", "Position")),
+                f"Qty {position.get('quantity', 'N/A')} | MV {format_currency(position.get('market_value', 0.0))}",
+                style,
+            )
+            _metric_card(
+                pcols[1],
+                "Entry / Current / Unrealized",
+                f"{format_currency(position.get('average_entry_price', 0.0))} / {format_currency(position.get('current_price', 0.0))} / {format_currency(pnl)}",
+                style,
+            )
+    else:
+        _empty_state("100% Cash - Waiting for a valid signal")
 
 
 def render_strategy_page(payload, view):
@@ -589,7 +1190,7 @@ def render_strategy_page(payload, view):
         else:
             st.dataframe(signal_history)
     else:
-        st.info("Waiting for next market-hours run")
+        st.info("Waiting for the next market-hours update")
 
 
 def render_account_page(payload, view):
@@ -663,7 +1264,7 @@ def render_performance_page(payload):
     order_count_by_day = payload.get("order_count_by_day") or []
 
     if len(history) < 2:
-        st.info("Waiting for the next market-hours run")
+        st.info("Waiting for the next market-hours update")
         return
 
     values = [_as_float(item.get("portfolio_value"), 0.0) for item in history]
@@ -721,32 +1322,209 @@ def render_performance_page(payload):
         st.info("Not enough completed trade history for win/loss summary")
 
 
+def _event_style(level):
+    if level == "critical":
+        return "error", "❗"
+    if level == "warning":
+        return "warning", "⚠"
+    return "neutral", "●"
+
+
+def build_activity_timeline(payload, view):
+    events = []
+    if payload.get("latest_run"):
+        events.append({"event": "Worker started", "time": view.get("last_run_timestamp"), "level": "info"})
+        if str(view.get("account_status", "")).lower() == "active":
+            events.append({"event": "Account authenticated", "time": view.get("last_run_timestamp"), "level": "info"})
+        events.append({"event": f"Market checked ({view['market_status']['label']})", "time": view.get("last_run_timestamp"), "level": "info"})
+        events.append({"event": f"Signal generated ({view.get('generated_signal', 'HOLD')})", "time": view.get("last_run_timestamp"), "level": "info"})
+
+    for order in (payload.get("recent_orders") or [])[:12]:
+        submitted = _as_bool(order.get("submitted"))
+        signal = normalize_signal(order.get("signal", "HOLD"))
+        status = friendly_status_text(order.get("safe_order_status"), "Unknown")
+        if submitted:
+            events.append({"event": f"Order submitted ({signal})", "time": format_timestamp_eastern(order.get("event_timestamp")), "level": "info"})
+            if str(status).lower() in {"filled", "accepted"}:
+                events.append({"event": f"Order {status.lower()}", "time": format_timestamp_eastern(order.get("event_timestamp")), "level": "info"})
+        else:
+            events.append({"event": f"Order blocked ({_safe_text(order.get('stop_reason'), 'safety block')})", "time": format_timestamp_eastern(order.get("event_timestamp")), "level": "warning"})
+
+    if view.get("review_required"):
+        events.append({"event": "Review required", "time": view.get("last_run_timestamp"), "level": "critical"})
+    if view.get("latest_safe_error_message"):
+        events.append({"event": f"Warning/Error: {_safe_text(view.get('latest_safe_error_message'))}", "time": view.get("last_run_timestamp"), "level": "warning"})
+    return events[:24]
+
+
 def render_system_health_page(payload, view):
     cols = st.columns(3)
     _metric_card(cols[0], "Bot Status", view["bot_health"]["label"], view["bot_health"]["style"])
     _metric_card(cols[1], "Database", "Connected" if payload.get("db_connected") else "Disconnected", "healthy" if payload.get("db_connected") else "error")
     _metric_card(cols[2], "Alpaca Paper Authentication", "Active" if view["account_status"].lower() == "active" else view["account_status"], "healthy" if view["account_status"].lower() == "active" else "warning")
 
-    row2 = st.columns(3)
-    _metric_card(row2[0], "Railway Worker", "Healthy" if payload.get("latest_run") else "Waiting", "healthy" if payload.get("latest_run") else "warning")
-    _metric_card(row2[1], "State Persistence", "Available" if payload.get("db_connected") else "Unavailable", "healthy" if payload.get("db_connected") else "error")
-    _metric_card(row2[2], "Review Required", "Yes" if view["review_required"] else "No", "error" if view["review_required"] else "healthy")
+    st.markdown("### Bot Activity Timeline")
+    events = build_activity_timeline(payload, view)
+    if not events:
+        _empty_state("No monitoring records available yet")
+        return
+
+    for item in events:
+        style_key, icon = _event_style(item["level"])
+        color = STATUS_COLORS.get(style_key, STATUS_COLORS["neutral"])
+        st.markdown(
+            f"<div class='dq-timeline-item'><span style='color:{color};font-weight:700;'>{icon}</span> <span class='dq-value'>{_safe_text(item['event'])}</span><div class='dq-label'>{_safe_text(item['time'])}</div></div>",
+            unsafe_allow_html=True,
+        )
+
+
+def build_notification_items(payload, view):
+    notices = []
+    for order in (payload.get("recent_orders") or [])[:25]:
+        if _as_bool(order.get("submitted")):
+            notices.append({
+                "severity": "Info",
+                "message": f"Order submitted: {normalize_signal(order.get('signal', 'HOLD'))} {order.get('symbol', 'SPY')} ({friendly_status_text(order.get('safe_order_status'), 'unknown')})",
+                "timestamp": format_timestamp_eastern(order.get("event_timestamp")),
+            })
+        else:
+            notices.append({
+                "severity": "Warning",
+                "message": f"Safety block: {_safe_text(order.get('stop_reason'), 'blocked')}",
+                "timestamp": format_timestamp_eastern(order.get("event_timestamp")),
+            })
+
+    if view.get("review_required"):
+        notices.append({"severity": "Critical", "message": "Review required is active", "timestamp": view.get("last_run_timestamp")})
+    if not payload.get("db_connected"):
+        notices.append({"severity": "Critical", "message": "Monitoring database disconnected", "timestamp": view.get("last_run_timestamp")})
+    if "monitoring" in str(view.get("latest_stop_reason", "")).lower() or "database" in str(view.get("latest_stop_reason", "")).lower():
+        notices.append({"severity": "Warning", "message": f"Monitoring warning: {_safe_text(view.get('latest_stop_reason'))}", "timestamp": view.get("last_run_timestamp")})
+    if "discord" in str(view.get("latest_stop_reason", "")).lower() or "discord" in str(view.get("latest_safe_error_message", "")).lower():
+        notices.append({"severity": "Info", "message": "Discord alert status detected in monitoring logs", "timestamp": view.get("last_run_timestamp")})
+
+    return notices
+
+
+def render_notification_center(payload, view):
+    st.subheader("Notification Center")
+    severity = st.selectbox("Severity", ["All", "Info", "Warning", "Critical"])
+    notices = build_notification_items(payload, view)
+    if severity != "All":
+        notices = [n for n in notices if n["severity"] == severity]
+    if not notices:
+        _empty_state("No notifications for the selected severity")
+        return
+    for notice in notices:
+        style_key, _ = _event_style(notice["severity"].lower())
+        color = STATUS_COLORS.get(style_key, STATUS_COLORS["neutral"])
+        st.markdown(
+            f"<div class='dq-card'><span class='dq-alert-pill' style='color:{color};'>{notice['severity']}</span><span class='dq-value'>{_safe_text(notice['message'])}</span><div class='dq-label'>{_safe_text(notice['timestamp'])}</div></div>",
+            unsafe_allow_html=True,
+        )
+
+
+def _component_status(payload, view):
+    db_ok = payload.get("db_connected")
+    bot_ok = bool(payload.get("latest_run")) and view.get("bot_health", {}).get("style") != "error"
+    alpaca_ok = str(view.get("account_status", "")).lower() == "active"
+    review_warning = bool(view.get("review_required"))
+    status = {
+        "GitHub": "healthy",
+        "Railway worker": "healthy" if bot_ok else "warning",
+        "Railway cron": "healthy" if payload.get("latest_run") else "warning",
+        "Alpaca Paper": "healthy" if alpaca_ok else "warning",
+        "Railway volume": "healthy" if db_ok else "warning",
+        "PostgreSQL": "healthy" if db_ok else "offline",
+        "Discord notifications": "warning" if review_warning else "healthy",
+        "Streamlit dashboard": "healthy" if db_ok else "warning",
+    }
+    return status
+
+
+def render_architecture_page(payload, view):
+    st.subheader("System Architecture")
+    statuses = _component_status(payload, view)
+    components = [
+        "GitHub",
+        "Railway worker",
+        "Railway cron",
+        "Alpaca Paper",
+        "Railway volume",
+        "PostgreSQL",
+        "Discord notifications",
+        "Streamlit dashboard",
+    ]
+    cols = st.columns(2)
+    for idx, component in enumerate(components):
+        status = statuses.get(component, "warning")
+        style = "healthy" if status == "healthy" else "warning" if status == "warning" else "error"
+        value = "Healthy" if status == "healthy" else "Warning" if status == "warning" else "Offline"
+        _metric_card(cols[idx % 2], component, value, style)
+
+
+def render_mission_control_summary(view):
+    summary = view.get("mission_summary", {})
+    st.markdown("### Daily Mission-Control Summary")
+    cols = st.columns(4)
+    _metric_card(cols[0], "Runs Completed Today", summary.get("runs_completed", 0), "neutral")
+    counts = summary.get("signal_counts", {"BUY": 0, "HOLD": 0, "SELL": 0})
+    _metric_card(cols[1], "BUY / HOLD / SELL", f"{counts.get('BUY', 0)} / {counts.get('HOLD', 0)} / {counts.get('SELL', 0)}", "neutral")
+    _metric_card(cols[2], "Submitted / Blocked", f"{summary.get('submitted_orders', 0)} / {summary.get('blocked_orders', 0)}", "warning")
+    _metric_card(cols[3], "Remaining Order Capacity", summary.get("remaining_order_capacity", 0), "warning")
+
+    st.caption(f"Daily notional used: {format_currency(summary.get('daily_notional_used', 0.0))} | Latest stop reason: {_safe_text(summary.get('latest_stop_reason', 'N/A'))}")
+    capacity_ratio = (MAX_DAILY_ORDERS - summary.get("remaining_order_capacity", 0)) / max(MAX_DAILY_ORDERS, 1)
+    st.progress(min(max(capacity_ratio, 0.0), 1.0))
+
+
+def render_achievement_milestones(payload):
+    st.markdown("### Achievement Milestones")
+    has_run = bool(payload.get("recent_runs"))
+    has_auth = any(str((payload.get("latest_account") or {}).get("account_status", "")).upper() == "ACTIVE" for _ in [0])
+    has_state = bool(payload.get("latest_run"))
+    has_record = bool(payload.get("signal_history"))
+    has_order = any(_as_bool(o.get("submitted")) for o in (payload.get("recent_orders") or []))
+    has_week = len(payload.get("order_count_by_day") or []) >= 5
+
+    milestones = [
+        ("First successful cloud run", has_run),
+        ("First authenticated Alpaca connection", has_auth),
+        ("First persisted state load", has_state),
+        ("First dashboard record", has_record),
+        ("First paper order", has_order),
+        ("First completed market week", has_week),
+    ]
+    cols = st.columns(3)
+    for idx, (label, done) in enumerate(milestones):
+        style = "healthy" if done else "neutral"
+        marker = "Unlocked" if done else "Pending"
+        _metric_card(cols[idx % 3], label, marker, style)
+
+
+def render_system_health_page(payload, view):
+    cols = st.columns(3)
+    _metric_card(cols[0], "Bot Status", view["bot_health"]["label"], view["bot_health"]["style"])
+    _metric_card(cols[1], "Database", "Connected" if payload.get("db_connected") else "Disconnected", "healthy" if payload.get("db_connected") else "error")
+    _metric_card(cols[2], "Review Required", "Yes" if view["review_required"] else "No", "error" if view["review_required"] else "healthy")
 
     st.markdown("### Latest Diagnostics")
-    st.markdown(f"**Last successful run:** {view['last_successful_run']}")
-    st.markdown(f"**Latest safe error:** {view['latest_safe_error_message'] or 'None'}")
-    st.markdown(f"**Market-data freshness:** {view['latest_market_data_timestamp']}")
+    st.markdown(f"- Last successful run: {_safe_text(view['last_successful_run'])}")
+    st.markdown(f"- Latest safe error: {_safe_text(view['latest_safe_error_message'] or 'None')}")
+    st.markdown(f"- Market-data freshness: {_safe_text(view['latest_market_data_timestamp'])}")
 
-    st.markdown("### Activity Feed")
-    events = build_run_history_rows(payload.get("recent_runs"), payload.get("recent_orders"))[:8]
-    if events:
-        for event in events:
-            st.markdown(
-                f"<div class='dq-card'><div class='dq-label'>{event['Timestamp']}</div><div class='dq-value'>{event['Order Status']} | {event['Stop Reason']}</div></div>",
-                unsafe_allow_html=True,
-            )
-    else:
-        st.info("No monitoring records available yet")
+    st.markdown("### Bot Activity Timeline")
+    events = build_activity_timeline(payload, view)
+    if not events:
+        _empty_state("No monitoring records available yet")
+        return
+    for item in events:
+        style_key, icon = _event_style(item["level"])
+        color = STATUS_COLORS.get(style_key, STATUS_COLORS["neutral"])
+        st.markdown(
+            f"<div class='dq-timeline-item'><span style='color:{color};font-weight:700;'>{icon}</span> <span class='dq-value'>{_safe_text(item['event'])}</span><div class='dq-label'>{_safe_text(item['time'])}</div></div>",
+            unsafe_allow_html=True,
+        )
 
 
 def render_research_page():
@@ -766,7 +1544,13 @@ def render_dashboard(database_url: str | None = None):
 
     enforce_paper_mode(os.getenv("TRADING_MODE", "PAPER"))
     st.set_page_config(page_title="DEAL QUANT COMMAND CENTER", layout="wide")
-    apply_dashboard_css()
+
+    if "dashboard_theme" not in st.session_state:
+        st.session_state["dashboard_theme"] = "Midnight Blue"
+    if "dashboard_auto_refresh" not in st.session_state:
+        st.session_state["dashboard_auto_refresh"] = "Off"
+
+    apply_dashboard_css(st.session_state.get("dashboard_theme", "Midnight Blue"))
 
     expected_password = os.getenv("DASHBOARD_PASSWORD", "")
     provided_password = st.text_input("Dashboard Password", type="password")
@@ -774,8 +1558,10 @@ def render_dashboard(database_url: str | None = None):
         st.warning("Access denied")
         st.stop()
 
+    render_loading_skeleton()
     try:
         payload = _cached_payload(database_url or os.getenv("DATABASE_URL"))
+        st.session_state["dashboard_last_db_refresh"] = datetime.now(timezone.utc).isoformat()
     except Exception as exc:
         st.info(f"Dashboard data unavailable right now: {_safe_text(exc, 'temporary data error')}")
         payload = {
@@ -792,11 +1578,23 @@ def render_dashboard(database_url: str | None = None):
         }
 
     view = build_dashboard_view_model(payload)
-    render_header(payload)
-    render_alert_banner(payload, view)
     render_sidebar(payload)
+    apply_dashboard_css(st.session_state.get("dashboard_theme", "Midnight Blue"))
 
-    tabs = st.tabs(["Overview", "Strategy", "Account", "Orders", "Performance", "System Health", "Research"])
+    refresh_mapping = {
+        "Off": 0,
+        "30 seconds": 30,
+        "60 seconds": 60,
+        "5 minutes": 300,
+    }
+    refresh_seconds = refresh_mapping.get(st.session_state.get("dashboard_auto_refresh", "Off"), 0)
+    if refresh_seconds > 0 and st_autorefresh is not None:
+        st_autorefresh(interval=refresh_seconds * 1000, key="dashboard_auto_refresh")
+
+    render_header(payload, view)
+    render_alert_banner(payload, view)
+
+    tabs = st.tabs(["Overview", "Strategy", "Account", "Orders", "Performance", "System Health", "Notification Center", "Architecture", "Research"])
 
     with tabs[0]:
         render_overview_page(payload, view)
@@ -811,6 +1609,10 @@ def render_dashboard(database_url: str | None = None):
     with tabs[5]:
         render_system_health_page(payload, view)
     with tabs[6]:
+        render_notification_center(payload, view)
+    with tabs[7]:
+        render_architecture_page(payload, view)
+    with tabs[8]:
         render_research_page()
 
     for message in empty_state_messages(payload, view):
