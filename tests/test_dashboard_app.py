@@ -124,12 +124,15 @@ class _FakeContainer:
         self._st._calls.append(("button", label, help))
         return self._button_return
 
-    def selectbox(self, label, options):
-        self._st._calls.append(("selectbox", label, options))
+    def selectbox(self, label, options, **kwargs):
+        self._st._calls.append(("selectbox", label, options, kwargs))
         return options[0]
 
-    def text_input(self, label, value="", type="default"):
-        self._st._calls.append(("container_text_input", label, value, type))
+    def text_input(self, label, value="", type="default", **kwargs):
+        self._st._calls.append(("container_text_input", label, value, type, kwargs))
+        key = kwargs.get("key")
+        if key:
+            return self._st.session_state.get(key, value)
         return value
 
     def progress(self, value):
@@ -150,8 +153,10 @@ class _FakeStreamlit(_FakeContainer):
     def set_page_config(self, **kwargs):
         self._calls.append(("set_page_config", kwargs))
 
-    def text_input(self, label, type="default"):
-        self._calls.append(("text_input", label, type))
+    def text_input(self, label, type="default", key=None, **kwargs):
+        self._calls.append(("text_input", label, type, key, kwargs))
+        if key:
+            return self.session_state.get(key, "test-pass")
         return "test-pass"
 
     def warning(self, message):
@@ -202,6 +207,10 @@ class _FakeStreamlit(_FakeContainer):
 
     def info(self, message):
         self._calls.append(("info", message))
+
+    def spinner(self, text):
+        self._calls.append(("spinner", text))
+        return _FakeContainer(self)
 
     def rerun(self):
         self._calls.append(("rerun",))
@@ -315,14 +324,18 @@ def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch)
     })
     monkeypatch.setenv("TRADING_MODE", "PAPER")
     monkeypatch.setenv("DASHBOARD_PASSWORD", "test-pass")
+    fake_st.session_state["dashboard_authenticated"] = True
 
     dashboard_app.render_dashboard(database_url="postgresql://example")
 
-    radio_calls = [call for call in fake_st._calls if call[0] == "radio"]
-    assert radio_calls
-    assert radio_calls[0][2] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research"]
-    assert any(call[0] == "markdown" and "DEAL QUANT UI — BUILD 4" in call[1] for call in fake_st._calls)
-    assert any(call[0] == "markdown" and "PRIMARY NAVIGATION" in call[1] for call in fake_st._calls)
+    nav_calls = [call for call in fake_st._calls if call[0] == "selectbox" and call[1] == "Navigate"]
+    assert nav_calls
+    assert nav_calls[0][2] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research"]
+    assert all("trade" not in str(page).lower() for page in nav_calls[0][2])
+
+    build_markers = [call for call in fake_st._calls if call[0] == "markdown" and dashboard_app.UI_BUILD_LABEL in call[1]]
+    assert len(build_markers) == 1
+    assert not any(call[0] == "markdown" and "<div class='dq-skeleton'>" in call[1] for call in fake_st._calls)
 
 
 def test_refresh_calls_cache_clear_and_rerun_without_trading_actions(monkeypatch):
@@ -342,6 +355,7 @@ def test_refresh_calls_cache_clear_and_rerun_without_trading_actions(monkeypatch
     })
     monkeypatch.setenv("TRADING_MODE", "PAPER")
     monkeypatch.setenv("DASHBOARD_PASSWORD", "test-pass")
+    fake_st.session_state["dashboard_authenticated"] = True
 
     class _CacheData:
         @staticmethod
@@ -353,6 +367,43 @@ def test_refresh_calls_cache_clear_and_rerun_without_trading_actions(monkeypatch
 
     assert any(call[0] == "cache_clear" for call in fake_st._calls)
     assert any(call[0] == "rerun" for call in fake_st._calls)
+
+
+def test_authenticated_state_hides_password_input(monkeypatch):
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["dashboard_authenticated"] = True
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+
+    assert dashboard_app._ensure_authenticated("test-pass") is True
+    assert not any(call[0] == "text_input" and call[1] == "Dashboard Password" for call in fake_st._calls)
+
+
+def test_successful_authentication_clears_password_and_reruns(monkeypatch):
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["dashboard_password_input"] = "test-pass"
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+
+    assert dashboard_app._ensure_authenticated("test-pass") is True
+    assert fake_st.session_state.get("dashboard_authenticated") is True
+    assert fake_st.session_state.get("dashboard_password_clear_requested") is True
+    assert any(call[0] == "rerun" for call in fake_st._calls)
+
+
+def test_hold_and_market_closed_are_neutral_in_status_bar():
+    payload = {"db_connected": True, "latest_run": {"run_timestamp": "2026-07-12T15:00:00+00:00"}}
+    view = {"generated_signal": "HOLD"}
+    clock = {"is_open": False, "countdown": "17:22:00"}
+
+    items = dashboard_app.build_status_bar_items(payload, view, clock)
+    market = next(item for item in items if item["label"].startswith("MARKET"))
+    signal = next(item for item in items if item["label"].startswith("CURRENT SIGNAL"))
+    countdown = next(item for item in items if item["label"].startswith("NEXT OPEN IN"))
+
+    assert market["label"] == "MARKET CLOSED"
+    assert market["style"] == "neutral"
+    assert signal["label"] == "CURRENT SIGNAL: HOLD"
+    assert signal["style"] == "neutral"
+    assert countdown["label"] == "NEXT OPEN IN 17H 22M"
 
 
 def test_notification_builder_and_empty_positions_state():

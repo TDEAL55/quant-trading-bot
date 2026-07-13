@@ -38,6 +38,7 @@ from dashboard_status import classify_market_clock, format_est
 MAX_DAILY_ORDERS = 3
 MAX_DAILY_SUBMITTED_NOTIONAL = 30.0
 DASHBOARD_VERSION = "v2.0"
+UI_BUILD_LABEL = "DEAL QUANT UI — BUILD 5"
 EASTERN_TZ = ZoneInfo("America/New_York")
 MARKET_OPEN_ET = time(9, 30)
 MARKET_CLOSE_ET = time(16, 0)
@@ -317,6 +318,65 @@ def format_timestamp_eastern(value, fallback="Waiting for the next market-hours 
     return format_est(value, fallback)
 
 
+def format_compact_timestamp(value, fallback="Waiting for the next market-hours update") -> dict[str, str]:
+    dt = _parse_iso(value)
+    if dt is None:
+        return {
+            "time": fallback,
+            "date": "",
+            "full": fallback,
+            "relative": "",
+        }
+    now_et = datetime.now(EASTERN_TZ)
+    dt_et = dt.astimezone(EASTERN_TZ)
+    delta_seconds = max(int((now_et - dt_et).total_seconds()), 0)
+    if delta_seconds < 90:
+        relative = "Updated moments ago"
+    elif delta_seconds < 3600:
+        relative = f"Updated {delta_seconds // 60}m ago"
+    else:
+        relative = f"Updated {delta_seconds // 3600}h ago"
+    return {
+        "time": dt_et.strftime("%I:%M %p ET").lstrip("0"),
+        "date": f"{dt_et.strftime('%B')} {dt_et.day}, {dt_et.year}",
+        "full": dt_et.strftime("%Y-%m-%d %I:%M:%S %p ET"),
+        "relative": relative,
+    }
+
+
+def format_compact_countdown(countdown_text: str) -> str:
+    parts = str(countdown_text or "00:00:00").split(":")
+    try:
+        hours = int(parts[0])
+        minutes = int(parts[1])
+    except Exception:
+        return "0H 0M"
+    return f"{hours}H {minutes:02d}M"
+
+
+def build_status_bar_items(payload, view, clock):
+    market_label = "MARKET OPEN" if clock.get("is_open") else "MARKET CLOSED"
+    market_style = "healthy" if clock.get("is_open") else "neutral"
+    signal = normalize_signal(view.get("generated_signal", "HOLD"))
+    signal_style = "buy" if signal == "BUY" else "sell" if signal == "SELL" else "neutral"
+    countdown_label = "NEXT CLOSE IN" if clock.get("is_open") else "NEXT OPEN IN"
+    latest_run = (payload.get("latest_run") or {}).get("run_timestamp")
+    latest_dt = _parse_iso(latest_run)
+    next_run_text = "Waiting for next run"
+    if latest_dt is not None:
+        next_parts = format_compact_timestamp((latest_dt + timedelta(minutes=30)).isoformat())
+        next_run_text = next_parts["time"]
+    return [
+        {"label": "SYSTEM ONLINE" if payload.get("db_connected") else "SYSTEM OFFLINE", "style": "healthy" if payload.get("db_connected") else "critical"},
+        {"label": market_label, "style": market_style},
+        {"label": "PAPER", "style": "healthy"},
+        {"label": "LIVE BLOCKED", "style": "critical"},
+        {"label": f"CURRENT SIGNAL: {signal}", "style": signal_style},
+        {"label": f"{countdown_label} {format_compact_countdown(clock.get('countdown', '00:00:00'))}", "style": "neutral"},
+        {"label": f"NEXT SCHEDULED RUN: {next_run_text}", "style": "neutral"},
+    ]
+
+
 def classify_bot_health(latest_run):
     status = str((latest_run or {}).get("bot_status", "")).strip().lower()
     review_required = _as_bool((latest_run or {}).get("review_required"))
@@ -591,25 +651,25 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             display: inline-flex;
             align-items: center;
             gap: 0.45rem;
-            margin-bottom: 0.8rem;
-            padding: 0.35rem 0.8rem;
+            margin-bottom: 0.4rem;
+            padding: 0.26rem 0.62rem;
             border-radius: 999px;
             border: 1px solid rgba(68, 163, 255, 0.36);
             background: linear-gradient(135deg, rgba(18, 32, 52, 0.96), rgba(11, 16, 28, 0.9));
             color: {palette.primary_text};
-            font-size: 0.74rem;
+            font-size: 0.67rem;
             font-weight: 800;
-            letter-spacing: 0.18rem;
+            letter-spacing: 0.08rem;
             text-transform: uppercase;
             box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
         }}
         .dq-shell-header {{
             background: linear-gradient(160deg, rgba(18, 27, 44, 0.96), rgba(10, 14, 23, 0.9));
             border: 1px solid rgba(86, 121, 181, 0.24);
-            border-radius: 24px;
-            padding: 1rem 1.15rem 1.15rem;
-            margin-bottom: 0.85rem;
-            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.34);
+            border-radius: 16px;
+            padding: 0.55rem 0.8rem 0.6rem;
+            margin-bottom: 0.6rem;
+            box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32);
             position: relative;
             overflow: hidden;
         }}
@@ -622,34 +682,31 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
         }}
         .dq-header-grid {{
             display: grid;
-            grid-template-columns: minmax(0, 1.7fr) minmax(360px, 1fr);
-            gap: 1rem;
+            grid-template-columns: minmax(0, 1.6fr) minmax(320px, 1fr);
+            gap: 0.55rem;
             align-items: stretch;
             position: relative;
             z-index: 1;
         }}
         .dq-header-kicker {{
             color: {palette.secondary_text};
-            font-size: 0.76rem;
-            letter-spacing: 0.18rem;
+            font-size: 0.72rem;
+            letter-spacing: 0.06rem;
             font-weight: 800;
-            text-transform: uppercase;
-            margin-bottom: 0.35rem;
+            margin-bottom: 0.15rem;
         }}
         .dq-header-title {{
-            font-size: 2.05rem;
-            line-height: 1.05;
+            font-size: 1.55rem;
+            line-height: 1.08;
             font-weight: 900;
-            letter-spacing: 0.12rem;
-            text-transform: uppercase;
-            margin-bottom: 0.25rem;
+            letter-spacing: 0.04rem;
+            margin-bottom: 0.15rem;
         }}
         .dq-header-subtitle {{
             color: {palette.secondary_text};
-            font-size: 0.84rem;
-            letter-spacing: 0.16rem;
-            text-transform: uppercase;
-            margin-bottom: 0.85rem;
+            font-size: 0.8rem;
+            letter-spacing: 0.03rem;
+            margin-bottom: 0.45rem;
         }}
         .dq-header-badges {{
             display: flex;
@@ -663,10 +720,9 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             border-radius: 999px;
             padding: 0.35rem 0.7rem;
             border: 1px solid transparent;
-            font-size: 0.72rem;
+            font-size: 0.69rem;
             font-weight: 800;
-            letter-spacing: 0.08rem;
-            text-transform: uppercase;
+            letter-spacing: 0.02rem;
         }}
         .dq-chip.neutral {{ background: rgba(138, 150, 168, 0.16); border-color: rgba(138, 150, 168, 0.28); color: {palette.neutral}; }}
         .dq-chip.healthy {{ background: rgba(33, 196, 107, 0.14); border-color: rgba(33, 196, 107, 0.34); color: {palette.positive}; }}
@@ -674,72 +730,77 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
         .dq-chip.critical {{ background: rgba(255, 92, 92, 0.12); border-color: rgba(255, 92, 92, 0.34); color: {palette.critical}; }}
         .dq-header-meta {{
             display: grid;
-            gap: 0.7rem;
+            gap: 0.45rem;
             align-content: stretch;
         }}
         .dq-header-meta-row {{
             background: rgba(8, 13, 22, 0.52);
             border: 1px solid rgba(86, 121, 181, 0.18);
-            border-radius: 16px;
-            padding: 0.78rem 0.9rem;
+            border-radius: 10px;
+            padding: 0.48rem 0.62rem;
             display: flex;
             justify-content: space-between;
             gap: 0.8rem;
         }}
         .dq-header-meta-label {{
             color: {palette.secondary_text};
-            font-size: 0.73rem;
-            letter-spacing: 0.12rem;
-            text-transform: uppercase;
+            font-size: 0.72rem;
+            letter-spacing: 0.01rem;
         }}
         .dq-header-meta-value {{
             color: {palette.primary_text};
-            font-size: 0.95rem;
+            font-size: 0.88rem;
             font-weight: 700;
         }}
-        .dq-section-tag {{
-            display: inline-flex;
-            align-items: center;
-            padding: 0.32rem 0.7rem;
-            margin-bottom: 0.75rem;
-            border-radius: 999px;
-            border: 1px solid rgba(68, 163, 255, 0.22);
-            color: {palette.secondary_text};
-            background: rgba(10, 15, 25, 0.55);
-            font-size: 0.72rem;
-            font-weight: 800;
-            letter-spacing: 0.14rem;
-            text-transform: uppercase;
-        }}
-        [data-testid="stRadio"] div[role="radiogroup"] {{
+        .dq-status-bar {{
             display: flex;
             flex-wrap: wrap;
-            gap: 0.45rem;
+            gap: 0.35rem;
+            align-items: center;
+            margin-top: 0.42rem;
+            margin-bottom: 0.25rem;
         }}
-        [data-testid="stRadio"] div[role="radiogroup"] label {{
-            border-radius: 999px;
-            border: 1px solid rgba(86, 121, 181, 0.22);
-            background: rgba(10, 15, 25, 0.55);
-            padding: 0.28rem 0.65rem;
-            transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+        .dq-header-footer {{
+            margin-top: 0.4rem;
+            color: {palette.secondary_text};
+            font-size: 0.74rem;
+            letter-spacing: 0.01rem;
         }}
-        [data-testid="stRadio"] div[role="radiogroup"] label:hover {{
-            border-color: rgba(68, 163, 255, 0.42);
-            box-shadow: 0 8px 18px rgba(0, 0, 0, 0.22);
+        .dq-nav-bar {{
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            background: rgba(9, 13, 21, 0.84);
+            border: 1px solid rgba(86, 121, 181, 0.2);
+            border-radius: 12px;
+            padding: 0.35rem 0.55rem;
+            margin-bottom: 0.6rem;
+            backdrop-filter: blur(4px);
         }}
-        [data-testid="stRadio"] div[role="radiogroup"] label:has(input:checked) {{
-            background: linear-gradient(135deg, rgba(68, 163, 255, 0.34), rgba(15, 25, 40, 0.96));
-            border-color: rgba(68, 163, 255, 0.58);
-            box-shadow: 0 10px 24px rgba(68, 163, 255, 0.18);
+        div[data-testid="stSelectbox"] label p {{
+            color: {palette.secondary_text};
+            font-size: 0.75rem;
+            letter-spacing: 0.01rem;
+        }}
+        .stButton > button {{
+            border-radius: 9px;
+            border: 1px solid rgba(86, 121, 181, 0.35);
+            background: linear-gradient(135deg, rgba(14, 22, 35, 0.95), rgba(10, 15, 24, 0.95));
+            color: {palette.primary_text};
+            font-size: 0.8rem;
+            padding: 0.35rem 0.7rem;
+        }}
+        .stButton > button:hover {{
+            border-color: rgba(68, 163, 255, 0.55);
         }}
         .dq-metric-card {{
             background: linear-gradient(145deg, rgba(18, 27, 44, 0.88), rgba(13, 19, 31, 0.8));
             border: 1px solid rgba(86, 121, 181, 0.24);
             box-shadow: 0 14px 30px rgba(0, 0, 0, 0.28);
-            border-radius: 18px;
-            padding: 1rem 1.05rem;
-            margin-bottom: 0.75rem;
-            min-height: 118px;
+            border-radius: 14px;
+            padding: 0.78rem 0.88rem;
+            margin-bottom: 0.55rem;
+            min-height: 102px;
             transition: transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
         }}
         .dq-metric-card:hover {{
@@ -769,14 +830,13 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
         }}
         .dq-metric-label {{
             color: {palette.secondary_text};
-            font-size: 0.72rem;
-            letter-spacing: 0.12rem;
+            font-size: 0.75rem;
+            letter-spacing: 0.01rem;
             font-weight: 800;
-            text-transform: uppercase;
         }}
         .dq-metric-value {{
             color: {palette.primary_text};
-            font-size: 1.55rem;
+            font-size: 1.35rem;
             line-height: 1.12;
             font-weight: 850;
         }}
@@ -788,15 +848,14 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
         .dq-panel {{
             background: linear-gradient(150deg, rgba(18, 27, 44, 0.9), rgba(12, 16, 25, 0.78));
             border: 1px solid rgba(86, 121, 181, 0.22);
-            border-radius: 20px;
+            border-radius: 14px;
             padding: 1rem 1.05rem;
             box-shadow: 0 14px 32px rgba(0, 0, 0, 0.28);
         }}
         .dq-panel-title {{
             font-size: 0.82rem;
             font-weight: 900;
-            letter-spacing: 0.16rem;
-            text-transform: uppercase;
+            letter-spacing: 0.03rem;
         }}
         .dq-panel-subtitle {{
             margin-top: 0.35rem;
@@ -806,8 +865,8 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
         .dq-chart-frame {{
             background: linear-gradient(150deg, rgba(18, 27, 44, 0.9), rgba(12, 16, 25, 0.78));
             border: 1px solid rgba(86, 121, 181, 0.22);
-            border-radius: 20px;
-            padding: 1rem 1.05rem;
+            border-radius: 14px;
+            padding: 0.82rem 0.92rem;
             box-shadow: 0 14px 32px rgba(0, 0, 0, 0.28);
         }}
         .dq-chart-toolbar {{
@@ -1164,7 +1223,8 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             .dq-narrative-grid,
             .dq-matrix-head,
             .dq-matrix-row,
-            .dq-signal-grid {{
+            .dq-signal-grid,
+            .dq-status-bar {{
                 grid-template-columns: 1fr;
             }}
         }}
@@ -1245,17 +1305,19 @@ def _safe_plotly_chart(fig, fallback_message):
 
 
 def render_loading_skeleton():
-    st.markdown("<div class='dq-build-marker'>DEAL QUANT UI — BUILD 4</div><div class='dq-skeleton'></div><div class='dq-skeleton'></div><div class='dq-skeleton'></div>", unsafe_allow_html=True)
+    st.markdown("<div class='dq-skeleton'></div><div class='dq-skeleton'></div><div class='dq-skeleton'></div>", unsafe_allow_html=True)
 
 
 def render_header(payload, view):
     clock = build_market_clock()
-    refresh_text = format_timestamp_eastern(st.session_state.get("dashboard_last_refresh"))
-    worker_text = view.get("last_run_timestamp") or "Waiting for the next market-hours update"
+    refresh_parts = format_compact_timestamp(st.session_state.get("dashboard_last_refresh"))
+    worker_parts = format_compact_timestamp((payload.get("latest_run") or {}).get("run_timestamp"))
+    now_parts = format_compact_timestamp(datetime.now(timezone.utc).isoformat())
+    status_items = build_status_bar_items(payload, view, clock)
     st.markdown(
         f"""
         <div class='dq-shell-header'>
-            <div class='dq-build-marker'>DEAL QUANT UI — BUILD 4</div>
+            <div class='dq-build-marker'>{UI_BUILD_LABEL}</div>
             <div class='dq-header-grid'>
                 <div>
                     <div class='dq-header-kicker'>DEAL QUANT COMMAND CENTER</div>
@@ -1265,13 +1327,11 @@ def render_header(payload, view):
                         <span class='dq-chip healthy'>PAPER</span>
                         <span class='dq-chip critical'>LIVE BLOCKED</span>
                         <span class='dq-chip {'healthy' if clock['is_open'] else 'neutral'}'>{clock['label']}</span>
-                        <span class='dq-chip neutral'>BUILD 4</span>
                     </div>
                 </div>
                 <div class='dq-header-meta'>
-                    <div class='dq-header-meta-row'><span class='dq-header-meta-label'>Eastern Time</span><span class='dq-header-meta-value'>{clock['time_text']}</span></div>
-                    <div class='dq-header-meta-row'><span class='dq-header-meta-label'>Latest worker timestamp</span><span class='dq-header-meta-value'>{_safe_text(worker_text)}</span></div>
-                    <div class='dq-header-meta-row'><span class='dq-header-meta-label'>Latest dashboard refresh</span><span class='dq-header-meta-value'>{_safe_text(refresh_text)}</span></div>
+                    <div class='dq-header-meta-row'><span class='dq-header-meta-label'>Eastern time</span><span class='dq-header-meta-value' title='{_safe_text(now_parts['full'])}'>{_safe_text(now_parts['time'])}<br><span class='dq-header-meta-label'>{_safe_text(now_parts['date'])}</span></span></div>
+                    <div class='dq-header-meta-row'><span class='dq-header-meta-label'>Latest worker timestamp</span><span class='dq-header-meta-value' title='{_safe_text(worker_parts['full'])}'>{_safe_text(worker_parts['time'])}<br><span class='dq-header-meta-label'>{_safe_text(worker_parts['date'])}</span></span></div>
                 </div>
             </div>
         </div>
@@ -1279,16 +1339,20 @@ def render_header(payload, view):
         unsafe_allow_html=True,
     )
 
-    online_color = STATUS_COLORS["healthy"] if payload.get("db_connected") else STATUS_COLORS["error"]
-    online_text = "ONLINE" if payload.get("db_connected") else "OFFLINE"
+    status_col, refresh_col = st.columns([8.0, 1.4])
+    with status_col:
+        status_html = "".join([f"<span class='dq-chip {item['style']}'>{_safe_text(item['label'])}</span>" for item in status_items])
+        st.markdown(f"<div class='dq-status-bar'>{status_html}</div>", unsafe_allow_html=True)
+    with refresh_col:
+        if st.button("↻ Refresh Data", help="Refresh dashboard data only"):
+            clear_dashboard_cache()
+            st.session_state["dashboard_last_refresh"] = datetime.now(timezone.utc).isoformat()
+            st.rerun()
+
     st.markdown(
-        f"<div class='dq-header-badges' style='margin-top:0.7rem;'><span class='dq-chip {'healthy' if payload.get('db_connected') else 'critical'}'>{online_text}</span><span class='dq-chip neutral'>THEME {st.session_state.get('dashboard_theme', 'Midnight Blue')}</span><span class='dq-chip {'healthy' if clock['is_open'] else 'warning'}'>{clock['countdown_label']} {clock['countdown']}</span><span class='dq-chip neutral'>{format_currency(view.get('portfolio_value'))} PORTFOLIO</span><span class='dq-chip neutral'>{view.get('generated_signal', 'HOLD')} SIGNAL</span></div>",
+        f"<div class='dq-header-footer' title='{_safe_text(refresh_parts['full'])}'>Dashboard refresh: {_safe_text(refresh_parts['time'])} | {_safe_text(refresh_parts['date'])} | {_safe_text(refresh_parts['relative'])}</div>",
         unsafe_allow_html=True,
     )
-    if st.button("Refresh dashboard data", help="Refresh dashboard data only"):
-        clear_dashboard_cache()
-        st.session_state["dashboard_last_refresh"] = datetime.now(timezone.utc).isoformat()
-        st.rerun()
 
 
 def render_alert_banner(payload, view):
@@ -1371,10 +1435,11 @@ def _render_spy_chart_frame(payload, view):
                 </div>
                 <div class='dq-chart-badges'>
                     <span class='dq-chip {'healthy' if payload.get('db_connected') else 'warning'}'>{'Fresh data' if payload.get('db_connected') else 'Data stale'}</span>
-                    <span class='dq-chip {'healthy' if view.get('generated_signal') == 'BUY' else 'warning' if view.get('generated_signal') == 'HOLD' else 'critical'}'>{view.get('generated_signal', 'HOLD')} SIGNAL</span>
+                    <span class='dq-chip {'healthy' if view.get('generated_signal') == 'BUY' else 'neutral' if view.get('generated_signal') == 'HOLD' else 'critical'}'>{view.get('generated_signal', 'HOLD')} SIGNAL</span>
                     <span class='dq-chip neutral'>{_safe_text(view.get('latest_market_data_timestamp'))}</span>
                 </div>
             </div>
+            <div class='dq-chart-surface'>
         """,
         unsafe_allow_html=True,
     )
@@ -1383,7 +1448,7 @@ def _render_spy_chart_frame(payload, view):
         chart_points = [{"timestamp": point["timestamp"], "value": point["price"]} for point in price_points]
         fig = build_line_chart(chart_points, "SPY", "value")
         _safe_plotly_chart(fig, "Chart is temporarily unavailable")
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("</div></div>", unsafe_allow_html=True)
         return
 
     fig = go.Figure()
@@ -1431,47 +1496,51 @@ def _render_spy_chart_frame(payload, view):
         borderpad=4,
     )
     fig.update_layout(
-        height=450,
+        height=430,
         margin={"l": 10, "r": 10, "t": 8, "b": 10},
         xaxis_rangeslider_visible=False,
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
         template="plotly_dark",
     )
     _safe_plotly_chart(fig, "Chart is temporarily unavailable")
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+def _ensure_authenticated(expected_password: str) -> bool:
+    if st.session_state.get("dashboard_authenticated"):
+        return True
+
+    provided_password = st.text_input("Dashboard Password", type="password", key="dashboard_password_input")
+    if provided_password and check_dashboard_password(provided_password, expected_password):
+        st.session_state["dashboard_authenticated"] = True
+        st.session_state["dashboard_password_clear_requested"] = True
+        st.rerun()
+        return True
+    if provided_password:
+        st.warning("Access denied")
+    return False
+
+
+def _render_navigation(pages: list[str]) -> str:
+    st.markdown("<div class='dq-nav-bar'>", unsafe_allow_html=True)
+    selected = st.selectbox("Navigate", pages)
+    st.session_state["dashboard_page"] = selected
     st.markdown("</div>", unsafe_allow_html=True)
+    return selected
 
 
 def render_command_center_page(payload, view):
-    st.markdown("<div class='dq-section-tag'>COMMAND CENTER</div>", unsafe_allow_html=True)
     top = st.columns(4)
-    _metric_card(top[0], "Paper portfolio value", format_currency(view["portfolio_value"]), "neutral", _direction_arrow(view.get("portfolio_value"), view.get("previous_portfolio_value")))
-    _metric_card(top[1], "Today's paper P&L", format_currency(view["today_pl"]), "buy" if view["today_pl"] >= 0 else "sell")
-    _metric_card(top[2], "Current SPY signal", view.get("generated_signal", "HOLD"), view.get("signal", {}).get("style", "neutral"))
+    _metric_card(top[0], "Paper Portfolio Value", format_currency(view["portfolio_value"]), "neutral", _direction_arrow(view.get("portfolio_value"), view.get("previous_portfolio_value")))
+    _metric_card(top[1], "Today's Paper P&L", format_currency(view["today_pl"]), "buy" if view["today_pl"] >= 0 else "sell")
+    _metric_card(top[2], "Current Signal", view.get("generated_signal", "HOLD"), view.get("signal", {}).get("style", "neutral"))
     _metric_card(top[3], "Bot health", view["bot_health"]["label"], view["bot_health"]["style"])
-
-    second = st.columns(6)
-    _metric_card(second[0], "Current SPY price", format_currency(view.get("latest_spy_price")), "neutral")
-    _metric_card(second[1], "Short MA", format_currency(view.get("short_moving_average")), "neutral")
-    _metric_card(second[2], "Long MA", format_currency(view.get("long_moving_average")), "neutral")
-    _metric_card(second[3], "MA spread", format_percent(view.get("ma_distance")), "neutral")
-    _metric_card(second[4], "Orders used today", f"{view['daily_submitted_order_count']} / {MAX_DAILY_ORDERS}", "warning")
-    _metric_card(second[5], "Daily notional used", f"{format_currency(view['daily_submitted_notional'])} / {format_currency(MAX_DAILY_SUBMITTED_NOTIONAL)}", "warning")
 
     body_left, body_right = st.columns([2.05, 1.0])
     with body_left:
         _render_spy_chart_frame(payload, view)
     with body_right:
         _render_signal_panel(view)
-
-    bottom = st.columns(4)
-    daily_narrative = " | ".join(view.get("intelligence") or [])
-    latest_alert = view.get("latest_stop_reason") or "No critical alert"
-    next_run = _next_worker_run_text(payload, view)
-    capacity_remaining = max(MAX_DAILY_ORDERS - int(view.get("daily_submitted_order_count", 0)), 0)
-    bottom[0].markdown(f"<div class='dq-narrative-card'><div class='dq-label'>Daily narrative</div><div class='dq-value'>{_safe_text(daily_narrative, 'Read-only paper monitoring is active.')}</div></div>", unsafe_allow_html=True)
-    bottom[1].markdown(f"<div class='dq-narrative-card'><div class='dq-label'>Latest important alert</div><div class='dq-value'>{_safe_text(latest_alert)}</div></div>", unsafe_allow_html=True)
-    bottom[2].markdown(f"<div class='dq-narrative-card'><div class='dq-label'>Next scheduled worker run</div><div class='dq-value'>{_safe_text(next_run)}</div></div>", unsafe_allow_html=True)
-    bottom[3].markdown(f"<div class='dq-narrative-card'><div class='dq-label'>Daily capacity remaining</div><div class='dq-value'>{capacity_remaining} orders | {format_currency(max(MAX_DAILY_SUBMITTED_NOTIONAL - view['daily_submitted_notional'], 0.0))} notional</div></div>", unsafe_allow_html=True)
 
 
 def render_sidebar(payload):
@@ -1994,18 +2063,21 @@ def render_dashboard(database_url: str | None = None):
         st.session_state["dashboard_theme"] = "Midnight Blue"
     if "dashboard_auto_refresh" not in st.session_state:
         st.session_state["dashboard_auto_refresh"] = "Off"
+    if "dashboard_authenticated" not in st.session_state:
+        st.session_state["dashboard_authenticated"] = False
+
+    if st.session_state.pop("dashboard_password_clear_requested", False):
+        st.session_state.pop("dashboard_password_input", None)
 
     apply_dashboard_css(st.session_state.get("dashboard_theme", "Midnight Blue"))
 
     expected_password = os.getenv("DASHBOARD_PASSWORD", "")
-    provided_password = st.text_input("Dashboard Password", type="password")
-    if not check_dashboard_password(provided_password, expected_password):
-        st.warning("Access denied")
+    if not _ensure_authenticated(expected_password):
         st.stop()
 
-    render_loading_skeleton()
     try:
-        payload = _cached_payload(database_url or os.getenv("DATABASE_URL"))
+        with st.spinner("Loading command center..."):
+            payload = _cached_payload(database_url or os.getenv("DATABASE_URL"))
         st.session_state["dashboard_last_db_refresh"] = datetime.now(timezone.utc).isoformat()
     except Exception as exc:
         st.info(f"Dashboard data unavailable right now: {_safe_text(exc, 'temporary data error')}")
@@ -2045,12 +2117,8 @@ def render_dashboard(database_url: str | None = None):
         st_autorefresh(interval=refresh_seconds * 1000, key="dashboard_auto_refresh")
 
     render_header(payload, view)
-    render_alert_banner(payload, view)
-
-    st.markdown("<div class='dq-section-tag'>PRIMARY NAVIGATION</div>", unsafe_allow_html=True)
     pages = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research"]
-    selected_page = st.radio("Navigation", pages, horizontal=True)
-    st.session_state["dashboard_page"] = selected_page
+    selected_page = _render_navigation(pages)
 
     page_renderers = {
         "Command Center": render_overview_page,
@@ -2071,9 +2139,6 @@ def render_dashboard(database_url: str | None = None):
         render_research_page()
     else:
         page_renderers.get(selected_page, render_overview_page)(payload, view)
-
-    for message in empty_state_messages(payload, view):
-        st.info(message)
 
 
 def main():
