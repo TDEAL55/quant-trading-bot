@@ -120,13 +120,19 @@ class _FakeContainer:
     def title(self, value):
         self._st._calls.append(("title", value))
 
-    def button(self, label, help=None):
-        self._st._calls.append(("button", label, help))
+    def button(self, label, help=None, **kwargs):
+        self._st._calls.append(("button", label, help, kwargs))
         return self._button_return
 
     def selectbox(self, label, options, **kwargs):
         self._st._calls.append(("selectbox", label, options, kwargs))
-        return options[0]
+        key = kwargs.get("key")
+        if key and key in self._st.session_state:
+            return self._st.session_state[key]
+        value = options[0]
+        if key:
+            self._st.session_state[key] = value
+        return value
 
     def text_input(self, label, value="", type="default", **kwargs):
         self._st._calls.append(("container_text_input", label, value, type, kwargs))
@@ -162,6 +168,12 @@ class _FakeStreamlit(_FakeContainer):
     def warning(self, message):
         self._calls.append(("warning", message))
 
+    def error(self, message):
+        self._calls.append(("error", message))
+
+    def success(self, message):
+        self._calls.append(("success", message))
+
     def stop(self):
         raise RuntimeError("stop called")
 
@@ -186,9 +198,14 @@ class _FakeStreamlit(_FakeContainer):
         self._calls.append(("tabs", names))
         return [_FakeContainer(self, button_return=self._button_return) for _ in names]
 
-    def radio(self, label, options, horizontal=False):
-        self._calls.append(("radio", label, options, horizontal))
-        return options[0]
+    def radio(self, label, options, horizontal=False, key=None):
+        self._calls.append(("radio", label, options, horizontal, key))
+        if key and key in self.session_state:
+            return self.session_state[key]
+        value = options[0]
+        if key:
+            self.session_state[key] = value
+        return value
 
     def progress(self, value):
         self._calls.append(("progress", value))
@@ -202,8 +219,8 @@ class _FakeStreamlit(_FakeContainer):
     def bar_chart(self, value):
         self._calls.append(("bar_chart", value))
 
-    def plotly_chart(self, value, use_container_width=False):
-        self._calls.append(("plotly_chart", use_container_width))
+    def plotly_chart(self, value, width="stretch"):
+        self._calls.append(("plotly_chart", width))
 
     def info(self, message):
         self._calls.append(("info", message))
@@ -214,6 +231,18 @@ class _FakeStreamlit(_FakeContainer):
 
     def rerun(self):
         self._calls.append(("rerun",))
+
+    def form(self, key, clear_on_submit=False):
+        self._calls.append(("form", key, clear_on_submit))
+        return _FakeContainer(self, button_return=self._button_return)
+
+    def form_submit_button(self, label, **kwargs):
+        self._calls.append(("form_submit_button", label, kwargs))
+        return self._button_return
+
+    def download_button(self, label, data, file_name=None, mime=None, key=None, disabled=False):
+        self._calls.append(("download_button", label, file_name, mime, key, disabled, bool(data)))
+        return False
 
 
 class _FakeDatabase:
@@ -379,7 +408,7 @@ def test_authenticated_state_hides_password_input(monkeypatch):
 
 
 def test_successful_authentication_clears_password_and_reruns(monkeypatch):
-    fake_st = _FakeStreamlit()
+    fake_st = _FakeStreamlit(button_return=True)
     fake_st.session_state["dashboard_password_input"] = "test-pass"
     monkeypatch.setattr(dashboard_app, "st", fake_st)
 
@@ -439,3 +468,83 @@ def test_disconnected_database_payload_is_safe(monkeypatch):
     payload = dashboard_app._fetch_payload_uncached("sqlite:///ignore.db")
     assert payload["db_connected"] is False
     assert payload["recent_orders"] == []
+
+
+def test_initialize_session_state_preserves_existing_values(monkeypatch):
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["dashboard_page"] = "Strategy"
+    fake_st.session_state["dashboard_theme"] = "Black Terminal"
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+
+    dashboard_app.initialize_dashboard_session_state()
+
+    assert fake_st.session_state["dashboard_page"] == "Strategy"
+    assert fake_st.session_state["dashboard_theme"] == "Black Terminal"
+    assert fake_st.session_state["dashboard_timeframe"] == "1D"
+
+
+def test_refresh_button_sets_force_refresh_without_page_reset(monkeypatch):
+    fake_st = _FakeStreamlit(button_return=True)
+    fake_st.session_state["dashboard_page"] = "Strategy"
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+
+    dashboard_app.render_header({"db_connected": True, "latest_run": {}}, {"generated_signal": "HOLD"})
+
+    assert fake_st.session_state.get("dashboard_force_refresh") is True
+    assert fake_st.session_state.get("dashboard_page") == "Strategy"
+
+
+def test_timeframe_uses_persisted_session_state(monkeypatch):
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["dashboard_timeframe"] = "5D"
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+
+    payload = {
+        "db_connected": True,
+        "signal_history": [
+            {"snapshot_timestamp": "2026-07-12T14:45:00+00:00", "latest_price": 600.4, "short_moving_average": 599.9, "long_moving_average": 598.8, "generated_signal": "HOLD"},
+            {"snapshot_timestamp": "2026-07-12T15:00:00+00:00", "latest_price": 601.2, "short_moving_average": 600.5, "long_moving_average": 598.4, "generated_signal": "BUY"},
+        ],
+    }
+    dashboard_app._render_spy_chart_frame(payload, {"generated_signal": "HOLD", "latest_market_data_timestamp": "2026-07-12T15:00:00+00:00"})
+
+    assert fake_st.session_state.get("dashboard_timeframe") == "5D"
+
+
+def test_alert_acknowledgement_is_session_local(monkeypatch):
+    fake_st = _FakeStreamlit(button_return=True)
+    fake_st.session_state["dashboard_acknowledged_alerts"] = []
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+
+    payload = {
+        "db_connected": True,
+        "recent_orders": [{"submitted": 0, "stop_reason": "daily order limit reached", "event_timestamp": "2026-07-12T15:00:00+00:00", "signal": "BUY"}],
+    }
+    view = {"review_required": False, "latest_stop_reason": "", "latest_safe_error_message": "", "last_run_timestamp": "2026-07-12 11:00:00 AM ET"}
+
+    dashboard_app.render_notification_center(payload, view)
+
+    assert fake_st.session_state.get("dashboard_acknowledged_alerts")
+
+
+def test_research_downloads_disable_when_no_rows(monkeypatch):
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["dashboard_export_payload"] = {
+        "activity": [],
+        "signals": [],
+        "orders": [],
+        "health": [],
+        "performance": [],
+    }
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+
+    dashboard_app.render_research_page()
+
+    download_calls = [call for call in fake_st._calls if call[0] == "download_button"]
+    assert download_calls
+    assert all(call[5] is True for call in download_calls)
+
+
+def test_dashboard_app_has_no_use_container_width_calls():
+    module_text = Path("dashboard_app.py").read_text(encoding="utf-8")
+    assert "use_container_width" not in module_text

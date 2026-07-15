@@ -70,7 +70,53 @@ THEMES = {
         "accent": "#2ecb70",
         "grid": "rgba(46, 203, 112, 0.10)",
     },
+    "Arctic Glass": {
+        "bg": "radial-gradient(circle at 12% 8%, #edf5ff 0%, #d7e5f7 52%, #c8d9ee 100%)",
+        "panel": "linear-gradient(140deg, rgba(255, 255, 255, 0.76), rgba(229, 240, 255, 0.58))",
+        "text": "#13263d",
+        "subtle": "#445d78",
+        "accent": "#2e7ccf",
+        "grid": "rgba(46, 124, 207, 0.10)",
+    },
 }
+
+PAGE_OPTIONS = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research"]
+MODE_OPTIONS = ["Standard Mode", "Focus Mode", "Presentation Mode"]
+THEME_OPTIONS = ["Midnight Blue", "Black Terminal", "Arctic Glass"]
+AUTO_REFRESH_OPTIONS = ["Off", "30 seconds", "60 seconds", "5 minutes"]
+TIMEFRAME_OPTIONS = ["1D", "5D", "1M", "3M"]
+
+
+def initialize_dashboard_session_state() -> None:
+    defaults = {
+        "dashboard_authenticated": False,
+        "dashboard_page": "Command Center",
+        "dashboard_page_selector": "Command Center",
+        "dashboard_theme": "Midnight Blue",
+        "dashboard_theme_selector": "Midnight Blue",
+        "dashboard_mode": "Standard Mode",
+        "dashboard_mode_selector": "Standard Mode",
+        "dashboard_focus_mode": False,
+        "dashboard_presentation_mode": False,
+        "dashboard_timeframe": "1D",
+        "dashboard_timeframe_selector": "1D",
+        "dashboard_alert_severity": "All",
+        "dashboard_acknowledged_alerts": [],
+        "dashboard_auto_refresh": "Off",
+        "dashboard_auto_refresh_selector": "Off",
+        "dashboard_last_manual_refresh_status": "",
+        "dashboard_last_refresh": None,
+        "dashboard_last_db_refresh": None,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def _refresh_mode_flags() -> None:
+    mode = st.session_state.get("dashboard_mode", "Standard Mode")
+    st.session_state["dashboard_focus_mode"] = mode == "Focus Mode"
+    st.session_state["dashboard_presentation_mode"] = mode == "Presentation Mode"
 
 
 def _theme_palette(theme_name: str):
@@ -366,11 +412,14 @@ def build_status_bar_items(payload, view, clock):
     if latest_dt is not None:
         next_parts = format_compact_timestamp((latest_dt + timedelta(minutes=30)).isoformat())
         next_run_text = next_parts["time"]
+    trading_mode = str(((payload.get("latest_run") or {}).get("trading_mode") or "PAPER")).upper()
+    system_label = "SYSTEM ONLINE" if payload.get("db_connected") else "SYSTEM DEGRADED"
+    system_style = "healthy" if payload.get("db_connected") else "warning"
     return [
-        {"label": "SYSTEM ONLINE" if payload.get("db_connected") else "SYSTEM OFFLINE", "style": "healthy" if payload.get("db_connected") else "critical"},
+        {"label": system_label, "style": system_style},
         {"label": market_label, "style": market_style},
         {"label": "PAPER", "style": "healthy"},
-        {"label": "LIVE BLOCKED", "style": "critical"},
+        {"label": "LIVE DETECTED" if trading_mode == "LIVE" else "LIVE BLOCKED", "style": "critical" if trading_mode == "LIVE" else "neutral"},
         {"label": f"CURRENT SIGNAL: {signal}", "style": signal_style},
         {"label": f"{countdown_label} {format_compact_countdown(clock.get('countdown', '00:00:00'))}", "style": "neutral"},
         {"label": f"NEXT SCHEDULED RUN: {next_run_text}", "style": "neutral"},
@@ -1294,12 +1343,30 @@ def _empty_state(message):
     st.markdown(f"<div class='dq-empty-state'>{message}</div>", unsafe_allow_html=True)
 
 
+def _render_component_error(component_name: str):
+    safe_name = sanitize_text(component_name, "Component")
+    st.markdown(
+        f"<div class='dq-alert'><strong>{safe_name}</strong> is temporarily unavailable. The rest of the dashboard remains functional.</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_with_error_guard(component_name: str, renderer, *args):
+    try:
+        renderer(*args)
+        return True
+    except Exception as exc:
+        st.warning(f"{sanitize_text(component_name, 'Component')} unavailable ({sanitize_text(type(exc).__name__, 'Error')})")
+        _render_component_error(component_name)
+        return False
+
+
 def _safe_plotly_chart(fig, fallback_message):
     if fig is None:
         st.info(fallback_message)
         return
     try:
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     except Exception:
         st.info(fallback_message)
 
@@ -1344,15 +1411,20 @@ def render_header(payload, view):
         status_html = "".join([f"<span class='dq-chip {item['style']}'>{_safe_text(item['label'])}</span>" for item in status_items])
         st.markdown(f"<div class='dq-status-bar'>{status_html}</div>", unsafe_allow_html=True)
     with refresh_col:
-        if st.button("↻ Refresh Data", help="Refresh dashboard data only"):
+        if st.button("↻ Refresh Data", key="dashboard_refresh_button", help="Refresh dashboard read-only data only"):
             clear_dashboard_cache()
             st.session_state["dashboard_last_refresh"] = datetime.now(timezone.utc).isoformat()
+            st.session_state["dashboard_force_refresh"] = True
+            st.session_state["dashboard_last_manual_refresh_status"] = "Dashboard data refreshed"
+            # Intentional rerun: ensures data is fetched again after cache clear.
             st.rerun()
 
     st.markdown(
         f"<div class='dq-header-footer' title='{_safe_text(refresh_parts['full'])}'>Dashboard refresh: {_safe_text(refresh_parts['time'])} | {_safe_text(refresh_parts['date'])} | {_safe_text(refresh_parts['relative'])}</div>",
         unsafe_allow_html=True,
     )
+    if st.session_state.get("dashboard_last_manual_refresh_status"):
+        st.success(st.session_state.get("dashboard_last_manual_refresh_status"))
 
 
 def render_alert_banner(payload, view):
@@ -1418,7 +1490,12 @@ def _render_signal_panel(view):
 
 
 def _render_spy_chart_frame(payload, view):
-    timeframe = st.radio("Timeframe", ["1D", "5D", "1M", "3M"], horizontal=True)
+    if st.session_state.get("dashboard_timeframe") not in TIMEFRAME_OPTIONS:
+        st.session_state["dashboard_timeframe"] = "1D"
+    if st.session_state.get("dashboard_timeframe_selector") != st.session_state.get("dashboard_timeframe"):
+        st.session_state["dashboard_timeframe_selector"] = st.session_state.get("dashboard_timeframe", "1D")
+    timeframe = st.selectbox("Timeframe", TIMEFRAME_OPTIONS, key="dashboard_timeframe_selector")
+    st.session_state["dashboard_timeframe"] = timeframe
     signal_history = payload.get("signal_history") or []
     price_points = build_price_points(signal_history, timeframe=timeframe)
     if len(price_points) < 2:
@@ -1510,26 +1587,53 @@ def _ensure_authenticated(expected_password: str) -> bool:
     if st.session_state.get("dashboard_authenticated"):
         return True
 
-    provided_password = st.text_input("Dashboard Password", type="password", key="dashboard_password_input")
-    if provided_password and check_dashboard_password(provided_password, expected_password):
-        st.session_state["dashboard_authenticated"] = True
-        st.session_state["dashboard_password_clear_requested"] = True
-        st.rerun()
-        return True
-    if provided_password:
-        st.warning("Access denied")
+    with st.form("dashboard_auth_form", clear_on_submit=False):
+        provided_password = st.text_input("Dashboard Password", type="password", key="dashboard_password_input")
+        submitted = st.form_submit_button("Enter Command Center", type="primary")
+    if submitted:
+        if provided_password and check_dashboard_password(provided_password, expected_password):
+            st.session_state["dashboard_authenticated"] = True
+            st.session_state["dashboard_password_clear_requested"] = True
+            st.session_state["dashboard_auth_error"] = ""
+            # Intentional rerun: removes password widget immediately after success.
+            st.rerun()
+            return True
+        st.session_state["dashboard_auth_error"] = "Access denied"
+    if st.session_state.get("dashboard_auth_error"):
+        st.error(st.session_state.get("dashboard_auth_error"))
     return False
 
 
 def _render_navigation(pages: list[str]) -> str:
     st.markdown("<div class='dq-nav-bar'>", unsafe_allow_html=True)
-    selected = st.selectbox("Navigate", pages)
+    current_page = st.session_state.get("dashboard_page", pages[0])
+    if current_page not in pages:
+        current_page = pages[0]
+    if st.session_state.get("dashboard_page_selector") not in pages:
+        st.session_state["dashboard_page_selector"] = current_page
+    selected = st.selectbox("Navigate", pages, key="dashboard_page_selector")
     st.session_state["dashboard_page"] = selected
     st.markdown("</div>", unsafe_allow_html=True)
     return selected
 
 
 def render_command_center_page(payload, view):
+    if st.session_state.get("dashboard_focus_mode"):
+        st.caption("Focus Mode: secondary content hidden")
+        focus_top = st.columns(3)
+        _metric_card(focus_top[0], "Paper Portfolio Value", format_currency(view["portfolio_value"]), "neutral", _direction_arrow(view.get("portfolio_value"), view.get("previous_portfolio_value")))
+        _metric_card(focus_top[1], "Current Signal", view.get("generated_signal", "HOLD"), view.get("signal", {}).get("style", "neutral"))
+        _metric_card(focus_top[2], "Bot health", view["bot_health"]["label"], view["bot_health"]["style"])
+        focus_left, focus_right = st.columns([2.2, 1.0])
+        with focus_left:
+            _render_spy_chart_frame(payload, view)
+        with focus_right:
+            _render_signal_panel(view)
+        notices = build_notification_items(payload, view)
+        latest_notice = notices[0] if notices else {"severity": "Info", "message": "No alerts", "timestamp": view.get("last_run_timestamp")}
+        st.info(f"Latest alert: {sanitize_text(latest_notice.get('message'), 'No alerts')}")
+        return
+
     top = st.columns(4)
     _metric_card(top[0], "Paper Portfolio Value", format_currency(view["portfolio_value"]), "neutral", _direction_arrow(view.get("portfolio_value"), view.get("previous_portfolio_value")))
     _metric_card(top[1], "Today's Paper P&L", format_currency(view["today_pl"]), "buy" if view["today_pl"] >= 0 else "sell")
@@ -1547,22 +1651,22 @@ def render_sidebar(payload):
     with st.sidebar:
         st.subheader("DEAL QUANT")
         st.markdown("Read-only controls")
-        mode_options = ["Standard Mode", "Focus Mode", "Presentation Mode"]
-        mode = st.selectbox("Dashboard mode", mode_options)
-        if mode not in mode_options:
+        mode = st.selectbox("Dashboard mode", MODE_OPTIONS, key="dashboard_mode_selector")
+        if mode not in MODE_OPTIONS:
             mode = st.session_state.get("dashboard_mode", "Standard Mode")
         st.session_state["dashboard_mode"] = mode
+        _refresh_mode_flags()
         if mode != "Presentation Mode":
-            theme_options = ["Midnight Blue", "Black Terminal", "Arctic Glass"]
-            theme = st.selectbox("Theme", theme_options)
-            if theme not in theme_options:
+            theme = st.selectbox("Theme", THEME_OPTIONS, key="dashboard_theme_selector")
+            if theme not in THEME_OPTIONS:
                 theme = st.session_state.get("dashboard_theme", "Midnight Blue")
             st.session_state["dashboard_theme"] = theme
-            refresh_choice = st.selectbox("Auto-refresh", ["Off", "30 seconds", "60 seconds", "5 minutes"])
+            refresh_choice = st.selectbox("Auto-refresh", AUTO_REFRESH_OPTIONS, key="dashboard_auto_refresh_selector")
             st.session_state["dashboard_auto_refresh"] = refresh_choice
         else:
             st.session_state["dashboard_theme"] = st.session_state.get("dashboard_theme", "Midnight Blue")
             st.session_state["dashboard_auto_refresh"] = "Off"
+            st.info("Presentation Mode active")
         st.write(f"Environment: {friendly_status_text(os.getenv('TRADING_MODE', 'PAPER'))}")
         st.write(f"Database connected: {'yes' if payload.get('db_connected') else 'no'}")
         st.write(f"Last data refresh: {format_timestamp_eastern(st.session_state.get('dashboard_last_refresh'))}")
@@ -1697,10 +1801,10 @@ def render_orders_page(payload):
         return
 
     filter_cols = st.columns(4)
-    submitted_filter = filter_cols[0].selectbox("Submitted", ["All", "Submitted", "Not Submitted"])
-    signal_filter = filter_cols[1].selectbox("Signal", ["All", "BUY", "HOLD", "SELL"])
-    stop_reason_filter = filter_cols[2].text_input("Stop reason contains", "")
-    date_filter = filter_cols[3].text_input("Date contains", "")
+    submitted_filter = filter_cols[0].selectbox("Submitted", ["All", "Submitted", "Not Submitted"], key="orders_submitted_filter")
+    signal_filter = filter_cols[1].selectbox("Signal", ["All", "BUY", "HOLD", "SELL"], key="orders_signal_filter")
+    stop_reason_filter = filter_cols[2].text_input("Stop reason contains", "", key="orders_stop_reason_filter")
+    date_filter = filter_cols[3].text_input("Date contains", "", key="orders_date_filter")
 
     filtered = rows
     if submitted_filter != "All":
@@ -1882,25 +1986,40 @@ def build_notification_items(payload, view):
     if "discord" in str(view.get("latest_stop_reason", "")).lower() or "discord" in str(view.get("latest_safe_error_message", "")).lower():
         notices.append({"severity": "Info", "message": "Discord alert status detected in monitoring logs", "timestamp": view.get("last_run_timestamp")})
 
+    for idx, notice in enumerate(notices):
+        notice_id = sanitize_identifier(f"{notice.get('severity', 'info')}-{notice.get('timestamp', '')}-{notice.get('message', '')}-{idx}")
+        notice["id"] = notice_id or f"notice-{idx}"
+
     return notices
 
 
 def render_notification_center(payload, view):
     st.subheader("Notification Center")
-    severity = st.selectbox("Severity", ["All", "Info", "Warning", "Critical"])
+    severity = st.selectbox("Severity", ["All", "Info", "Warning", "Critical"], key="dashboard_alert_severity")
     notices = build_notification_items(payload, view)
+    acknowledged = set(st.session_state.get("dashboard_acknowledged_alerts") or [])
     if severity != "All":
         notices = [n for n in notices if n["severity"] == severity]
     if not notices:
         _empty_state("No notifications for the selected severity")
         return
-    for notice in notices:
+    for idx, notice in enumerate(notices):
         style_key, _ = _event_style(notice["severity"].lower())
         color = STATUS_COLORS.get(style_key, STATUS_COLORS["neutral"])
-        st.markdown(
-            f"<div class='dq-card'><span class='dq-alert-pill' style='color:{color};'>{notice['severity']}</span><span class='dq-value'>{_safe_text(notice['message'])}</span><div class='dq-label'>{_safe_text(notice['timestamp'])}</div></div>",
-            unsafe_allow_html=True,
-        )
+        cols = st.columns([8, 2])
+        with cols[0]:
+            marker = "Acknowledged" if notice.get("id") in acknowledged else "New"
+            st.markdown(
+                f"<div class='dq-card'><span class='dq-alert-pill' style='color:{color};'>{notice['severity']}</span><span class='dq-alert-pill'>{marker}</span><span class='dq-value'>{_safe_text(notice['message'])}</span><div class='dq-label'>{_safe_text(notice['timestamp'])}</div></div>",
+                unsafe_allow_html=True,
+            )
+        with cols[1]:
+            if notice.get("id") in acknowledged:
+                st.caption("Acknowledged")
+            elif st.button("Acknowledge", key=f"ack_alert_{notice.get('id')}_{idx}"):
+                acknowledged.add(notice.get("id"))
+                st.session_state["dashboard_acknowledged_alerts"] = sorted(acknowledged)
+                st.success("Alert acknowledged for this session")
 
 
 def _component_status(payload, view):
@@ -2045,11 +2164,26 @@ def render_research_page():
     health_csv = export_system_health(export_payload.get("health", []))
     perf_csv = export_performance_summary(export_payload.get("performance", []))
     if hasattr(st, "download_button"):
-        st.download_button("Daily activity CSV", activity_csv, file_name="daily_activity.csv", mime="text/csv")
-        st.download_button("Signal history CSV", signals_csv, file_name="signal_history.csv", mime="text/csv")
-        st.download_button("Sanitized order-events CSV", orders_csv, file_name="order_events.csv", mime="text/csv")
-        st.download_button("System-health report", health_csv, file_name="system_health.csv", mime="text/csv")
-        st.download_button("Paper-performance summary", perf_csv, file_name="performance_summary.csv", mime="text/csv")
+        exports = [
+            ("Daily activity CSV", export_payload.get("activity", []), activity_csv, "daily_activity.csv", "text/csv", "download_daily_activity"),
+            ("Signal history CSV", export_payload.get("signals", []), signals_csv, "signal_history.csv", "text/csv", "download_signal_history"),
+            ("Sanitized order-events CSV", export_payload.get("orders", []), orders_csv, "order_events.csv", "text/csv", "download_order_events"),
+            ("System-health report", export_payload.get("health", []), health_csv, "system_health.csv", "text/csv", "download_system_health"),
+            ("Paper-performance summary", export_payload.get("performance", []), perf_csv, "performance_summary.csv", "text/csv", "download_performance_summary"),
+        ]
+        for label, rows, csv_blob, file_name, mime_type, key in exports:
+            safe_name = sanitize_identifier(file_name.replace(".csv", "")) + ".csv"
+            has_rows = bool(rows)
+            if not has_rows:
+                st.info(f"No data available for {label}")
+            st.download_button(
+                label,
+                csv_blob,
+                file_name=safe_name,
+                mime=mime_type,
+                key=key,
+                disabled=not has_rows,
+            )
 
 
 def render_dashboard(database_url: str | None = None):
@@ -2059,12 +2193,8 @@ def render_dashboard(database_url: str | None = None):
     enforce_paper_mode(os.getenv("TRADING_MODE", "PAPER"))
     st.set_page_config(page_title="DEAL QUANT COMMAND CENTER", layout="wide")
 
-    if "dashboard_theme" not in st.session_state:
-        st.session_state["dashboard_theme"] = "Midnight Blue"
-    if "dashboard_auto_refresh" not in st.session_state:
-        st.session_state["dashboard_auto_refresh"] = "Off"
-    if "dashboard_authenticated" not in st.session_state:
-        st.session_state["dashboard_authenticated"] = False
+    initialize_dashboard_session_state()
+    _refresh_mode_flags()
 
     if st.session_state.pop("dashboard_password_clear_requested", False):
         st.session_state.pop("dashboard_password_input", None)
@@ -2074,6 +2204,10 @@ def render_dashboard(database_url: str | None = None):
     expected_password = os.getenv("DASHBOARD_PASSWORD", "")
     if not _ensure_authenticated(expected_password):
         st.stop()
+
+    if st.session_state.get("dashboard_force_refresh"):
+        clear_dashboard_cache()
+        st.session_state["dashboard_force_refresh"] = False
 
     try:
         with st.spinner("Loading command center..."):
@@ -2104,6 +2238,12 @@ def render_dashboard(database_url: str | None = None):
         "performance": [{"metric": "portfolio_value", "value": view.get("portfolio_value")}, {"metric": "today_pl", "value": view.get("today_pl")}, {"metric": "total_pl", "value": view.get("total_pl")}],
     }
     render_sidebar(payload)
+    if st.session_state.get("dashboard_presentation_mode"):
+        if st.button("Exit Presentation Mode", key="dashboard_exit_presentation"):
+            st.session_state["dashboard_mode"] = "Standard Mode"
+            st.session_state["dashboard_mode_selector"] = "Standard Mode"
+            _refresh_mode_flags()
+            st.rerun()
     apply_dashboard_css(st.session_state.get("dashboard_theme", "Midnight Blue"))
 
     refresh_mapping = {
@@ -2114,11 +2254,11 @@ def render_dashboard(database_url: str | None = None):
     }
     refresh_seconds = refresh_mapping.get(st.session_state.get("dashboard_auto_refresh", "Off"), 0)
     if refresh_seconds > 0 and st_autorefresh is not None:
-        st_autorefresh(interval=refresh_seconds * 1000, key="dashboard_auto_refresh")
+        st_autorefresh(interval=refresh_seconds * 1000, key="dashboard_auto_refresh_tick")
 
-    render_header(payload, view)
-    pages = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research"]
-    selected_page = _render_navigation(pages)
+    _render_with_error_guard("Header", render_header, payload, view)
+    selected_page = _render_navigation(PAGE_OPTIONS)
+    st.session_state["dashboard_page"] = selected_page
 
     page_renderers = {
         "Command Center": render_overview_page,
@@ -2131,14 +2271,13 @@ def render_dashboard(database_url: str | None = None):
         "Alerts": render_alerts_page,
         "Research": render_research_page,
     }
-    if selected_page == "Orders":
-        render_orders_page(payload)
-    elif selected_page == "Performance":
-        render_performance_page(payload)
-    elif selected_page == "Research":
-        render_research_page()
+    page_renderer = page_renderers.get(selected_page, render_overview_page)
+    if selected_page == "Research":
+        _render_with_error_guard("Research", page_renderer)
+    elif selected_page in {"Orders", "Performance"}:
+        _render_with_error_guard(selected_page, page_renderer, payload)
     else:
-        page_renderers.get(selected_page, render_overview_page)(payload, view)
+        _render_with_error_guard(selected_page, page_renderer, payload, view)
 
 
 def main():
