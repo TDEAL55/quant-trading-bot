@@ -1,4 +1,5 @@
 import os
+import math
 
 from dotenv import load_dotenv
 
@@ -29,6 +30,44 @@ PAPER_API_BASE_URL = os.getenv("PAPER_API_BASE_URL", "")
 PAPER_API_USERNAME = os.getenv("PAPER_API_USERNAME", "")
 PAPER_API_PASSWORD = os.getenv("PAPER_API_PASSWORD", "")
 PAPER_API_TOKEN = os.getenv("PAPER_API_TOKEN", "")
+BENCHMARK_SYMBOL = os.getenv("BENCHMARK_SYMBOL", "SPY")
+STRATEGY_MODE = os.getenv("STRATEGY_MODE", "MULTI_FACTOR").upper()
+SIGNAL_HYSTERESIS_BUFFER = float(os.getenv("SIGNAL_HYSTERESIS_BUFFER", "2.5"))
+
+SIGNAL_THRESHOLDS = {
+    "strong_buy": float(os.getenv("SIGNAL_THRESHOLD_STRONG_BUY", "80")),
+    "buy": float(os.getenv("SIGNAL_THRESHOLD_BUY", "65")),
+    "hold": float(os.getenv("SIGNAL_THRESHOLD_HOLD", "45")),
+    "reduce": float(os.getenv("SIGNAL_THRESHOLD_REDUCE", "30")),
+}
+
+FACTOR_WEIGHTS = {
+    "trend": float(os.getenv("FACTOR_WEIGHT_TREND", "0.30")),
+    "momentum": float(os.getenv("FACTOR_WEIGHT_MOMENTUM", "0.20")),
+    "volume": float(os.getenv("FACTOR_WEIGHT_VOLUME", "0.15")),
+    "volatility": float(os.getenv("FACTOR_WEIGHT_VOLATILITY", "0.10")),
+    "market_regime": float(os.getenv("FACTOR_WEIGHT_MARKET_REGIME", "0.15")),
+    "risk_quality": float(os.getenv("FACTOR_WEIGHT_RISK_QUALITY", "0.10")),
+}
+
+
+def validate_factor_weights(weights=None):
+    selected = dict(weights or FACTOR_WEIGHTS)
+    if any(float(value) < 0 for value in selected.values()):
+        raise ValueError("Factor weights must be non-negative")
+    total = sum(float(value) for value in selected.values())
+    if not math.isclose(total, 1.0, rel_tol=1e-9, abs_tol=1e-9):
+        raise ValueError(f"Factor weights must sum to 1.0, got {total:.6f}")
+    return {name: float(value) for name, value in selected.items()}
+
+
+def validate_signal_thresholds(thresholds=None):
+    selected = dict(thresholds or SIGNAL_THRESHOLDS)
+    required = ["strong_buy", "buy", "hold", "reduce"]
+    ordered = [float(selected[name]) for name in required]
+    if not (100.0 >= ordered[0] > ordered[1] > ordered[2] > ordered[3] >= 0.0):
+        raise ValueError("Signal thresholds must satisfy strong_buy > buy > hold > reduce within 0-100")
+    return {name: float(selected[name]) for name in required}
 
 
 def is_safe_mode(mode=None):

@@ -1,6 +1,6 @@
 import pandas as pd
 
-from backtest import run_backtest
+from backtest import compare_strategy_modes, run_backtest
 from market_data import download_price_data
 from strategy import generate_signal
 
@@ -29,18 +29,13 @@ def generate_rsi_signal(prices, window=14):
 
 
 def compare_strategies(ticker="SPY", start_date="2020-01-01", end_date="2025-01-01"):
-    """Compare a moving-average crossover strategy, buy-and-hold, and an RSI strategy."""
+    """Compare a legacy MA strategy, a multi-factor strategy, buy-and-hold, and RSI."""
     prices = download_price_data(ticker, start_date, end_date).dropna()
 
-    moving_average_result = run_backtest(ticker, start_date, end_date)
-
-    # Buy-and-hold is represented by the benchmark from the backtest module.
-    buy_and_hold_result = {
-        "ticker": ticker,
-        "total_return": moving_average_result["buy_and_hold_return"],
-        "max_drawdown": moving_average_result["max_drawdown"],
-        "number_of_trades": 1,
-    }
+    comparison = compare_strategy_modes(ticker, start_date, end_date)
+    moving_average_result = comparison["legacy_ma"]
+    multi_factor_result = comparison["multi_factor"]
+    buy_and_hold_result = comparison["buy_and_hold"]
 
     # A simple RSI-based simulation uses the same backtest structure but with a different signal function.
     cash = 10000.0
@@ -85,6 +80,11 @@ def compare_strategies(ticker="SPY", start_date="2020-01-01", end_date="2025-01-
             "return": moving_average_result["total_return"],
             "drawdown": moving_average_result["max_drawdown"],
             "trades": moving_average_result["number_of_trades"],
+        },
+        "multi_factor": {
+            "return": multi_factor_result["total_return"],
+            "drawdown": multi_factor_result["max_drawdown"],
+            "trades": multi_factor_result["number_of_trades"],
         },
         "buy_and_hold": buy_and_hold_result,
         "rsi": rsi_result,
