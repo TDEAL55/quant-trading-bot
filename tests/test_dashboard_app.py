@@ -362,7 +362,7 @@ def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch)
 
     nav_calls = [call for call in fake_st._calls if call[0] == "selectbox" and call[1] == "Navigate"]
     assert nav_calls
-    assert nav_calls[0][2] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory"]
+    assert nav_calls[0][2] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation"]
     assert all("trade" not in str(page).lower() for page in nav_calls[0][2])
 
     build_markers = [call for call in fake_st._calls if call[0] == "markdown" and dashboard_app.UI_BUILD_LABEL in call[1]]
@@ -804,6 +804,39 @@ def test_strategy_laboratory_page_renders_payload(monkeypatch):
     dashboard_app.render_strategy_laboratory_page()
 
     assert any(call[0] == "markdown" and "STRATEGY LABORATORY" in call[1] for call in fake_st._calls)
+    assert any(call[0] == "dataframe" for call in fake_st._calls)
+
+
+def test_paper_validation_page_renders_payload(monkeypatch):
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["dashboard_research_payload"] = {
+        "paper_validation": {
+            "db_connected": True,
+            "approvals": [{"approval_id": "a1", "strategy_id": "baseline_scanner", "enabled": True}],
+            "latest_run": {
+                "run_id": "pv-1",
+                "strategy_id": "baseline_scanner",
+                "approval_id": "a1",
+                "mode": "SIMULATION",
+                "dry_run": True,
+                "status": "completed",
+                "proposed_order_count": 3,
+                "submitted_order_count": 0,
+                "filled_order_count": 0,
+                "failed_order_count": 0,
+                "performance": {"total_duration": 0.5},
+                "configuration": {},
+            },
+            "latest_orders": [{"paper_order_id": "o1", "symbol": "AAA", "risk_status": "approved"}],
+            "latest_position_snapshots": [{"snapshot_id": "s1", "reconciliation_status": "matched", "positions": {"AAA": {"quantity": 1.0, "weight": 0.1}}, "warnings": []}],
+            "history": [{"run_id": "pv-1", "status": "completed"}],
+        }
+    }
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+
+    dashboard_app.render_paper_validation_page()
+
+    assert any(call[0] == "markdown" and "PAPER VALIDATION" in call[1] for call in fake_st._calls)
     assert any(call[0] == "dataframe" for call in fake_st._calls)
 
 

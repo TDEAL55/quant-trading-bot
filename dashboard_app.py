@@ -38,6 +38,7 @@ from dashboard_status import classify_market_clock, format_est
 from logger_setup import logger
 from evaluation_data import fetch_evaluation_dashboard_payload
 from factor_attribution import fetch_factor_attribution_dashboard_payload
+from paper_validation_data import fetch_paper_validation_dashboard_payload
 from portfolio_research_data import fetch_portfolio_research_dashboard_payload
 from research_data import fetch_research_dashboard_payload
 from strategy_lab_data import fetch_strategy_lab_dashboard_payload
@@ -89,7 +90,7 @@ THEMES = {
     },
 }
 
-PAGE_OPTIONS = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory"]
+PAGE_OPTIONS = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation"]
 MODE_OPTIONS = ["Standard Mode", "Focus Mode", "Presentation Mode"]
 THEME_OPTIONS = ["Midnight Blue", "Black Terminal", "Arctic Glass"]
 AUTO_REFRESH_OPTIONS = ["Off", "30 seconds", "60 seconds", "5 minutes"]
@@ -563,11 +564,13 @@ def load_research_summary(database_url: str | None = None, selected_run_id: str 
         walk_forward_payload = fetch_walk_forward_dashboard_payload(database_value)
         portfolio_research_payload = fetch_portfolio_research_dashboard_payload(database_value)
         strategy_lab_payload = fetch_strategy_lab_dashboard_payload(database_value)
+        paper_validation_payload = fetch_paper_validation_dashboard_payload(database_value)
         research_payload["evaluation"] = evaluation_payload
         research_payload["factor_attribution"] = factor_attribution_payload
         research_payload["walk_forward"] = walk_forward_payload
         research_payload["portfolio_research"] = portfolio_research_payload
         research_payload["strategy_lab"] = strategy_lab_payload
+        research_payload["paper_validation"] = paper_validation_payload
         return research_payload
     except Exception as exc:  # pragma: no cover - defensive dashboard path
         logger.error("RESEARCH_DASHBOARD_QUERY_FAILURE type=%s message=%s", type(exc).__name__, exc)
@@ -653,6 +656,14 @@ def load_research_summary(database_url: str | None = None, selected_run_id: str 
                 "latest_run": {},
                 "results": [],
                 "pairwise": [],
+            },
+            "paper_validation": {
+                "db_connected": False,
+                "approvals": [],
+                "latest_run": {},
+                "latest_orders": [],
+                "latest_position_snapshots": [],
+                "history": [],
             },
         }
 
@@ -779,6 +790,124 @@ def render_strategy_laboratory_page():
             ("Strategy leaderboard JSON", leaderboard_rows, "leaderboard", "strategy_lab_leaderboard.json"),
             ("Strategy pairwise JSON", pairwise, "pairwise", "strategy_lab_pairwise.json"),
             ("Strategy results JSON", results, "results", "strategy_lab_results.json"),
+        ]:
+            has_rows = bool(rows)
+            if not has_rows:
+                st.info(f"No data available for {label}")
+            st.download_button(label, export_blobs[key], file_name=sanitize_identifier(file_name.replace(".json", "")) + ".json", mime="application/json", key=f"download_{key}", disabled=not has_rows)
+
+
+def render_paper_validation_page():
+    st.markdown("### PAPER VALIDATION - READ ONLY")
+    payload = st.session_state.get("dashboard_research_payload") or {}
+    paper_payload = payload.get("paper_validation") or {"db_connected": False, "approvals": [], "latest_run": {}, "latest_orders": [], "latest_position_snapshots": [], "history": []}
+    latest_run = paper_payload.get("latest_run") or {}
+    approvals = list(paper_payload.get("approvals") or [])
+    orders = list(paper_payload.get("latest_orders") or [])
+    snapshots = list(paper_payload.get("latest_position_snapshots") or [])
+    history = list(paper_payload.get("history") or [])
+
+    overview_cols = st.columns(9)
+    _metric_card(overview_cols[0], "Latest Run", _safe_text(latest_run.get("run_id"), "N/A"), "neutral")
+    _metric_card(overview_cols[1], "Strategy", _safe_text(latest_run.get("strategy_id"), "N/A"), "neutral")
+    _metric_card(overview_cols[2], "Approval", _safe_text(latest_run.get("approval_id"), "N/A"), "neutral")
+    _metric_card(overview_cols[3], "Mode", _safe_text(latest_run.get("mode"), "N/A"), "neutral")
+    _metric_card(overview_cols[4], "Dry Run", _safe_text(latest_run.get("dry_run"), "N/A"), "warning")
+    _metric_card(overview_cols[5], "Status", _safe_text(latest_run.get("status"), "N/A"), "warning")
+    _metric_card(overview_cols[6], "Proposed", latest_run.get("proposed_order_count", 0), "neutral")
+    _metric_card(overview_cols[7], "Submitted", latest_run.get("submitted_order_count", 0), "neutral")
+    _metric_card(overview_cols[8], "Filled", latest_run.get("filled_order_count", 0), "healthy")
+
+    st.markdown("#### Approval")
+    st.dataframe(approvals)
+
+    st.markdown("#### Run Metrics")
+    st.dataframe(
+        [
+            {
+                "run_id": latest_run.get("run_id"),
+                "strategy": latest_run.get("strategy_id"),
+                "approval_id": latest_run.get("approval_id"),
+                "candidates": (latest_run.get("performance") or {}).get("candidate_count"),
+                "target_holdings": (latest_run.get("configuration") or {}).get("target_holding_count"),
+                "proposed": latest_run.get("proposed_order_count"),
+                "approved": latest_run.get("approved_order_count"),
+                "rejected": latest_run.get("rejected_order_count"),
+                "submitted": latest_run.get("submitted_order_count"),
+                "filled": latest_run.get("filled_order_count"),
+                "failed": latest_run.get("failed_order_count"),
+                "turnover": (latest_run.get("configuration") or {}).get("estimated_turnover"),
+                "pre_cash": (latest_run.get("configuration") or {}).get("pre_trade_cash"),
+                "post_cash": (latest_run.get("configuration") or {}).get("post_trade_cash"),
+                "duration": (latest_run.get("performance") or {}).get("total_duration"),
+            }
+        ]
+    )
+
+    st.markdown("#### Orders")
+    st.dataframe(orders)
+
+    st.markdown("#### Positions")
+    position_rows = []
+    if snapshots:
+        latest_positions = (snapshots[-1] or {}).get("positions") or {}
+        for symbol, row in sorted(latest_positions.items()):
+            position_rows.append(
+                {
+                    "symbol": symbol,
+                    "planned_quantity": None,
+                    "actual_quantity": row.get("quantity"),
+                    "difference": None,
+                    "planned_weight": None,
+                    "actual_weight": row.get("weight"),
+                    "weight_difference": None,
+                    "reconciliation_status": (snapshots[-1] or {}).get("reconciliation_status"),
+                }
+            )
+    st.dataframe(position_rows)
+
+    st.markdown("#### Risk Rejections")
+    grouped_rejections: dict[str, int] = {}
+    for order in orders:
+        if str(order.get("risk_status") or "") == "rejected":
+            reason = str(order.get("risk_reason") or "unknown")
+            grouped_rejections[reason] = grouped_rejections.get(reason, 0) + 1
+    st.dataframe([{"reason": key, "count": value} for key, value in sorted(grouped_rejections.items())])
+
+    st.markdown("#### Reconciliation")
+    latest_snapshot = snapshots[-1] if snapshots else {}
+    st.dataframe(
+        [
+            {
+                "mismatch_count": None,
+                "cash_difference": None,
+                "buying_power_difference": None,
+                "unfilled_count": None,
+                "failed_count": latest_run.get("failed_order_count", 0),
+                "final_status": latest_snapshot.get("reconciliation_status"),
+                "warnings": "; ".join(latest_snapshot.get("warnings") or []),
+            }
+        ]
+    )
+
+    st.markdown("#### History")
+    st.dataframe(history)
+
+    st.markdown("#### Read-only paper validation exports")
+    export_payload = {
+        "latest_run": latest_run,
+        "approvals": approvals,
+        "orders": orders,
+        "position_snapshots": snapshots,
+        "history": history,
+    }
+    export_blobs = {key: json.dumps(value, indent=2, sort_keys=True) for key, value in export_payload.items()}
+    if hasattr(st, "download_button"):
+        for label, rows, key, file_name in [
+            ("Paper validation run JSON", [latest_run] if latest_run else [], "latest_run", "paper_validation_run.json"),
+            ("Paper approvals JSON", approvals, "approvals", "paper_validation_approvals.json"),
+            ("Paper orders JSON", orders, "orders", "paper_validation_orders.json"),
+            ("Paper history JSON", history, "history", "paper_validation_history.json"),
         ]:
             has_rows = bool(rows)
             if not has_rows:
@@ -3042,9 +3171,10 @@ def render_dashboard(database_url: str | None = None):
         "Walk-Forward Validation": render_walk_forward_validation_page,
         "Portfolio Research": render_portfolio_research_page,
         "Strategy Laboratory": render_strategy_laboratory_page,
+        "Paper Validation": render_paper_validation_page,
     }
     page_renderer = page_renderers.get(selected_page, render_overview_page)
-    if selected_page in {"Research", "Factor Attribution", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory"}:
+    if selected_page in {"Research", "Factor Attribution", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation"}:
         _render_with_error_guard("Research", page_renderer)
     elif selected_page in {"Orders", "Performance"}:
         _render_with_error_guard(selected_page, page_renderer, payload)

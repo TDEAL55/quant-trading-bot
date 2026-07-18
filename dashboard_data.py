@@ -6,6 +6,7 @@ from monitoring_db import MonitoringDatabase
 from dashboard_models import build_dashboard_dataset
 from evaluation_data import fetch_evaluation_dashboard_payload
 from factor_attribution import fetch_factor_attribution_dashboard_payload
+from paper_validation_data import fetch_paper_validation_dashboard_payload
 from portfolio_research_data import fetch_portfolio_research_dashboard_payload
 from research_data import fetch_research_dashboard_payload
 from strategy_lab_data import fetch_strategy_lab_dashboard_payload
@@ -21,11 +22,13 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
         walk_forward_payload = fetch_walk_forward_dashboard_payload(database_url)
         portfolio_research_payload = fetch_portfolio_research_dashboard_payload(database_url)
         strategy_lab_payload = fetch_strategy_lab_dashboard_payload(database_url)
+        paper_validation_payload = fetch_paper_validation_dashboard_payload(database_url)
         research_payload["evaluation"] = evaluation_payload
         research_payload["factor_attribution"] = factor_attribution_payload
         research_payload["walk_forward"] = walk_forward_payload
         research_payload["portfolio_research"] = portfolio_research_payload
         research_payload["strategy_lab"] = strategy_lab_payload
+        research_payload["paper_validation"] = paper_validation_payload
     except Exception:
         research_payload = {
             "db_connected": False,
@@ -109,6 +112,14 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
                 "latest_run": {},
                 "results": [],
                 "pairwise": [],
+            },
+            "paper_validation": {
+                "db_connected": False,
+                "approvals": [],
+                "latest_run": {},
+                "latest_orders": [],
+                "latest_position_snapshots": [],
+                "history": [],
             },
         }
     payload = {
