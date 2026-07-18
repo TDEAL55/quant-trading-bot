@@ -362,7 +362,7 @@ def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch)
 
     nav_calls = [call for call in fake_st._calls if call[0] == "selectbox" and call[1] == "Navigate"]
     assert nav_calls
-    assert nav_calls[0][2] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution"]
+    assert nav_calls[0][2] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Walk-Forward Validation"]
     assert all("trade" not in str(page).lower() for page in nav_calls[0][2])
 
     build_markers = [call for call in fake_st._calls if call[0] == "markdown" and dashboard_app.UI_BUILD_LABEL in call[1]]
@@ -654,6 +654,53 @@ def test_factor_attribution_page_renders_payload(monkeypatch):
     assert any(call[0] == "markdown" and "FACTOR ATTRIBUTION" in call[1] for call in fake_st._calls)
     assert any(call[0] == "selectbox" and call[1] == "Attribution horizon" for call in fake_st._calls)
     assert any(call[0] == "selectbox" and call[1] == "Factor" for call in fake_st._calls)
+    assert any(call[0] == "dataframe" for call in fake_st._calls)
+
+
+def test_walk_forward_validation_page_renders_payload(monkeypatch):
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["dashboard_research_payload"] = {
+        "walk_forward": {
+            "db_connected": True,
+            "total_validation_runs": 1,
+            "latest_run": {
+                "run_id": "wf-1",
+                "total_windows": 2,
+                "completed_windows": 1,
+                "skipped_windows": 1,
+                "horizon": 20,
+                "benchmark_symbol": "SPY",
+                "window_type": "rolling",
+                "duration_seconds": 1.23,
+                "scorecard": {"overall_validation_status": "acceptable", "categories": [{"category": "Out-of-sample performance", "status": "acceptable"}]},
+                "performance": {},
+                "factor_stability_summary": [{"factor": "trend_score", "stability_percentage": 1.0}],
+                "regime_robustness": [{"market_regime": "bull", "average_validation_excess_return": 0.02}],
+                "performance_decay": {"trend_slope": -0.001, "performance_decay_flag": False},
+            },
+            "windows": [
+                {
+                    "window_id": "rolling-20-1",
+                    "training_start_date": "2024-01-01",
+                    "training_end_date": "2024-03-01",
+                    "validation_start_date": "2024-04-01",
+                    "validation_end_date": "2024-04-01",
+                    "training_observation_count": 12,
+                    "validation_observation_count": 4,
+                    "training_metrics": {"all_candidates": {"average_excess_return": 0.01, "positive_excess_rate": 0.6, "sharpe_like_ratio": 0.5}},
+                    "validation_metrics": {"all_candidates": {"average_excess_return": 0.02, "positive_excess_rate": 0.75, "sharpe_like_ratio": 0.8, "excess_standard_deviation": 0.03, "cumulative_excess_return": 0.02}},
+                    "degradation_metrics": {"average_excess_return": {"validation_degradation": 0.01}},
+                    "status": "completed",
+                    "warnings": [],
+                }
+            ],
+        }
+    }
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+
+    dashboard_app.render_walk_forward_validation_page()
+
+    assert any(call[0] == "markdown" and "WALK-FORWARD VALIDATION" in call[1] for call in fake_st._calls)
     assert any(call[0] == "dataframe" for call in fake_st._calls)
 
 

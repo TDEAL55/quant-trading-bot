@@ -7,6 +7,7 @@ from dashboard_models import build_dashboard_dataset
 from evaluation_data import fetch_evaluation_dashboard_payload
 from factor_attribution import fetch_factor_attribution_dashboard_payload
 from research_data import fetch_research_dashboard_payload
+from walk_forward_data import fetch_walk_forward_dashboard_payload
 
 
 def fetch_dashboard_payload(database_url: str | None, database_factory=MonitoringDatabase) -> dict[str, Any]:
@@ -15,8 +16,10 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
         research_payload = fetch_research_dashboard_payload(database_url, database_factory=MonitoringDatabase)
         evaluation_payload = fetch_evaluation_dashboard_payload(database_url, database_factory=MonitoringDatabase)
         factor_attribution_payload = fetch_factor_attribution_dashboard_payload(database_url, database_factory=MonitoringDatabase)
+        walk_forward_payload = fetch_walk_forward_dashboard_payload(database_url)
         research_payload["evaluation"] = evaluation_payload
         research_payload["factor_attribution"] = factor_attribution_payload
+        research_payload["walk_forward"] = walk_forward_payload
     except Exception:
         research_payload = {
             "db_connected": False,
@@ -81,6 +84,12 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
                     "top_factor_combinations": {},
                 },
                 "factor_options": [],
+            },
+            "walk_forward": {
+                "db_connected": False,
+                "total_validation_runs": 0,
+                "latest_run": {},
+                "windows": [],
             },
         }
     payload = {

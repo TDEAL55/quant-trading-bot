@@ -39,6 +39,7 @@ from logger_setup import logger
 from evaluation_data import fetch_evaluation_dashboard_payload
 from factor_attribution import fetch_factor_attribution_dashboard_payload
 from research_data import fetch_research_dashboard_payload
+from walk_forward_data import fetch_walk_forward_dashboard_payload
 
 
 MAX_DAILY_ORDERS = 3
@@ -86,7 +87,7 @@ THEMES = {
     },
 }
 
-PAGE_OPTIONS = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution"]
+PAGE_OPTIONS = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Walk-Forward Validation"]
 MODE_OPTIONS = ["Standard Mode", "Focus Mode", "Presentation Mode"]
 THEME_OPTIONS = ["Midnight Blue", "Black Terminal", "Arctic Glass"]
 AUTO_REFRESH_OPTIONS = ["Off", "30 seconds", "60 seconds", "5 minutes"]
@@ -557,8 +558,10 @@ def load_research_summary(database_url: str | None = None, selected_run_id: str 
         research_payload = fetch_research_dashboard_payload(database_value, selected_run_id=selected_run_id, database_factory=MonitoringDatabase)
         evaluation_payload = fetch_evaluation_dashboard_payload(database_value, database_factory=MonitoringDatabase)
         factor_attribution_payload = fetch_factor_attribution_dashboard_payload(database_value, database_factory=MonitoringDatabase)
+        walk_forward_payload = fetch_walk_forward_dashboard_payload(database_value)
         research_payload["evaluation"] = evaluation_payload
         research_payload["factor_attribution"] = factor_attribution_payload
+        research_payload["walk_forward"] = walk_forward_payload
         return research_payload
     except Exception as exc:  # pragma: no cover - defensive dashboard path
         logger.error("RESEARCH_DASHBOARD_QUERY_FAILURE type=%s message=%s", type(exc).__name__, exc)
@@ -625,6 +628,12 @@ def load_research_summary(database_url: str | None = None, selected_run_id: str 
                     "top_factor_combinations": {},
                 },
                 "factor_options": [],
+            },
+            "walk_forward": {
+                "db_connected": False,
+                "total_validation_runs": 0,
+                "latest_run": {},
+                "windows": [],
             },
         }
 
@@ -712,6 +721,113 @@ def render_factor_attribution_page():
             ("Factor correlations JSON", correlations, "factor_correlations", "factor_correlations.json"),
             ("Bucket analysis JSON", selected_factor_buckets, "selected_factor_bucket_analysis", "factor_bucket_analysis.json"),
             ("Top factor combinations JSON", combinations, "top_factor_combinations", "top_factor_combinations.json"),
+        ]:
+            has_rows = bool(rows)
+            if not has_rows:
+                st.info(f"No data available for {label}")
+            st.download_button(label, export_blobs[key], file_name=sanitize_identifier(file_name.replace(".json", "")) + ".json", mime="application/json", key=f"download_{key}", disabled=not has_rows)
+
+
+def render_walk_forward_validation_page():
+    st.markdown("### WALK-FORWARD VALIDATION — READ ONLY")
+    payload = st.session_state.get("dashboard_research_payload") or {}
+    walk_forward = payload.get("walk_forward") or {"db_connected": False, "total_validation_runs": 0, "latest_run": {}, "windows": []}
+    latest_run = walk_forward.get("latest_run") or {}
+    windows = list(walk_forward.get("windows") or [])
+    scorecard = latest_run.get("scorecard") or {}
+    categories = list(scorecard.get("categories") or [])
+    performance = latest_run.get("performance") or {}
+    factor_stability = list(latest_run.get("factor_stability_summary") or [])
+    regime_robustness = list(latest_run.get("regime_robustness") or [])
+    decay = latest_run.get("performance_decay") or {}
+
+    overview_cols = st.columns(7)
+    _metric_card(overview_cols[0], "Total Validation Runs", walk_forward.get("total_validation_runs", 0), "neutral")
+    _metric_card(overview_cols[1], "Total Windows", latest_run.get("total_windows", 0), "neutral")
+    _metric_card(overview_cols[2], "Completed Windows", latest_run.get("completed_windows", 0), "healthy")
+    _metric_card(overview_cols[3], "Skipped Windows", latest_run.get("skipped_windows", 0), "warning")
+    _metric_card(overview_cols[4], "Horizon", latest_run.get("horizon", "N/A"), "neutral")
+    _metric_card(overview_cols[5], "Benchmark", _safe_text(latest_run.get("benchmark_symbol"), "N/A"), "neutral")
+    _metric_card(overview_cols[6], "Overall Status", _safe_text(scorecard.get("overall_validation_status"), "insufficient_data"), "warning")
+
+    meta_cols = st.columns(2)
+    _metric_card(meta_cols[0], "Window Type", _safe_text(latest_run.get("window_type"), "N/A"), "neutral")
+    _metric_card(meta_cols[1], "Duration (s)", f"{float(latest_run.get('duration_seconds') or 0.0):.4f}", "neutral")
+
+    st.markdown("#### Scorecard")
+    st.dataframe(categories)
+
+    st.markdown("#### Window Performance")
+    window_rows = []
+    rolling_rows = []
+    for window in windows:
+        train_all = (window.get("training_metrics") or {}).get("all_candidates") or {}
+        validation_all = (window.get("validation_metrics") or {}).get("all_candidates") or {}
+        degradation_all = (window.get("degradation_metrics") or {}).get("average_excess_return") or {}
+        window_rows.append(
+            {
+                "window_id": window.get("window_id"),
+                "training_period": f"{window.get('training_start_date')} -> {window.get('training_end_date')}",
+                "validation_period": f"{window.get('validation_start_date')} -> {window.get('validation_end_date')}",
+                "training_count": window.get("training_observation_count", 0),
+                "validation_count": window.get("validation_observation_count", 0),
+                "training_average_excess_return": train_all.get("average_excess_return"),
+                "validation_average_excess_return": validation_all.get("average_excess_return"),
+                "degradation": degradation_all.get("validation_degradation"),
+                "training_positive_excess_rate": train_all.get("positive_excess_rate"),
+                "validation_positive_excess_rate": validation_all.get("positive_excess_rate"),
+                "training_sharpe_like_ratio": train_all.get("sharpe_like_ratio"),
+                "validation_sharpe_like_ratio": validation_all.get("sharpe_like_ratio"),
+                "status": window.get("status"),
+            }
+        )
+        rolling_rows.append(
+            {
+                "window_id": window.get("window_id"),
+                "validation_average_excess_return": validation_all.get("average_excess_return"),
+                "validation_positive_excess_rate": validation_all.get("positive_excess_rate"),
+                "validation_volatility": validation_all.get("excess_standard_deviation"),
+                "validation_sharpe_like_ratio": validation_all.get("sharpe_like_ratio"),
+                "cumulative_validation_excess_return": validation_all.get("cumulative_excess_return"),
+            }
+        )
+    st.dataframe(window_rows)
+
+    st.markdown("#### Rolling Performance")
+    st.dataframe(rolling_rows)
+
+    st.markdown("#### Factor Stability")
+    st.dataframe(factor_stability)
+
+    st.markdown("#### Regime Robustness")
+    st.dataframe(regime_robustness)
+
+    st.markdown("#### Performance Decay")
+    st.dataframe([decay] if decay else [])
+
+    st.markdown("#### Warnings")
+    warning_rows = []
+    for window in windows:
+        for warning in window.get("warnings") or []:
+            warning_rows.append({"window_id": window.get("window_id"), "warning": warning})
+    st.dataframe(warning_rows)
+
+    st.markdown("#### Read-only walk-forward exports")
+    export_payload = {
+        "latest_run": latest_run,
+        "windows": windows,
+        "scorecard": scorecard,
+        "factor_stability_summary": factor_stability,
+        "regime_robustness": regime_robustness,
+        "performance_decay": decay,
+    }
+    export_blobs = {key: json.dumps(value, indent=2, sort_keys=True) for key, value in export_payload.items()}
+    if hasattr(st, "download_button"):
+        for label, rows, key, file_name in [
+            ("Walk-forward run JSON", [latest_run] if latest_run else [], "latest_run", "walk_forward_run.json"),
+            ("Walk-forward windows JSON", windows, "windows", "walk_forward_windows.json"),
+            ("Walk-forward scorecard JSON", categories, "scorecard", "walk_forward_scorecard.json"),
+            ("Walk-forward factor stability JSON", factor_stability, "factor_stability_summary", "walk_forward_factor_stability.json"),
         ]:
             has_rows = bool(rows)
             if not has_rows:
@@ -2682,6 +2798,7 @@ def render_dashboard(database_url: str | None = None):
         "Alerts": render_alerts_page,
         "Research": render_research_page,
         "Factor Attribution": render_factor_attribution_page,
+        "Walk-Forward Validation": render_walk_forward_validation_page,
     }
     page_renderer = page_renderers.get(selected_page, render_overview_page)
     if selected_page == "Research":
