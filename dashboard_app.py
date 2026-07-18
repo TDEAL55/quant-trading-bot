@@ -38,6 +38,7 @@ from dashboard_status import classify_market_clock, format_est
 from logger_setup import logger
 from evaluation_data import fetch_evaluation_dashboard_payload
 from factor_attribution import fetch_factor_attribution_dashboard_payload
+from portfolio_research_data import fetch_portfolio_research_dashboard_payload
 from research_data import fetch_research_dashboard_payload
 from walk_forward_data import fetch_walk_forward_dashboard_payload
 
@@ -87,7 +88,7 @@ THEMES = {
     },
 }
 
-PAGE_OPTIONS = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Walk-Forward Validation"]
+PAGE_OPTIONS = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Walk-Forward Validation", "Portfolio Research"]
 MODE_OPTIONS = ["Standard Mode", "Focus Mode", "Presentation Mode"]
 THEME_OPTIONS = ["Midnight Blue", "Black Terminal", "Arctic Glass"]
 AUTO_REFRESH_OPTIONS = ["Off", "30 seconds", "60 seconds", "5 minutes"]
@@ -559,9 +560,11 @@ def load_research_summary(database_url: str | None = None, selected_run_id: str 
         evaluation_payload = fetch_evaluation_dashboard_payload(database_value, database_factory=MonitoringDatabase)
         factor_attribution_payload = fetch_factor_attribution_dashboard_payload(database_value, database_factory=MonitoringDatabase)
         walk_forward_payload = fetch_walk_forward_dashboard_payload(database_value)
+        portfolio_research_payload = fetch_portfolio_research_dashboard_payload(database_value)
         research_payload["evaluation"] = evaluation_payload
         research_payload["factor_attribution"] = factor_attribution_payload
         research_payload["walk_forward"] = walk_forward_payload
+        research_payload["portfolio_research"] = portfolio_research_payload
         return research_payload
     except Exception as exc:  # pragma: no cover - defensive dashboard path
         logger.error("RESEARCH_DASHBOARD_QUERY_FAILURE type=%s message=%s", type(exc).__name__, exc)
@@ -635,7 +638,106 @@ def load_research_summary(database_url: str | None = None, selected_run_id: str 
                 "latest_run": {},
                 "windows": [],
             },
+            "portfolio_research": {
+                "db_connected": False,
+                "total_runs": 0,
+                "latest_run": {},
+                "snapshots": [],
+            },
         }
+
+
+def render_portfolio_research_page():
+    st.markdown("### PORTFOLIO RESEARCH — READ ONLY")
+    payload = st.session_state.get("dashboard_research_payload") or {}
+    portfolio_payload = payload.get("portfolio_research") or {"db_connected": False, "total_runs": 0, "latest_run": {}, "snapshots": []}
+    latest_run = portfolio_payload.get("latest_run") or {}
+    snapshots = list(portfolio_payload.get("snapshots") or [])
+    analytics = latest_run.get("analytics") or {}
+    comparison = latest_run.get("method_comparison") or []
+    walk_forward = latest_run.get("walk_forward") or {}
+
+    overview_cols = st.columns(7)
+    _metric_card(overview_cols[0], "Horizon", latest_run.get("horizon", "N/A"), "neutral")
+    _metric_card(overview_cols[1], "Method", _safe_text(latest_run.get("weighting_method"), "N/A"), "neutral")
+    _metric_card(overview_cols[2], "Portfolios", analytics.get("portfolio_count", 0), "neutral")
+    _metric_card(overview_cols[3], "Completed", analytics.get("completed_portfolio_count", 0), "healthy")
+    _metric_card(overview_cols[4], "Skipped", analytics.get("skipped_portfolio_count", 0), "warning")
+    _metric_card(overview_cols[5], "Avg Holdings", analytics.get("average_number_of_holdings", 0), "neutral")
+    _metric_card(overview_cols[6], "Avg Cash", analytics.get("average_cash_weight", 0), "neutral")
+
+    st.markdown("#### Method Comparison")
+    st.dataframe(comparison)
+
+    st.markdown("#### Portfolio History")
+    history_rows = []
+    for row in snapshots:
+        concentration = row.get("concentration_metrics") or {}
+        history_rows.append(
+            {
+                "formation_date": row.get("formation_date"),
+                "research_run_id": row.get("research_run_id"),
+                "holding_count": row.get("holding_count"),
+                "invested_weight": row.get("invested_weight"),
+                "cash_weight": row.get("cash_weight"),
+                "portfolio_return": row.get("portfolio_return"),
+                "benchmark_return": row.get("benchmark_return"),
+                "excess_return": row.get("excess_return"),
+                "turnover": row.get("turnover"),
+                "maximum_position": row.get("maximum_position"),
+                "largest_sector": concentration.get("largest_sector_weight"),
+                "status": row.get("status"),
+                "warnings": "; ".join(row.get("warnings") or []),
+            }
+        )
+    st.dataframe(history_rows)
+
+    selected_snapshot = snapshots[0] if snapshots else {}
+    st.markdown("#### Holdings Drill-down")
+    st.dataframe(selected_snapshot.get("holdings") or [])
+
+    st.markdown("#### Concentration")
+    st.dataframe([selected_snapshot.get("concentration_metrics") or {}])
+
+    st.markdown("#### Sector Attribution")
+    st.dataframe(selected_snapshot.get("sector_contribution") or [])
+
+    st.markdown("#### Symbol Attribution")
+    st.dataframe(selected_snapshot.get("symbol_contribution") or [])
+
+    st.markdown("#### Walk-Forward Portfolio Validation")
+    st.dataframe(walk_forward.get("windows") or [])
+
+    warning_rows = []
+    for row in snapshots:
+        for warning in row.get("warnings") or []:
+            warning_rows.append({"formation_date": row.get("formation_date"), "warning": warning})
+    st.markdown("#### Warnings")
+    st.dataframe(warning_rows)
+
+    st.markdown("#### Read-only portfolio research exports")
+    export_payload = {
+        "latest_run": latest_run,
+        "method_comparison": comparison,
+        "portfolio_history": history_rows,
+        "holdings": selected_snapshot.get("holdings") or [],
+        "concentration": selected_snapshot.get("concentration_metrics") or {},
+        "sector_attribution": selected_snapshot.get("sector_contribution") or [],
+        "symbol_attribution": selected_snapshot.get("symbol_contribution") or [],
+        "walk_forward": walk_forward,
+    }
+    export_blobs = {key: json.dumps(value, indent=2, sort_keys=True) for key, value in export_payload.items()}
+    if hasattr(st, "download_button"):
+        for label, rows, key, file_name in [
+            ("Portfolio run JSON", [latest_run] if latest_run else [], "latest_run", "portfolio_research_run.json"),
+            ("Method comparison JSON", comparison, "method_comparison", "portfolio_method_comparison.json"),
+            ("Portfolio history JSON", history_rows, "portfolio_history", "portfolio_history.json"),
+            ("Portfolio holdings JSON", selected_snapshot.get("holdings") or [], "holdings", "portfolio_holdings.json"),
+        ]:
+            has_rows = bool(rows)
+            if not has_rows:
+                st.info(f"No data available for {label}")
+            st.download_button(label, export_blobs[key], file_name=sanitize_identifier(file_name.replace(".json", "")) + ".json", mime="application/json", key=f"download_{key}", disabled=not has_rows)
 
 
 def render_factor_attribution_page():
@@ -2799,9 +2901,10 @@ def render_dashboard(database_url: str | None = None):
         "Research": render_research_page,
         "Factor Attribution": render_factor_attribution_page,
         "Walk-Forward Validation": render_walk_forward_validation_page,
+        "Portfolio Research": render_portfolio_research_page,
     }
     page_renderer = page_renderers.get(selected_page, render_overview_page)
-    if selected_page == "Research":
+    if selected_page in {"Research", "Factor Attribution", "Walk-Forward Validation", "Portfolio Research"}:
         _render_with_error_guard("Research", page_renderer)
     elif selected_page in {"Orders", "Performance"}:
         _render_with_error_guard(selected_page, page_renderer, payload)

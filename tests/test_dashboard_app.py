@@ -362,7 +362,7 @@ def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch)
 
     nav_calls = [call for call in fake_st._calls if call[0] == "selectbox" and call[1] == "Navigate"]
     assert nav_calls
-    assert nav_calls[0][2] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Walk-Forward Validation"]
+    assert nav_calls[0][2] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Walk-Forward Validation", "Portfolio Research"]
     assert all("trade" not in str(page).lower() for page in nav_calls[0][2])
 
     build_markers = [call for call in fake_st._calls if call[0] == "markdown" and dashboard_app.UI_BUILD_LABEL in call[1]]
@@ -701,6 +701,56 @@ def test_walk_forward_validation_page_renders_payload(monkeypatch):
     dashboard_app.render_walk_forward_validation_page()
 
     assert any(call[0] == "markdown" and "WALK-FORWARD VALIDATION" in call[1] for call in fake_st._calls)
+    assert any(call[0] == "dataframe" for call in fake_st._calls)
+
+
+def test_portfolio_research_page_renders_payload(monkeypatch):
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["dashboard_research_payload"] = {
+        "portfolio_research": {
+            "db_connected": True,
+            "total_runs": 1,
+            "latest_run": {
+                "run_id": "portfolio-run-1",
+                "horizon": 20,
+                "weighting_method": "equal_weight",
+                "analytics": {
+                    "portfolio_count": 2,
+                    "completed_portfolio_count": 2,
+                    "skipped_portfolio_count": 0,
+                    "average_number_of_holdings": 2,
+                    "average_cash_weight": 0.1,
+                },
+                "method_comparison": [{"method": "equal_weight", "average_excess_return": 0.01}],
+                "walk_forward": {"windows": [{"window_id": "rolling-20-1", "degradation": -0.01, "status": "completed"}]},
+            },
+            "snapshots": [
+                {
+                    "formation_date": "2024-01-05",
+                    "research_run_id": "research-1",
+                    "holding_count": 2,
+                    "invested_weight": 0.9,
+                    "cash_weight": 0.1,
+                    "portfolio_return": 0.02,
+                    "benchmark_return": 0.01,
+                    "excess_return": 0.01,
+                    "turnover": 0.15,
+                    "maximum_position": 0.5,
+                    "status": "completed",
+                    "warnings": [],
+                    "holdings": [{"symbol": "AAA", "weight": 0.5}],
+                    "concentration_metrics": {"hhi": 0.5, "largest_sector_weight": 0.6},
+                    "sector_contribution": [{"sector": "Tech", "raw_contribution": 0.01}],
+                    "symbol_contribution": [{"symbol": "AAA", "raw_contribution": 0.01}],
+                }
+            ],
+        }
+    }
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+
+    dashboard_app.render_portfolio_research_page()
+
+    assert any(call[0] == "markdown" and "PORTFOLIO RESEARCH" in call[1] for call in fake_st._calls)
     assert any(call[0] == "dataframe" for call in fake_st._calls)
 
 
