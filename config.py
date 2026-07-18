@@ -33,6 +33,9 @@ PAPER_API_TOKEN = os.getenv("PAPER_API_TOKEN", "")
 BENCHMARK_SYMBOL = os.getenv("BENCHMARK_SYMBOL", "SPY")
 STRATEGY_MODE = os.getenv("STRATEGY_MODE", "MULTI_FACTOR").upper()
 SIGNAL_HYSTERESIS_BUFFER = float(os.getenv("SIGNAL_HYSTERESIS_BUFFER", "2.5"))
+SCANNER_VERSION = os.getenv("SCANNER_VERSION", "sprint2-scanner-v1")
+STRATEGY_VERSION = os.getenv("STRATEGY_VERSION", "multi_factor-v1")
+RESEARCH_JOURNAL_VERSION = os.getenv("RESEARCH_JOURNAL_VERSION", "sprint3-research-journal-v1")
 
 SIGNAL_THRESHOLDS = {
     "strong_buy": float(os.getenv("SIGNAL_THRESHOLD_STRONG_BUY", "80")),
@@ -76,3 +79,65 @@ def is_safe_mode(mode=None):
     selected_mode = (mode or TRADING_MODE).upper()
     allowed_modes = {"SIMULATION", "PAPER"}
     return selected_mode in allowed_modes
+
+
+def _parse_csv_env(value: str, default: str = "") -> list[str]:
+    raw = str(value if value is not None else default)
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _parse_bool_env(value: str, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "on"}
+
+
+SCANNER_UNIVERSES = _parse_csv_env(
+    os.getenv(
+        "SCANNER_UNIVERSES",
+        "sp500,nasdaq100,midcap_liquid,ai_software,semiconductors,data_center_infra,utilities_power,data_center_reits,benchmarks",
+    )
+)
+SCANNER_INCLUDE_ETFS = _parse_bool_env(os.getenv("SCANNER_INCLUDE_ETFS", "true"), default=True)
+SCANNER_MAX_UNIVERSE_SIZE = int(os.getenv("SCANNER_MAX_UNIVERSE_SIZE", "400"))
+SCANNER_EXCLUDED_SYMBOLS = _parse_csv_env(os.getenv("SCANNER_EXCLUDED_SYMBOLS", ""))
+SCANNER_ADDITIONAL_SYMBOLS = _parse_csv_env(os.getenv("SCANNER_ADDITIONAL_SYMBOLS", ""))
+
+SCANNER_MIN_PRICE = float(os.getenv("SCANNER_MIN_PRICE", "5"))
+SCANNER_MIN_AVG_DOLLAR_VOLUME = float(os.getenv("SCANNER_MIN_AVG_DOLLAR_VOLUME", "20000000"))
+SCANNER_MIN_HISTORY_DAYS = int(os.getenv("SCANNER_MIN_HISTORY_DAYS", "220"))
+SCANNER_MAX_MISSING_PERCENT = float(os.getenv("SCANNER_MAX_MISSING_PERCENT", "2"))
+SCANNER_MAX_STALE_BUSINESS_DAYS = int(os.getenv("SCANNER_MAX_STALE_BUSINESS_DAYS", "5"))
+
+SCANNER_MIN_SCORE = float(os.getenv("SCANNER_MIN_SCORE", "70"))
+SCANNER_MIN_CONFIDENCE = float(os.getenv("SCANNER_MIN_CONFIDENCE", "60"))
+SCANNER_MIN_RISK_QUALITY = float(os.getenv("SCANNER_MIN_RISK_QUALITY", "45"))
+SCANNER_MIN_VOLATILITY_SCORE = float(os.getenv("SCANNER_MIN_VOLATILITY_SCORE", "35"))
+SCANNER_ALLOWED_SIGNALS = _parse_csv_env(os.getenv("SCANNER_ALLOWED_SIGNALS", "BUY,STRONG_BUY"))
+SCANNER_BLOCKED_REGIMES = _parse_csv_env(os.getenv("SCANNER_BLOCKED_REGIMES", "strong_bear,high_volatility_risk_off"))
+
+SCANNER_MAX_WORKERS = int(os.getenv("SCANNER_MAX_WORKERS", "5"))
+SCANNER_SYMBOL_TIMEOUT_SECONDS = int(os.getenv("SCANNER_SYMBOL_TIMEOUT_SECONDS", "45"))
+SCANNER_MAX_RETRIES = int(os.getenv("SCANNER_MAX_RETRIES", "2"))
+SCANNER_BATCH_SIZE = int(os.getenv("SCANNER_BATCH_SIZE", "25"))
+
+SCANNER_RANK_WEIGHT_OVERALL = float(os.getenv("SCANNER_RANK_WEIGHT_OVERALL", "0.45"))
+SCANNER_RANK_WEIGHT_CONFIDENCE = float(os.getenv("SCANNER_RANK_WEIGHT_CONFIDENCE", "0.20"))
+SCANNER_RANK_WEIGHT_RISK_QUALITY = float(os.getenv("SCANNER_RANK_WEIGHT_RISK_QUALITY", "0.15"))
+SCANNER_RANK_WEIGHT_TREND = float(os.getenv("SCANNER_RANK_WEIGHT_TREND", "0.10"))
+SCANNER_RANK_WEIGHT_LIQUIDITY = float(os.getenv("SCANNER_RANK_WEIGHT_LIQUIDITY", "0.10"))
+
+PORTFOLIO_MAX_CANDIDATES = int(os.getenv("PORTFOLIO_MAX_CANDIDATES", "10"))
+PORTFOLIO_MAX_POSITIONS = int(os.getenv("PORTFOLIO_MAX_POSITIONS", "5"))
+PORTFOLIO_MAX_SYMBOLS_PER_SECTOR = int(os.getenv("PORTFOLIO_MAX_SYMBOLS_PER_SECTOR", "2"))
+PORTFOLIO_MAX_SECTOR_PERCENT = float(os.getenv("PORTFOLIO_MAX_SECTOR_PERCENT", "20"))
+PORTFOLIO_MAX_SYMBOL_PERCENT = float(os.getenv("PORTFOLIO_MAX_SYMBOL_PERCENT", "5"))
+PORTFOLIO_MIN_CASH_RESERVE_PERCENT = float(os.getenv("PORTFOLIO_MIN_CASH_RESERVE_PERCENT", "25"))
+
+POSITION_REVIEW_MIN_HOLD_SCORE = float(os.getenv("POSITION_REVIEW_MIN_HOLD_SCORE", "58"))
+POSITION_REVIEW_MIN_WATCH_SCORE = float(os.getenv("POSITION_REVIEW_MIN_WATCH_SCORE", "45"))
+POSITION_REVIEW_MAX_HOLD_DAYS = int(os.getenv("POSITION_REVIEW_MAX_HOLD_DAYS", "90"))
+POSITION_REVIEW_RISK_OFF_REGIMES = _parse_csv_env(
+    os.getenv("POSITION_REVIEW_RISK_OFF_REGIMES", "strong_bear,high_volatility_risk_off")
+)

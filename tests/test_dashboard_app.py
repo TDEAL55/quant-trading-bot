@@ -7,6 +7,9 @@ import pytest
 import dashboard_app
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def test_password_protection_helper():
     assert dashboard_app.check_dashboard_password("abc", "abc") is True
     assert dashboard_app.check_dashboard_password("abc", "def") is False
@@ -19,7 +22,7 @@ def test_paper_only_enforcement_blocks_live():
 
 
 def test_dashboard_code_has_no_write_capability():
-    module_text = Path("dashboard_app.py").read_text(encoding="utf-8")
+    module_text = (REPO_ROOT / "dashboard_app.py").read_text(encoding="utf-8")
     assert dashboard_app.has_write_capability(module_text) is False
 
 
@@ -546,5 +549,5 @@ def test_research_downloads_disable_when_no_rows(monkeypatch):
 
 
 def test_dashboard_app_has_no_use_container_width_calls():
-    module_text = Path("dashboard_app.py").read_text(encoding="utf-8")
+    module_text = (REPO_ROOT / "dashboard_app.py").read_text(encoding="utf-8")
     assert "use_container_width" not in module_text

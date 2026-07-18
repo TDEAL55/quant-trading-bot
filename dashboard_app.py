@@ -1,4 +1,5 @@
 import os
+import json
 import re
 from datetime import datetime, timedelta, time, timezone
 from pathlib import Path
@@ -33,6 +34,8 @@ from dashboard_components import build_palette, status_style
 from dashboard_models import build_normalized_view_model
 from dashboard_sanitization import sanitize_identifier, sanitize_text
 from dashboard_status import classify_market_clock, format_est
+from logger_setup import logger
+from research_data import fetch_research_dashboard_payload
 
 
 MAX_DAILY_ORDERS = 3
@@ -545,31 +548,36 @@ def build_order_rows(recent_orders):
     return rows
 
 
-def load_research_summary():
-    report_paths = [
-        Path(__file__).resolve().parent / "OVERNIGHT_BACKTEST_REPORT.md",
-        Path(__file__).resolve().parent / "OVERNIGHT_COST_SENSITIVITY_2023.md",
-    ]
-    text_chunks = []
-    for path in report_paths:
-        if path.exists():
-            text_chunks.append(path.read_text(encoding="utf-8", errors="ignore"))
-    text = "\n".join(text_chunks)
-
-    def _extract(label):
-        if not text:
-            return "N/A"
-        pattern = rf"(?im){re.escape(label)}\s*[:=]\s*([^\n]+)"
-        match = re.search(pattern, text)
-        return match.group(1).strip() if match else "N/A"
-
-    return {
-        "gross_return": _extract("gross return"),
-        "cost_sensitivity": _extract("cost sensitivity"),
-        "break_even_cost": _extract("break-even cost"),
-        "drawdown": _extract("drawdown"),
-        "sharpe_ratio": _extract("sharpe ratio"),
-    }
+def load_research_summary(database_url: str | None = None, selected_run_id: str | None = None):
+    try:
+        return fetch_research_dashboard_payload(database_url or os.getenv("DATABASE_URL"), selected_run_id=selected_run_id, database_factory=MonitoringDatabase)
+    except Exception as exc:  # pragma: no cover - defensive dashboard path
+        logger.error("RESEARCH_DASHBOARD_QUERY_FAILURE type=%s message=%s", type(exc).__name__, exc)
+        return {
+            "db_connected": False,
+            "latest_research_run": {},
+            "recent_research_runs": [],
+            "selected_research_run_id": selected_run_id,
+            "selected_research_candidates": [],
+            "research_analytics": {
+                "total_research_runs": 0,
+                "total_candidate_observations": 0,
+                "average_candidates_per_run": 0.0,
+                "average_overall_score": 0.0,
+                "average_confidence": 0.0,
+                "score_distribution": [],
+                "confidence_distribution": [],
+                "candidate_count_by_sector": [],
+                "candidate_count_by_regime": [],
+                "signal_distribution": [],
+                "top_recurring_symbols": [],
+                "average_score_by_sector": [],
+                "average_confidence_by_sector": [],
+                "average_score_by_regime": [],
+                "average_confidence_by_regime": [],
+            },
+            "latest_research_summary": {},
+        }
 
 
 def build_dashboard_view_model(payload):
@@ -674,6 +682,31 @@ def _fetch_payload_uncached(database_url: str | None):
             "portfolio_history": [],
             "signal_history": [],
             "order_count_by_day": [],
+            "research": {
+                "db_connected": False,
+                "latest_research_run": {},
+                "recent_research_runs": [],
+                "selected_research_run_id": "",
+                "selected_research_candidates": [],
+                "research_analytics": {
+                    "total_research_runs": 0,
+                    "total_candidate_observations": 0,
+                    "average_candidates_per_run": 0.0,
+                    "average_overall_score": 0.0,
+                    "average_confidence": 0.0,
+                    "score_distribution": [],
+                    "confidence_distribution": [],
+                    "candidate_count_by_sector": [],
+                    "candidate_count_by_regime": [],
+                    "signal_distribution": [],
+                    "top_recurring_symbols": [],
+                    "average_score_by_sector": [],
+                    "average_confidence_by_sector": [],
+                    "average_score_by_regime": [],
+                    "average_confidence_by_regime": [],
+                },
+                "latest_research_summary": {},
+            },
         }
     return payload
 
@@ -2146,40 +2179,134 @@ def render_system_health_page(payload, view):
 
 
 def render_research_page():
-    st.markdown("### RESEARCH ONLY — NOT CONNECTED TO PAPER EXECUTION")
-    metrics = load_research_summary()
-    cols = st.columns(5)
-    _metric_card(cols[0], "Gross Return", metrics["gross_return"], "neutral")
-    _metric_card(cols[1], "Cost Sensitivity", metrics["cost_sensitivity"], "warning")
-    _metric_card(cols[2], "Break-even Cost", metrics["break_even_cost"], "warning")
-    _metric_card(cols[3], "Drawdown", metrics["drawdown"], "sell")
-    _metric_card(cols[4], "Sharpe Ratio", metrics["sharpe_ratio"], "healthy")
-    st.caption("The overnight research study is informational only and is not connected to the SPY paper runner.")
+    st.markdown("### RESEARCH JOURNAL — READ ONLY")
+    payload = st.session_state.get("dashboard_research_payload") or {
+        "db_connected": False,
+        "latest_research_run": {},
+        "recent_research_runs": [],
+        "selected_research_run_id": "",
+        "selected_research_candidates": [],
+        "research_analytics": {
+            "total_research_runs": 0,
+            "total_candidate_observations": 0,
+            "average_candidates_per_run": 0.0,
+            "average_overall_score": 0.0,
+            "average_confidence": 0.0,
+            "score_distribution": [],
+            "confidence_distribution": [],
+            "candidate_count_by_sector": [],
+            "candidate_count_by_regime": [],
+            "signal_distribution": [],
+            "top_recurring_symbols": [],
+            "average_score_by_sector": [],
+            "average_confidence_by_sector": [],
+            "average_score_by_regime": [],
+            "average_confidence_by_regime": [],
+        },
+        "latest_research_summary": {},
+    }
+    analytics = payload.get("research_analytics") or {}
+    latest_run = payload.get("latest_research_run") or {}
+    recent_runs = list(payload.get("recent_research_runs") or [])
+    selected_run_id = payload.get("selected_research_run_id") or latest_run.get("research_run_id") or ""
+    if recent_runs:
+        run_options = [run.get("research_run_id") for run in recent_runs if run.get("research_run_id")]
+        if run_options:
+            default_index = run_options.index(selected_run_id) if selected_run_id in run_options else 0
+            selected_run_id = st.selectbox("Select research scan", run_options, index=default_index)
+            if selected_run_id != payload.get("selected_research_run_id"):
+                payload = load_research_summary(os.getenv("DATABASE_URL"), selected_run_id=selected_run_id)
+                st.session_state["dashboard_research_payload"] = payload
+                analytics = payload.get("research_analytics") or {}
+                latest_run = payload.get("latest_research_run") or {}
+
+    top_cols = st.columns(6)
+    _metric_card(top_cols[0], "Stored Scans", analytics.get("total_research_runs", 0), "neutral")
+    _metric_card(top_cols[1], "Stored Candidates", analytics.get("total_candidate_observations", 0), "neutral")
+    _metric_card(top_cols[2], "Avg Score", f"{float(analytics.get('average_overall_score', 0.0)):.1f}", "healthy")
+    _metric_card(top_cols[3], "Avg Confidence", f"{float(analytics.get('average_confidence', 0.0)):.1f}", "healthy")
+    _metric_card(top_cols[4], "Avg Cand/Run", f"{float(analytics.get('average_candidates_per_run', 0.0)):.1f}", "warning")
+    _metric_card(top_cols[5], "Latest Scan", _safe_text(latest_run.get("completed_at") or latest_run.get("started_at"), "N/A"), "neutral")
+
+    st.markdown("### Latest Research Run")
+    latest_cols = st.columns(4)
+    _metric_card(latest_cols[0], "Benchmark", _safe_text(latest_run.get("benchmark_symbol"), "N/A"), "neutral")
+    _metric_card(latest_cols[1], "Market Regime", _safe_text(latest_run.get("market_regime"), "unknown"), "neutral")
+    _metric_card(latest_cols[2], "Universe Size", latest_run.get("universe_size", 0), "neutral")
+    _metric_card(latest_cols[3], "Duration (s)", f"{float(latest_run.get('scanner_duration_seconds', 0.0)):.2f}", "warning")
+
+    detail_cols = st.columns(4)
+    _metric_card(detail_cols[0], "Eligible", latest_run.get("eligible_count", 0), "healthy")
+    _metric_card(detail_cols[1], "Rejected", latest_run.get("rejected_count", 0), "warning")
+    _metric_card(detail_cols[2], "Errors", latest_run.get("error_count", 0), "sell")
+    _metric_card(detail_cols[3], "Data Source", _safe_text(latest_run.get("data_source"), "N/A"), "neutral")
+
+    st.markdown("### Recent Scans")
+    if recent_runs:
+        st.dataframe(recent_runs)
+    else:
+        st.info("No research scans stored yet.")
+
+    st.markdown("### Candidate Table")
+    candidates = list(payload.get("selected_research_candidates") or [])
+    candidate_rows = [
+        {
+            "rank": row.get("rank"),
+            "symbol": row.get("symbol"),
+            "sector": row.get("sector"),
+            "signal": row.get("signal"),
+            "score": row.get("overall_score"),
+            "confidence": row.get("confidence"),
+            "trend": row.get("trend_score"),
+            "momentum": row.get("momentum_score"),
+            "volume": row.get("volume_score"),
+            "volatility": row.get("volatility_score"),
+            "risk_quality": row.get("risk_quality_score"),
+        }
+        for row in candidates
+    ]
+    if candidate_rows:
+        st.dataframe(candidate_rows[:100])
+    else:
+        st.info("No candidates available for the selected research scan.")
+
+    st.markdown("### Analytics")
+    analytics_cols = st.columns(3)
+    _metric_card(analytics_cols[0], "Score Distribution", len(analytics.get("score_distribution", [])), "neutral")
+    _metric_card(analytics_cols[1], "Confidence Distribution", len(analytics.get("confidence_distribution", [])), "neutral")
+    _metric_card(analytics_cols[2], "Top Symbols", len(analytics.get("top_recurring_symbols", [])), "neutral")
+
+    chart_cols = st.columns(2)
+    with chart_cols[0]:
+        st.dataframe(analytics.get("candidate_count_by_sector") or [])
+    with chart_cols[1]:
+        st.dataframe(analytics.get("candidate_count_by_regime") or [])
 
     st.markdown("### Read-only exports")
-    export_payload = st.session_state.get("dashboard_export_payload") or {}
-    activity_csv = export_daily_activity(export_payload.get("activity", []))
-    signals_csv = export_signal_history(export_payload.get("signals", []))
-    orders_csv = export_sanitized_orders(export_payload.get("orders", []))
-    health_csv = export_system_health(export_payload.get("health", []))
-    perf_csv = export_performance_summary(export_payload.get("performance", []))
+    export_payload = {
+        "recent_runs": recent_runs,
+        "candidates": candidate_rows,
+        "analytics": analytics,
+    }
+    export_blobs = {
+        "recent_runs": json.dumps(export_payload["recent_runs"], indent=2, sort_keys=True),
+        "candidates": json.dumps(export_payload["candidates"], indent=2, sort_keys=True),
+        "analytics": json.dumps(export_payload["analytics"], indent=2, sort_keys=True),
+    }
     if hasattr(st, "download_button"):
         exports = [
-            ("Daily activity CSV", export_payload.get("activity", []), activity_csv, "daily_activity.csv", "text/csv", "download_daily_activity"),
-            ("Signal history CSV", export_payload.get("signals", []), signals_csv, "signal_history.csv", "text/csv", "download_signal_history"),
-            ("Sanitized order-events CSV", export_payload.get("orders", []), orders_csv, "order_events.csv", "text/csv", "download_order_events"),
-            ("System-health report", export_payload.get("health", []), health_csv, "system_health.csv", "text/csv", "download_system_health"),
-            ("Paper-performance summary", export_payload.get("performance", []), perf_csv, "performance_summary.csv", "text/csv", "download_performance_summary"),
+            ("Recent research scans JSON", export_payload.get("recent_runs", []), export_blobs["recent_runs"], "research_runs.json", "application/json", "download_research_runs"),
+            ("Research candidates JSON", export_payload.get("candidates", []), export_blobs["candidates"], "research_candidates.json", "application/json", "download_research_candidates"),
+            ("Research analytics JSON", export_payload.get("recent_runs", []) or export_payload.get("candidates", []), export_blobs["analytics"], "research_analytics.json", "application/json", "download_research_analytics"),
         ]
-        for label, rows, csv_blob, file_name, mime_type, key in exports:
-            safe_name = sanitize_identifier(file_name.replace(".csv", "")) + ".csv"
+        for label, rows, blob, file_name, mime_type, key in exports:
             has_rows = bool(rows)
             if not has_rows:
                 st.info(f"No data available for {label}")
             st.download_button(
                 label,
-                csv_blob,
-                file_name=safe_name,
+                blob,
+                file_name=sanitize_identifier(file_name.replace(".json", "")) + ".json",
                 mime=mime_type,
                 key=key,
                 disabled=not has_rows,
@@ -2237,6 +2364,7 @@ def render_dashboard(database_url: str | None = None):
         "health": [{"component": component, "status": status, "timestamp": view.get("last_run_timestamp"), "reason": "Read only"} for component, status in _component_status(payload, view).items()],
         "performance": [{"metric": "portfolio_value", "value": view.get("portfolio_value")}, {"metric": "today_pl", "value": view.get("today_pl")}, {"metric": "total_pl", "value": view.get("total_pl")}],
     }
+    st.session_state["dashboard_research_payload"] = payload.get("research") or {}
     render_sidebar(payload)
     if st.session_state.get("dashboard_presentation_mode"):
         if st.button("Exit Presentation Mode", key="dashboard_exit_presentation"):

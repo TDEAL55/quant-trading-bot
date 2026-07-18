@@ -5,6 +5,9 @@ import pytest
 from monitoring_db import MonitoringDatabase
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 class _FakeCursor:
     def __init__(self, rows, description=None):
         self._rows = rows
@@ -158,7 +161,7 @@ def test_migrations_are_idempotent_for_sqlite(tmp_path):
 
 
 def test_postgres_identity_migration_covers_all_tables():
-    migration_text = Path("migrations/002_postgres_identity_fix.sql").read_text(encoding="utf-8")
+    migration_text = (REPO_ROOT / "migrations" / "002_postgres_identity_fix.sql").read_text(encoding="utf-8")
 
     assert "CREATE SEQUENCE IF NOT EXISTS bot_runs_id_seq" in migration_text
     assert "CREATE SEQUENCE IF NOT EXISTS signal_snapshots_id_seq" in migration_text

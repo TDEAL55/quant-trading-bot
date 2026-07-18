@@ -1,6 +1,7 @@
 import os
 import contextlib
 import sqlite3
+import json
 from pathlib import Path
 from typing import Any
 
@@ -365,4 +366,185 @@ class MonitoringDatabase:
             LIMIT ?
             """,
             (int(limit),),
+        )
+
+    def _stable_json(self, payload: Any) -> str:
+        return json.dumps(payload if payload is not None else {}, sort_keys=True, separators=(",", ":"))
+
+    def insert_scanner_run(self, payload: dict[str, Any]) -> int:
+        self.execute(
+            """
+            INSERT INTO scanner_runs (
+                started_at, completed_at, universe_name, symbol_count,
+                success_count, rejection_count, error_count, eligible_count,
+                status, duration_seconds
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload.get("started_at"),
+                payload.get("completed_at"),
+                payload.get("universe_name"),
+                payload.get("symbol_count"),
+                payload.get("success_count"),
+                payload.get("rejection_count"),
+                payload.get("error_count"),
+                payload.get("eligible_count"),
+                payload.get("status"),
+                payload.get("duration_seconds"),
+            ),
+        )
+        row = self.query_one("SELECT id FROM scanner_runs ORDER BY id DESC LIMIT 1")
+        return int((row or {}).get("id") or 0)
+
+    def insert_scanner_result(self, run_id: int, payload: dict[str, Any]):
+        self.execute(
+            """
+            INSERT INTO scanner_results (
+                run_id, symbol, company_name, sector, latest_price,
+                average_dollar_volume, overall_score, confidence, signal,
+                regime, ranking_score, rank, eligible, rejection_reasons_json,
+                component_scores_json, reasons_json, warnings_json, data_quality_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                payload.get("symbol"),
+                payload.get("company_name"),
+                payload.get("sector"),
+                payload.get("latest_price"),
+                payload.get("average_dollar_volume"),
+                payload.get("overall_score"),
+                payload.get("confidence"),
+                payload.get("signal"),
+                payload.get("regime"),
+                payload.get("ranking_score"),
+                payload.get("rank"),
+                1 if payload.get("eligible") else 0,
+                self._stable_json(payload.get("rejection_reasons") or []),
+                self._stable_json(payload.get("component_scores") or {}),
+                self._stable_json(payload.get("reasons") or []),
+                self._stable_json(payload.get("warnings") or []),
+                self._stable_json(payload.get("data_quality") or {}),
+            ),
+        )
+
+    def insert_portfolio_candidate(self, run_id: int, payload: dict[str, Any]):
+        self.execute(
+            """
+            INSERT INTO portfolio_candidates (
+                run_id, symbol, rank, sector, score, confidence,
+                suggested_allocation_percent, suggested_paper_notional,
+                selection_reasons_json, warnings_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                payload.get("symbol"),
+                payload.get("rank"),
+                payload.get("sector"),
+                payload.get("score"),
+                payload.get("confidence"),
+                payload.get("suggested_max_allocation_percent"),
+                payload.get("suggested_paper_notional"),
+                self._stable_json(payload.get("reasons_selected") or []),
+                self._stable_json(payload.get("warnings") or []),
+            ),
+        )
+
+    def insert_position_review(self, run_id: int, payload: dict[str, Any]):
+        self.execute(
+            """
+            INSERT INTO position_reviews (
+                run_id, symbol, current_quantity, current_entry_price,
+                current_market_price, score, confidence, recommendation,
+                reasons_json, warnings_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                payload.get("symbol"),
+                payload.get("current_quantity"),
+                payload.get("current_entry_price"),
+                payload.get("current_market_price"),
+                payload.get("score"),
+                payload.get("confidence"),
+                payload.get("recommendation"),
+                self._stable_json(payload.get("reasons") or []),
+                self._stable_json(payload.get("warnings") or []),
+            ),
+        )
+
+    def fetch_latest_scanner_run(self) -> dict[str, Any] | None:
+        return self.query_one("SELECT * FROM scanner_runs ORDER BY started_at DESC LIMIT 1")
+
+    def fetch_scanner_runs(self, limit: int = 25) -> list[dict[str, Any]]:
+        return self.query_all(
+            "SELECT * FROM scanner_runs ORDER BY started_at DESC LIMIT ?",
+            (int(limit),),
+        )
+
+    def fetch_top_scanner_results(self, run_id: int | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        if run_id is None:
+            latest = self.fetch_latest_scanner_run()
+            run_id = int((latest or {}).get("id") or 0)
+        if not run_id:
+            return []
+        return self.query_all(
+            """
+            SELECT * FROM scanner_results
+            WHERE run_id = ? AND eligible = 1
+            ORDER BY rank ASC, ranking_score DESC
+            LIMIT ?
+            """,
+            (int(run_id), int(limit)),
+        )
+
+    def fetch_scanner_rejections(self, run_id: int | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        if run_id is None:
+            latest = self.fetch_latest_scanner_run()
+            run_id = int((latest or {}).get("id") or 0)
+        if not run_id:
+            return []
+        return self.query_all(
+            """
+            SELECT symbol, rejection_reasons_json, warnings_json
+            FROM scanner_results
+            WHERE run_id = ? AND eligible = 0
+            ORDER BY symbol ASC
+            LIMIT ?
+            """,
+            (int(run_id), int(limit)),
+        )
+
+    def fetch_scanner_sector_distribution(self, run_id: int | None = None) -> list[dict[str, Any]]:
+        if run_id is None:
+            latest = self.fetch_latest_scanner_run()
+            run_id = int((latest or {}).get("id") or 0)
+        if not run_id:
+            return []
+        return self.query_all(
+            """
+            SELECT sector, COUNT(*) AS candidate_count
+            FROM scanner_results
+            WHERE run_id = ? AND eligible = 1
+            GROUP BY sector
+            ORDER BY candidate_count DESC, sector ASC
+            """,
+            (int(run_id),),
+        )
+
+    def fetch_latest_position_reviews(self, run_id: int | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        if run_id is None:
+            latest = self.fetch_latest_scanner_run()
+            run_id = int((latest or {}).get("id") or 0)
+        if not run_id:
+            return []
+        return self.query_all(
+            """
+            SELECT * FROM position_reviews
+            WHERE run_id = ?
+            ORDER BY symbol ASC
+            LIMIT ?
+            """,
+            (int(run_id), int(limit)),
         )

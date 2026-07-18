@@ -7,6 +7,9 @@ import factor_engine
 import strategy
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def _frame_from_close(close_values, volume_values=None):
     index = pd.date_range("2024-01-01", periods=len(close_values), freq="D")
     close = pd.Series(close_values, index=index, dtype=float)
@@ -161,6 +164,6 @@ def test_strategy_result_returns_hold_for_insufficient_history():
 
 
 def test_factor_engine_has_no_order_submission_capability():
-    module_text = Path("factor_engine.py").read_text(encoding="utf-8")
+    module_text = (REPO_ROOT / "factor_engine.py").read_text(encoding="utf-8")
     assert "submit_order" not in module_text
     assert "paper_broker" not in module_text
