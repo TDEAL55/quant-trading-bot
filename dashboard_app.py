@@ -40,6 +40,7 @@ from evaluation_data import fetch_evaluation_dashboard_payload
 from factor_attribution import fetch_factor_attribution_dashboard_payload
 from portfolio_research_data import fetch_portfolio_research_dashboard_payload
 from research_data import fetch_research_dashboard_payload
+from strategy_lab_data import fetch_strategy_lab_dashboard_payload
 from walk_forward_data import fetch_walk_forward_dashboard_payload
 
 
@@ -88,7 +89,7 @@ THEMES = {
     },
 }
 
-PAGE_OPTIONS = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Walk-Forward Validation", "Portfolio Research"]
+PAGE_OPTIONS = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory"]
 MODE_OPTIONS = ["Standard Mode", "Focus Mode", "Presentation Mode"]
 THEME_OPTIONS = ["Midnight Blue", "Black Terminal", "Arctic Glass"]
 AUTO_REFRESH_OPTIONS = ["Off", "30 seconds", "60 seconds", "5 minutes"]
@@ -561,10 +562,12 @@ def load_research_summary(database_url: str | None = None, selected_run_id: str 
         factor_attribution_payload = fetch_factor_attribution_dashboard_payload(database_value, database_factory=MonitoringDatabase)
         walk_forward_payload = fetch_walk_forward_dashboard_payload(database_value)
         portfolio_research_payload = fetch_portfolio_research_dashboard_payload(database_value)
+        strategy_lab_payload = fetch_strategy_lab_dashboard_payload(database_value)
         research_payload["evaluation"] = evaluation_payload
         research_payload["factor_attribution"] = factor_attribution_payload
         research_payload["walk_forward"] = walk_forward_payload
         research_payload["portfolio_research"] = portfolio_research_payload
+        research_payload["strategy_lab"] = strategy_lab_payload
         return research_payload
     except Exception as exc:  # pragma: no cover - defensive dashboard path
         logger.error("RESEARCH_DASHBOARD_QUERY_FAILURE type=%s message=%s", type(exc).__name__, exc)
@@ -644,7 +647,143 @@ def load_research_summary(database_url: str | None = None, selected_run_id: str 
                 "latest_run": {},
                 "snapshots": [],
             },
+            "strategy_lab": {
+                "db_connected": False,
+                "total_runs": 0,
+                "latest_run": {},
+                "results": [],
+                "pairwise": [],
+            },
         }
+
+
+def render_strategy_laboratory_page():
+    st.markdown("### STRATEGY LABORATORY — READ ONLY")
+    payload = st.session_state.get("dashboard_research_payload") or {}
+    strategy_lab = payload.get("strategy_lab") or {"db_connected": False, "total_runs": 0, "latest_run": {}, "results": [], "pairwise": []}
+    latest_run = strategy_lab.get("latest_run") or {}
+    results = list(strategy_lab.get("results") or [])
+    pairwise = list(strategy_lab.get("pairwise") or [])
+    summary = latest_run.get("summary") or {}
+
+    overview_cols = st.columns(8)
+    _metric_card(overview_cols[0], "Comparison Run", _safe_text(latest_run.get("run_id"), "N/A"), "neutral")
+    _metric_card(overview_cols[1], "Strategies", len(latest_run.get("strategy_ids") or []), "neutral")
+    _metric_card(overview_cols[2], "Horizon", latest_run.get("horizon", "N/A"), "neutral")
+    _metric_card(overview_cols[3], "Benchmark", _safe_text(latest_run.get("benchmark"), "N/A"), "neutral")
+    _metric_card(overview_cols[4], "Date Range", f"{_safe_text(latest_run.get('start_date'), 'N/A')} -> {_safe_text(latest_run.get('end_date'), 'N/A')}", "neutral")
+    _metric_card(overview_cols[5], "Mode", _safe_text(latest_run.get("comparison_mode"), "N/A"), "neutral")
+    _metric_card(overview_cols[6], "Common Snapshots", summary.get("common_snapshot_count", 0), "neutral")
+    _metric_card(overview_cols[7], "Run Status", _safe_text(latest_run.get("status"), "unknown"), "warning")
+
+    st.markdown("#### Leaderboard")
+    leaderboard_rows = []
+    for row in results:
+        analytics = row.get("analytics") or {}
+        scorecard = row.get("scorecard") or {}
+        walk_forward = row.get("walk_forward") or {}
+        leaderboard_rows.append(
+            {
+                "strategy": row.get("strategy_id"),
+                "composite_score": scorecard.get("composite_score"),
+                "overall_status": scorecard.get("overall_status"),
+                "average_net_excess_return": analytics.get("average_net_excess_return"),
+                "positive_net_excess_rate": analytics.get("positive_net_excess_rate"),
+                "volatility": analytics.get("volatility"),
+                "maximum_drawdown": analytics.get("maximum_drawdown"),
+                "sharpe_like_ratio": analytics.get("sharpe_like_ratio"),
+                "turnover": analytics.get("average_turnover"),
+                "concentration": analytics.get("hhi"),
+                "completed_walk_forward_windows": walk_forward.get("completed_windows"),
+                "warnings": "; ".join(row.get("warnings") or []),
+            }
+        )
+    st.dataframe(leaderboard_rows)
+
+    detail = results[0] if results else {}
+    st.markdown("#### Strategy Detail")
+    st.dataframe([detail.get("definition") or {}])
+    st.dataframe([detail.get("analytics") or {}])
+    st.dataframe([detail.get("factor_exposure") or {}])
+    st.dataframe((detail.get("scorecard") or {}).get("categories") or [])
+
+    st.markdown("#### Pairwise Comparison")
+    st.dataframe(pairwise)
+
+    st.markdown("#### Walk-Forward")
+    walk_rows = []
+    for row in results:
+        for window in (row.get("walk_forward") or {}).get("windows") or []:
+            walk_rows.append(
+                {
+                    "strategy": row.get("strategy_id"),
+                    "window": window.get("window_id"),
+                    "training_net_excess": window.get("training_portfolio_excess_return"),
+                    "validation_net_excess": window.get("validation_portfolio_excess_return"),
+                    "degradation": window.get("degradation"),
+                    "validation_drawdown": None,
+                    "validation_turnover": window.get("turnover_change"),
+                    "status": window.get("status"),
+                    "warnings": "",
+                }
+            )
+    st.dataframe(walk_rows)
+
+    st.markdown("#### Regime Performance")
+    regime_rows = []
+    for row in results:
+        for regime in row.get("regime") or []:
+            regime_rows.append(regime)
+    st.dataframe(regime_rows)
+
+    st.markdown("#### Factor Exposure")
+    exposure_rows = []
+    for row in results:
+        factor_exposure = row.get("factor_exposure") or {}
+        exposure_rows.append({"strategy": row.get("strategy_id"), **(factor_exposure.get("difference_vs_baseline") or {})})
+    st.dataframe(exposure_rows)
+
+    st.markdown("#### Cost Analysis")
+    cost_rows = []
+    for row in results:
+        analytics = row.get("analytics") or {}
+        cost_rows.append(
+            {
+                "strategy": row.get("strategy_id"),
+                "gross_return": analytics.get("average_gross_return"),
+                "transaction_cost": analytics.get("average_estimated_transaction_cost"),
+                "slippage": latest_run.get("transaction_cost_configuration", {}).get("slippage_bps"),
+                "net_return": analytics.get("average_net_return"),
+                "gross_excess": analytics.get("average_gross_excess_return"),
+                "net_excess": analytics.get("average_net_excess_return"),
+                "cost_drag": None if analytics.get("average_gross_return") is None or analytics.get("average_net_return") is None else round(float(analytics.get("average_gross_return") or 0.0) - float(analytics.get("average_net_return") or 0.0), 6),
+            }
+        )
+    st.dataframe(cost_rows)
+
+    st.markdown("#### Read-only strategy laboratory exports")
+    export_payload = {
+        "latest_run": latest_run,
+        "leaderboard": leaderboard_rows,
+        "results": results,
+        "pairwise": pairwise,
+        "walk_forward": walk_rows,
+        "regime": regime_rows,
+        "factor_exposure": exposure_rows,
+        "cost_analysis": cost_rows,
+    }
+    export_blobs = {key: json.dumps(value, indent=2, sort_keys=True) for key, value in export_payload.items()}
+    if hasattr(st, "download_button"):
+        for label, rows, key, file_name in [
+            ("Strategy lab run JSON", [latest_run] if latest_run else [], "latest_run", "strategy_lab_run.json"),
+            ("Strategy leaderboard JSON", leaderboard_rows, "leaderboard", "strategy_lab_leaderboard.json"),
+            ("Strategy pairwise JSON", pairwise, "pairwise", "strategy_lab_pairwise.json"),
+            ("Strategy results JSON", results, "results", "strategy_lab_results.json"),
+        ]:
+            has_rows = bool(rows)
+            if not has_rows:
+                st.info(f"No data available for {label}")
+            st.download_button(label, export_blobs[key], file_name=sanitize_identifier(file_name.replace(".json", "")) + ".json", mime="application/json", key=f"download_{key}", disabled=not has_rows)
 
 
 def render_portfolio_research_page():
@@ -2902,9 +3041,10 @@ def render_dashboard(database_url: str | None = None):
         "Factor Attribution": render_factor_attribution_page,
         "Walk-Forward Validation": render_walk_forward_validation_page,
         "Portfolio Research": render_portfolio_research_page,
+        "Strategy Laboratory": render_strategy_laboratory_page,
     }
     page_renderer = page_renderers.get(selected_page, render_overview_page)
-    if selected_page in {"Research", "Factor Attribution", "Walk-Forward Validation", "Portfolio Research"}:
+    if selected_page in {"Research", "Factor Attribution", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory"}:
         _render_with_error_guard("Research", page_renderer)
     elif selected_page in {"Orders", "Performance"}:
         _render_with_error_guard(selected_page, page_renderer, payload)

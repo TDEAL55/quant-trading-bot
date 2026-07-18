@@ -362,7 +362,7 @@ def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch)
 
     nav_calls = [call for call in fake_st._calls if call[0] == "selectbox" and call[1] == "Navigate"]
     assert nav_calls
-    assert nav_calls[0][2] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Walk-Forward Validation", "Portfolio Research"]
+    assert nav_calls[0][2] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory"]
     assert all("trade" not in str(page).lower() for page in nav_calls[0][2])
 
     build_markers = [call for call in fake_st._calls if call[0] == "markdown" and dashboard_app.UI_BUILD_LABEL in call[1]]
@@ -751,6 +751,59 @@ def test_portfolio_research_page_renders_payload(monkeypatch):
     dashboard_app.render_portfolio_research_page()
 
     assert any(call[0] == "markdown" and "PORTFOLIO RESEARCH" in call[1] for call in fake_st._calls)
+    assert any(call[0] == "dataframe" for call in fake_st._calls)
+
+
+def test_strategy_laboratory_page_renders_payload(monkeypatch):
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["dashboard_research_payload"] = {
+        "strategy_lab": {
+            "db_connected": True,
+            "total_runs": 1,
+            "latest_run": {
+                "run_id": "strategy-lab-1",
+                "horizon": 20,
+                "benchmark": "SPY",
+                "comparison_mode": "common_snapshots",
+                "start_date": "2024-01-01",
+                "end_date": "2024-06-30",
+                "status": "completed",
+                "strategy_ids": ["baseline_scanner", "trend_focused"],
+                "summary": {"common_snapshot_count": 4},
+                "transaction_cost_configuration": {"slippage_bps": 0.0},
+            },
+            "results": [
+                {
+                    "strategy_id": "baseline_scanner",
+                    "analytics": {
+                        "average_net_excess_return": 0.01,
+                        "positive_net_excess_rate": 0.6,
+                        "volatility": 0.02,
+                        "maximum_drawdown": -0.05,
+                        "sharpe_like_ratio": 0.5,
+                        "average_turnover": 0.3,
+                        "hhi": 0.25,
+                        "average_gross_return": 0.02,
+                        "average_estimated_transaction_cost": 0.0,
+                        "average_net_return": 0.02,
+                        "average_gross_excess_return": 0.01,
+                    },
+                    "scorecard": {"composite_score": 65.0, "overall_status": "acceptable", "categories": [{"category": "sample sufficiency", "status": "acceptable"}]},
+                    "walk_forward": {"completed_windows": 2, "windows": [{"window_id": "rolling-20-1", "training_portfolio_excess_return": 0.01, "validation_portfolio_excess_return": 0.005, "degradation": -0.005, "turnover_change": 0.01, "status": "completed"}]},
+                    "definition": {"strategy_id": "baseline_scanner", "strategy_name": "Baseline Scanner"},
+                    "factor_exposure": {"difference_vs_baseline": {"trend_score_difference": 0.0}},
+                    "regime": [{"market_regime": "bull", "portfolio_count": 2, "average_net_excess_return": 0.01}],
+                    "warnings": [],
+                }
+            ],
+            "pairwise": [{"strategy_a_id": "baseline_scanner", "strategy_b_id": "trend_focused", "common_snapshot_count": 4, "average_net_excess_return_difference": 0.002, "win_rate_a_over_b": 0.5}],
+        }
+    }
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+
+    dashboard_app.render_strategy_laboratory_page()
+
+    assert any(call[0] == "markdown" and "STRATEGY LABORATORY" in call[1] for call in fake_st._calls)
     assert any(call[0] == "dataframe" for call in fake_st._calls)
 
 

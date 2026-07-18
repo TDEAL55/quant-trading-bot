@@ -21,7 +21,7 @@ def test_json_repository_saves_scan_payload(tmp_path):
 
 
 def test_scanner_modules_do_not_import_broker_order_submission():
-    for file_name in ["market_scanner.py", "portfolio_selector.py", "scanner_runner.py", "research_journal.py", "research_repository.py", "forward_return_labeler.py", "strategy_evaluator.py", "evaluation_repository.py", "factor_attribution.py", "walk_forward_validator.py", "walk_forward_data.py", "walk_forward_repository.py", "stability_analyzer.py", "portfolio_research.py", "portfolio_research_data.py", "portfolio_research_repository.py", "portfolio_weighting.py", "portfolio_constraints.py", "portfolio_analytics.py"]:
+    for file_name in ["market_scanner.py", "portfolio_selector.py", "scanner_runner.py", "research_journal.py", "research_repository.py", "forward_return_labeler.py", "strategy_evaluator.py", "evaluation_repository.py", "factor_attribution.py", "walk_forward_validator.py", "walk_forward_data.py", "walk_forward_repository.py", "stability_analyzer.py", "portfolio_research.py", "portfolio_research_data.py", "portfolio_research_repository.py", "portfolio_weighting.py", "portfolio_constraints.py", "portfolio_analytics.py", "strategy_definitions.py", "strategy_costs.py", "strategy_scorecard.py", "strategy_comparison.py", "strategy_lab_data.py", "strategy_lab_repository.py", "strategy_lab.py"]:
         text = (REPO_ROOT / file_name).read_text(encoding="utf-8")
         assert "submit_order(" not in text
         assert "place_order(" not in text
@@ -40,7 +40,7 @@ def test_live_block_remains_absent_from_scanner_config_paths():
 
 
 def test_evaluation_modules_remain_research_only():
-    for file_name in ["forward_return_labeler.py", "strategy_evaluator.py", "evaluation_repository.py", "evaluation_data.py", "factor_attribution.py", "walk_forward_validator.py", "walk_forward_data.py", "walk_forward_repository.py", "stability_analyzer.py", "portfolio_research.py", "portfolio_research_data.py", "portfolio_research_repository.py", "portfolio_weighting.py", "portfolio_constraints.py", "portfolio_analytics.py"]:
+    for file_name in ["forward_return_labeler.py", "strategy_evaluator.py", "evaluation_repository.py", "evaluation_data.py", "factor_attribution.py", "walk_forward_validator.py", "walk_forward_data.py", "walk_forward_repository.py", "stability_analyzer.py", "portfolio_research.py", "portfolio_research_data.py", "portfolio_research_repository.py", "portfolio_weighting.py", "portfolio_constraints.py", "portfolio_analytics.py", "strategy_definitions.py", "strategy_costs.py", "strategy_scorecard.py", "strategy_comparison.py", "strategy_lab_data.py", "strategy_lab_repository.py", "strategy_lab.py"]:
         text = (REPO_ROOT / file_name).read_text(encoding="utf-8")
         assert "order_submission" not in text.lower()
         assert "live trading" not in text.lower()
