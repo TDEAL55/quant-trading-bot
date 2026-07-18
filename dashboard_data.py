@@ -5,6 +5,7 @@ from typing import Any
 from monitoring_db import MonitoringDatabase
 from dashboard_models import build_dashboard_dataset
 from evaluation_data import fetch_evaluation_dashboard_payload
+from factor_attribution import fetch_factor_attribution_dashboard_payload
 from research_data import fetch_research_dashboard_payload
 
 
@@ -13,7 +14,9 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
     try:
         research_payload = fetch_research_dashboard_payload(database_url, database_factory=MonitoringDatabase)
         evaluation_payload = fetch_evaluation_dashboard_payload(database_url, database_factory=MonitoringDatabase)
+        factor_attribution_payload = fetch_factor_attribution_dashboard_payload(database_url, database_factory=MonitoringDatabase)
         research_payload["evaluation"] = evaluation_payload
+        research_payload["factor_attribution"] = factor_attribution_payload
     except Exception:
         research_payload = {
             "db_connected": False,
@@ -62,6 +65,22 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
                     "latest_attempted_at": None,
                 },
                 "evaluation_config": {},
+            },
+            "factor_attribution": {
+                "db_connected": False,
+                "selected_horizon": "20d",
+                "selected_factor": "overall_score",
+                "factor_attribution_analytics": {
+                    "factor_bucket_analysis": {},
+                    "factor_distributions": {},
+                    "factor_correlations": [],
+                    "feature_importance_summary": [],
+                    "strongest_predictive_factors": [],
+                    "weakest_predictive_factors": [],
+                    "minimum_sample_warnings": [],
+                    "top_factor_combinations": {},
+                },
+                "factor_options": [],
             },
         }
     payload = {

@@ -37,6 +37,7 @@ from dashboard_sanitization import sanitize_identifier, sanitize_text
 from dashboard_status import classify_market_clock, format_est
 from logger_setup import logger
 from evaluation_data import fetch_evaluation_dashboard_payload
+from factor_attribution import fetch_factor_attribution_dashboard_payload
 from research_data import fetch_research_dashboard_payload
 
 
@@ -85,7 +86,7 @@ THEMES = {
     },
 }
 
-PAGE_OPTIONS = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research"]
+PAGE_OPTIONS = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution"]
 MODE_OPTIONS = ["Standard Mode", "Focus Mode", "Presentation Mode"]
 THEME_OPTIONS = ["Midnight Blue", "Black Terminal", "Arctic Glass"]
 AUTO_REFRESH_OPTIONS = ["Off", "30 seconds", "60 seconds", "5 minutes"]
@@ -555,7 +556,9 @@ def load_research_summary(database_url: str | None = None, selected_run_id: str 
         database_value = database_url or os.getenv("DATABASE_URL")
         research_payload = fetch_research_dashboard_payload(database_value, selected_run_id=selected_run_id, database_factory=MonitoringDatabase)
         evaluation_payload = fetch_evaluation_dashboard_payload(database_value, database_factory=MonitoringDatabase)
+        factor_attribution_payload = fetch_factor_attribution_dashboard_payload(database_value, database_factory=MonitoringDatabase)
         research_payload["evaluation"] = evaluation_payload
+        research_payload["factor_attribution"] = factor_attribution_payload
         return research_payload
     except Exception as exc:  # pragma: no cover - defensive dashboard path
         logger.error("RESEARCH_DASHBOARD_QUERY_FAILURE type=%s message=%s", type(exc).__name__, exc)
@@ -607,7 +610,113 @@ def load_research_summary(database_url: str | None = None, selected_run_id: str 
                 },
                 "evaluation_config": {},
             },
+            "factor_attribution": {
+                "db_connected": False,
+                "selected_horizon": "20d",
+                "selected_factor": "overall_score",
+                "factor_attribution_analytics": {
+                    "factor_bucket_analysis": {},
+                    "factor_distributions": {},
+                    "factor_correlations": [],
+                    "feature_importance_summary": [],
+                    "strongest_predictive_factors": [],
+                    "weakest_predictive_factors": [],
+                    "minimum_sample_warnings": [],
+                    "top_factor_combinations": {},
+                },
+                "factor_options": [],
+            },
         }
+
+
+def render_factor_attribution_page():
+    st.markdown("### FACTOR ATTRIBUTION — READ ONLY")
+    payload = st.session_state.get("dashboard_research_payload") or {}
+    factor_payload = payload.get("factor_attribution") or {
+        "db_connected": False,
+        "selected_horizon": "20d",
+        "selected_factor": "overall_score",
+        "factor_attribution_analytics": {
+            "factor_bucket_analysis": {},
+            "factor_distributions": {},
+            "factor_correlations": [],
+            "feature_importance_summary": [],
+            "strongest_predictive_factors": [],
+            "weakest_predictive_factors": [],
+            "minimum_sample_warnings": [],
+            "top_factor_combinations": {},
+        },
+        "factor_options": [],
+    }
+    analytics = factor_payload.get("factor_attribution_analytics") or {}
+    factor_options = list(factor_payload.get("factor_options") or [])
+    if not factor_options:
+        factor_options = ["overall_score", "confidence", "trend_score", "momentum_score", "volatility_score", "liquidity_score", "market_regime_score", "risk_quality_score", "rank", "signal", "market_regime", "sector"]
+    horizon_options = ["1d", "5d", "10d", "20d"]
+    control_cols = st.columns(2)
+    selected_horizon = control_cols[0].selectbox("Attribution horizon", horizon_options, index=horizon_options.index(factor_payload.get("selected_horizon", "20d")) if factor_payload.get("selected_horizon", "20d") in horizon_options else len(horizon_options) - 1, key="dashboard_factor_attribution_horizon")
+    selected_factor = control_cols[1].selectbox("Factor", factor_options, index=factor_options.index(factor_payload.get("selected_factor", factor_options[0])) if factor_payload.get("selected_factor", factor_options[0]) in factor_options else 0, key="dashboard_factor_attribution_factor")
+
+    strongest = analytics.get("strongest_predictive_factors") or []
+    weakest = analytics.get("weakest_predictive_factors") or []
+    importance = analytics.get("feature_importance_summary") or []
+    correlations = analytics.get("factor_correlations") or []
+    selected_factor_buckets = ((analytics.get("factor_bucket_analysis") or {}).get(selected_factor) or {}).get(selected_horizon) or []
+    selected_distribution = (analytics.get("factor_distributions") or {}).get(selected_factor) or {}
+    combinations = (analytics.get("top_factor_combinations") or {}).get(selected_horizon) or []
+    warnings = analytics.get("minimum_sample_warnings") or []
+
+    overview_cols = st.columns(4)
+    _metric_card(overview_cols[0], "Tracked Factors", len(importance), "neutral")
+    _metric_card(overview_cols[1], "Strong Signals", len(strongest), "healthy")
+    _metric_card(overview_cols[2], "Weak Signals", len(weakest), "warning")
+    _metric_card(overview_cols[3], "Low-Sample Warnings", len(warnings), "warning")
+
+    top_cols = st.columns(2)
+    with top_cols[0]:
+        st.markdown("#### Strongest Predictive Factors")
+        st.dataframe(strongest)
+    with top_cols[1]:
+        st.markdown("#### Weakest Predictive Factors")
+        st.dataframe(weakest)
+
+    st.markdown("#### Correlation Table")
+    st.dataframe(correlations)
+
+    selected_cols = st.columns(2)
+    with selected_cols[0]:
+        st.markdown(f"#### Bucket Analysis — {selected_factor} / {selected_horizon}")
+        st.dataframe(selected_factor_buckets)
+    with selected_cols[1]:
+        st.markdown(f"#### Distribution — {selected_factor}")
+        st.dataframe([selected_distribution] if selected_distribution else [])
+
+    st.markdown("#### Top Factor Combinations")
+    st.dataframe(combinations)
+
+    st.markdown("#### Minimum Sample Warnings")
+    st.dataframe(warnings[:50])
+
+    st.markdown("#### Read-only attribution exports")
+    export_payload = {
+        "feature_importance_summary": importance,
+        "factor_correlations": correlations,
+        "selected_factor_bucket_analysis": selected_factor_buckets,
+        "top_factor_combinations": combinations,
+        "minimum_sample_warnings": warnings,
+    }
+    export_blobs = {key: json.dumps(value, indent=2, sort_keys=True) for key, value in export_payload.items()}
+    if hasattr(st, "download_button"):
+        for label, rows, key, file_name in [
+            ("Feature importance JSON", importance, "feature_importance_summary", "feature_importance_summary.json"),
+            ("Factor correlations JSON", correlations, "factor_correlations", "factor_correlations.json"),
+            ("Bucket analysis JSON", selected_factor_buckets, "selected_factor_bucket_analysis", "factor_bucket_analysis.json"),
+            ("Top factor combinations JSON", combinations, "top_factor_combinations", "top_factor_combinations.json"),
+        ]:
+            has_rows = bool(rows)
+            if not has_rows:
+                st.info(f"No data available for {label}")
+            st.download_button(label, export_blobs[key], file_name=sanitize_identifier(file_name.replace(".json", "")) + ".json", mime="application/json", key=f"download_{key}", disabled=not has_rows)
 
 
 def build_dashboard_view_model(payload):
@@ -2572,6 +2681,7 @@ def render_dashboard(database_url: str | None = None):
         "Operations": render_operations_page,
         "Alerts": render_alerts_page,
         "Research": render_research_page,
+        "Factor Attribution": render_factor_attribution_page,
     }
     page_renderer = page_renderers.get(selected_page, render_overview_page)
     if selected_page == "Research":

@@ -362,7 +362,7 @@ def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch)
 
     nav_calls = [call for call in fake_st._calls if call[0] == "selectbox" and call[1] == "Navigate"]
     assert nav_calls
-    assert nav_calls[0][2] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research"]
+    assert nav_calls[0][2] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution"]
     assert all("trade" not in str(page).lower() for page in nav_calls[0][2])
 
     build_markers = [call for call in fake_st._calls if call[0] == "markdown" and dashboard_app.UI_BUILD_LABEL in call[1]]
@@ -624,6 +624,36 @@ def test_research_page_renders_evaluation_payload(monkeypatch):
 
     assert any(call[0] == "markdown" and "Strategy Evaluation" in call[1] for call in fake_st._calls)
     assert any(call[0] == "selectbox" and call[1] == "Evaluation horizon" for call in fake_st._calls)
+    assert any(call[0] == "dataframe" for call in fake_st._calls)
+
+
+def test_factor_attribution_page_renders_payload(monkeypatch):
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["dashboard_research_payload"] = {
+        "factor_attribution": {
+            "db_connected": True,
+            "selected_horizon": "1d",
+            "selected_factor": "overall_score",
+            "factor_options": ["overall_score", "confidence"],
+            "factor_attribution_analytics": {
+                "feature_importance_summary": [{"factor": "overall_score", "predictive_strength_score": 0.5}],
+                "strongest_predictive_factors": [{"factor": "overall_score", "predictive_strength_score": 0.5}],
+                "weakest_predictive_factors": [{"factor": "confidence", "predictive_strength_score": 0.1}],
+                "factor_correlations": [{"factor": "overall_score", "1d_return_correlation": 0.5}],
+                "factor_bucket_analysis": {"overall_score": {"1d": [{"bucket": "80_100", "sample_size": 5, "average_excess_return": 0.02}]}},
+                "factor_distributions": {"overall_score": {"sample_size": 5, "mean": 80.0}},
+                "minimum_sample_warnings": [{"factor": "overall_score", "bucket": "80_100", "sample_size": 2}],
+                "top_factor_combinations": {"1d": [{"combination": "score=80_100", "sample_size": 3, "average_excess_return": 0.03}]},
+            },
+        }
+    }
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+
+    dashboard_app.render_factor_attribution_page()
+
+    assert any(call[0] == "markdown" and "FACTOR ATTRIBUTION" in call[1] for call in fake_st._calls)
+    assert any(call[0] == "selectbox" and call[1] == "Attribution horizon" for call in fake_st._calls)
+    assert any(call[0] == "selectbox" and call[1] == "Factor" for call in fake_st._calls)
     assert any(call[0] == "dataframe" for call in fake_st._calls)
 
 
