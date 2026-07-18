@@ -26,6 +26,7 @@ try:
 except Exception:  # pragma: no cover
     st_autorefresh = None
 
+    from config import BENCHMARK_SYMBOL
 from monitoring_db import MonitoringDatabase
 from dashboard_data import fetch_dashboard_payload
 from dashboard_exports import export_daily_activity, export_performance_summary, export_sanitized_orders, export_signal_history, export_system_health
@@ -35,6 +36,7 @@ from dashboard_models import build_normalized_view_model
 from dashboard_sanitization import sanitize_identifier, sanitize_text
 from dashboard_status import classify_market_clock, format_est
 from logger_setup import logger
+from evaluation_data import fetch_evaluation_dashboard_payload
 from research_data import fetch_research_dashboard_payload
 
 
@@ -550,7 +552,11 @@ def build_order_rows(recent_orders):
 
 def load_research_summary(database_url: str | None = None, selected_run_id: str | None = None):
     try:
-        return fetch_research_dashboard_payload(database_url or os.getenv("DATABASE_URL"), selected_run_id=selected_run_id, database_factory=MonitoringDatabase)
+        database_value = database_url or os.getenv("DATABASE_URL")
+        research_payload = fetch_research_dashboard_payload(database_value, selected_run_id=selected_run_id, database_factory=MonitoringDatabase)
+        evaluation_payload = fetch_evaluation_dashboard_payload(database_value, database_factory=MonitoringDatabase)
+        research_payload["evaluation"] = evaluation_payload
+        return research_payload
     except Exception as exc:  # pragma: no cover - defensive dashboard path
         logger.error("RESEARCH_DASHBOARD_QUERY_FAILURE type=%s message=%s", type(exc).__name__, exc)
         return {
@@ -577,6 +583,30 @@ def load_research_summary(database_url: str | None = None, selected_run_id: str 
                 "average_confidence_by_regime": [],
             },
             "latest_research_summary": {},
+            "evaluation": {
+                "db_connected": False,
+                "latest_labeling_run": {},
+                "recent_labeled_observations": [],
+                "recent_label_failures": [],
+                "selected_horizon": "20d",
+                "evaluation_analytics": {
+                    "benchmark_symbol": BENCHMARK_SYMBOL,
+                    "total_observations": 0,
+                    "labeled_candidates": 0,
+                    "status_counts": {"pending": 0, "partial": 0, "complete": 0, "unavailable": 0, "data_error": 0},
+                    "horizons": {},
+                    "score_buckets": {},
+                    "confidence_buckets": {},
+                    "regime_analysis": {},
+                    "sector_analysis": {},
+                    "signal_analysis": {},
+                    "rank_analysis": {},
+                    "recurring_symbol_analysis": {},
+                    "correlations": {},
+                    "latest_attempted_at": None,
+                },
+                "evaluation_config": {},
+            },
         }
 
 
@@ -2204,6 +2234,30 @@ def render_research_page():
             "average_confidence_by_regime": [],
         },
         "latest_research_summary": {},
+        "evaluation": {
+            "db_connected": False,
+            "latest_labeling_run": {},
+            "recent_labeled_observations": [],
+            "recent_label_failures": [],
+            "selected_horizon": "20d",
+            "evaluation_analytics": {
+                "benchmark_symbol": BENCHMARK_SYMBOL,
+                "total_observations": 0,
+                "labeled_candidates": 0,
+                "status_counts": {"pending": 0, "partial": 0, "complete": 0, "unavailable": 0, "data_error": 0},
+                "horizons": {},
+                "score_buckets": {},
+                "confidence_buckets": {},
+                "regime_analysis": {},
+                "sector_analysis": {},
+                "signal_analysis": {},
+                "rank_analysis": {},
+                "recurring_symbol_analysis": {},
+                "correlations": {},
+                "latest_attempted_at": None,
+            },
+            "evaluation_config": {},
+        },
     }
     analytics = payload.get("research_analytics") or {}
     latest_run = payload.get("latest_research_run") or {}
@@ -2281,6 +2335,126 @@ def render_research_page():
         st.dataframe(analytics.get("candidate_count_by_sector") or [])
     with chart_cols[1]:
         st.dataframe(analytics.get("candidate_count_by_regime") or [])
+
+    st.markdown("### Strategy Evaluation")
+    evaluation = payload.get("evaluation") or {}
+    evaluation_analytics = evaluation.get("evaluation_analytics") or {}
+    horizon_keys = list((evaluation_analytics.get("horizons") or {}).keys())
+    if not horizon_keys:
+        horizon_keys = ["1d", "5d", "10d", "20d"]
+    selected_horizon = evaluation.get("selected_horizon") or horizon_keys[-1]
+    selected_horizon = st.selectbox("Evaluation horizon", horizon_keys, index=horizon_keys.index(selected_horizon) if selected_horizon in horizon_keys else len(horizon_keys) - 1, key="dashboard_evaluation_horizon")
+    selected_horizon_metrics = (evaluation_analytics.get("horizons") or {}).get(selected_horizon) or {}
+
+    overview_cols = st.columns(5)
+    status_counts = evaluation_analytics.get("status_counts") or {}
+    _metric_card(overview_cols[0], "Total Observations", evaluation_analytics.get("total_observations", 0), "neutral")
+    _metric_card(overview_cols[1], "Complete Labels", status_counts.get("complete", 0), "healthy")
+    _metric_card(overview_cols[2], "Partial Labels", status_counts.get("partial", 0), "warning")
+    _metric_card(overview_cols[3], "Pending Labels", status_counts.get("pending", 0), "neutral")
+    _metric_card(overview_cols[4], "Unavailable Labels", status_counts.get("unavailable", 0), "sell")
+
+    label_cols = st.columns(4)
+    _metric_card(label_cols[0], "Latest Label Attempt", _safe_text(evaluation_analytics.get("latest_attempted_at"), "N/A"), "neutral")
+    _metric_card(label_cols[1], "Benchmark", _safe_text(evaluation_analytics.get("benchmark_symbol"), "N/A"), "neutral")
+    _metric_card(label_cols[2], "Labeled Candidates", evaluation_analytics.get("labeled_candidates", 0), "healthy")
+    _metric_card(label_cols[3], "Data Errors", status_counts.get("data_error", 0), "warning")
+
+    horizon_cols = st.columns(6)
+    _metric_card(horizon_cols[0], f"{selected_horizon.upper()} Sample", selected_horizon_metrics.get("sample_size", 0), "neutral")
+    _metric_card(horizon_cols[1], "Avg Return", f"{float(selected_horizon_metrics.get('average_raw_return') or 0.0):.4f}", "healthy")
+    _metric_card(horizon_cols[2], "Avg Benchmark", f"{float(selected_horizon_metrics.get('average_benchmark_return') or 0.0):.4f}", "neutral")
+    _metric_card(horizon_cols[3], "Avg Excess", f"{float(selected_horizon_metrics.get('average_excess_return') or 0.0):.4f}", "healthy")
+    _metric_card(horizon_cols[4], "Positive Return", f"{100.0 * float(selected_horizon_metrics.get('positive_return_rate') or 0.0):.1f}%", "healthy")
+    _metric_card(horizon_cols[5], "Positive Excess", f"{100.0 * float(selected_horizon_metrics.get('positive_excess_return_rate') or 0.0):.1f}%", "healthy")
+
+    evaluation_tables = st.columns(2)
+    with evaluation_tables[0]:
+        st.markdown("#### Score Analysis")
+        st.dataframe((evaluation_analytics.get("score_buckets") or {}).get(selected_horizon) or [])
+        st.markdown("#### Regime Analysis")
+        st.dataframe((evaluation_analytics.get("regime_analysis") or {}).get(selected_horizon) or [])
+        st.markdown("#### Rank Analysis")
+        st.dataframe((evaluation_analytics.get("rank_analysis") or {}).get(selected_horizon) or [])
+    with evaluation_tables[1]:
+        st.markdown("#### Confidence Analysis")
+        st.dataframe((evaluation_analytics.get("confidence_buckets") or {}).get(selected_horizon) or [])
+        st.markdown("#### Sector Analysis")
+        st.dataframe((evaluation_analytics.get("sector_analysis") or {}).get(selected_horizon) or [])
+        st.markdown("#### Signal Analysis")
+        st.dataframe((evaluation_analytics.get("signal_analysis") or {}).get(selected_horizon) or [])
+
+    st.markdown("#### Correlations")
+    correlation_rows = []
+    for key, value in ((evaluation_analytics.get("correlations") or {}).get(selected_horizon) or {}).items():
+        if key == "sample_size":
+            continue
+        correlation_rows.append({"metric": key, "value": value})
+    st.dataframe(correlation_rows)
+
+    st.markdown("#### Recurring Symbols")
+    recurring_rows = (evaluation_analytics.get("recurring_symbol_analysis") or {}).get(selected_horizon) or []
+    st.dataframe(recurring_rows)
+
+    st.markdown("#### Recent Labeled Observations")
+    recent_labels = evaluation.get("recent_labeled_observations") or []
+    recent_label_rows = [
+        {
+            "observation_date": row.get("observation_date"),
+            "symbol": row.get("symbol"),
+            "rank": row.get("rank"),
+            "score": row.get("overall_score"),
+            "confidence": row.get("confidence"),
+            "sector": row.get("sector"),
+            "regime": row.get("market_regime"),
+            "1d_return": row.get("forward_1d_return"),
+            "5d_return": row.get("forward_5d_return"),
+            "10d_return": row.get("forward_10d_return"),
+            "20d_return": row.get("forward_20d_return"),
+            "1d_excess": row.get("forward_1d_excess_return"),
+            "5d_excess": row.get("forward_5d_excess_return"),
+            "10d_excess": row.get("forward_10d_excess_return"),
+            "20d_excess": row.get("forward_20d_excess_return"),
+            "label_status": row.get("label_status"),
+        }
+        for row in recent_labels
+    ]
+    st.dataframe(recent_label_rows)
+
+    st.markdown("#### Recent Label Failures")
+    failure_rows = [
+        {
+            "observation_date": row.get("observation_date"),
+            "symbol": row.get("symbol"),
+            "status": row.get("label_status"),
+            "error_message": row.get("error_message"),
+            "last_attempted_at": row.get("last_attempted_at"),
+        }
+        for row in (evaluation.get("recent_label_failures") or [])
+    ]
+    st.dataframe(failure_rows)
+
+    st.markdown("#### Read-only evaluation exports")
+    evaluation_export_payload = {
+        "analytics": evaluation_analytics,
+        "recent_labeled_observations": recent_label_rows,
+        "recent_label_failures": failure_rows,
+    }
+    evaluation_export_blobs = {
+        "analytics": json.dumps(evaluation_export_payload["analytics"], indent=2, sort_keys=True),
+        "recent_labeled_observations": json.dumps(evaluation_export_payload["recent_labeled_observations"], indent=2, sort_keys=True),
+        "recent_label_failures": json.dumps(evaluation_export_payload["recent_label_failures"], indent=2, sort_keys=True),
+    }
+    if hasattr(st, "download_button"):
+        for label, rows, blob, file_name, key in [
+            ("Evaluation analytics JSON", recent_label_rows, evaluation_export_blobs["analytics"], "strategy_evaluation_analytics.json", "download_strategy_evaluation_analytics"),
+            ("Recent labeled observations JSON", recent_label_rows, evaluation_export_blobs["recent_labeled_observations"], "recent_labeled_observations.json", "download_recent_labeled_observations"),
+            ("Recent label failures JSON", failure_rows, evaluation_export_blobs["recent_label_failures"], "recent_label_failures.json", "download_recent_label_failures"),
+        ]:
+            has_rows = bool(rows)
+            if not has_rows:
+                st.info(f"No data available for {label}")
+            st.download_button(label, blob, file_name=sanitize_identifier(file_name.replace(".json", "")) + ".json", mime="application/json", key=key, disabled=not has_rows)
 
     st.markdown("### Read-only exports")
     export_payload = {

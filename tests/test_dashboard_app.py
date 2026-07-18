@@ -548,6 +548,85 @@ def test_research_downloads_disable_when_no_rows(monkeypatch):
     assert all(call[5] is True for call in download_calls)
 
 
+def test_research_page_renders_evaluation_payload(monkeypatch):
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["dashboard_research_payload"] = {
+        "db_connected": True,
+        "latest_research_run": {"research_run_id": "research-1", "completed_at": "2024-01-10T15:00:00+00:00", "benchmark_symbol": "SPY", "market_regime": "strong_bull", "universe_size": 1, "scanner_duration_seconds": 1.0, "eligible_count": 1, "rejected_count": 0, "error_count": 0, "data_source": "synthetic"},
+        "recent_research_runs": [],
+        "selected_research_run_id": "research-1",
+        "selected_research_candidates": [],
+        "research_analytics": {
+            "total_research_runs": 1,
+            "total_candidate_observations": 1,
+            "average_candidates_per_run": 1.0,
+            "average_overall_score": 80.0,
+            "average_confidence": 70.0,
+            "score_distribution": [],
+            "confidence_distribution": [],
+            "candidate_count_by_sector": [],
+            "candidate_count_by_regime": [],
+            "signal_distribution": [],
+            "top_recurring_symbols": [],
+            "average_score_by_sector": [],
+            "average_confidence_by_sector": [],
+            "average_score_by_regime": [],
+            "average_confidence_by_regime": [],
+        },
+        "latest_research_summary": {},
+        "evaluation": {
+            "db_connected": True,
+            "latest_labeling_run": {"latest_attempted_at": "2024-01-10T15:00:00+00:00"},
+            "recent_labeled_observations": [
+                {
+                    "observation_date": "2024-01-02",
+                    "symbol": "AAA",
+                    "rank": 1,
+                    "overall_score": 80.0,
+                    "confidence": 70.0,
+                    "sector": "Technology",
+                    "market_regime": "strong_bull",
+                    "forward_1d_return": 0.01,
+                    "forward_5d_return": 0.05,
+                    "forward_10d_return": 0.10,
+                    "forward_20d_return": 0.20,
+                    "forward_1d_excess_return": 0.01,
+                    "forward_5d_excess_return": 0.05,
+                    "forward_10d_excess_return": 0.10,
+                    "forward_20d_excess_return": 0.20,
+                    "label_status": "complete",
+                }
+            ],
+            "recent_label_failures": [],
+            "selected_horizon": "1d",
+            "evaluation_analytics": {
+                "benchmark_symbol": "SPY",
+                "total_observations": 1,
+                "labeled_candidates": 1,
+                "status_counts": {"pending": 0, "partial": 0, "complete": 1, "unavailable": 0, "data_error": 0},
+                "horizons": {"1d": {"sample_size": 1, "average_raw_return": 0.01, "average_benchmark_return": 0.0, "average_excess_return": 0.01, "median_raw_return": 0.01, "median_excess_return": 0.01, "positive_return_rate": 1.0, "positive_excess_return_rate": 1.0}},
+                "score_buckets": {"1d": [{"bucket": "below_40", "candidate_count": 0}]},
+                "confidence_buckets": {"1d": [{"bucket": "below_40", "candidate_count": 0}]},
+                "regime_analysis": {"1d": []},
+                "sector_analysis": {"1d": []},
+                "signal_analysis": {"1d": []},
+                "rank_analysis": {"1d": []},
+                "recurring_symbol_analysis": {"1d": []},
+                "correlations": {"1d": {"sample_size": 1, "score_vs_forward_return": None, "score_vs_excess_return": None, "confidence_vs_forward_return": None, "confidence_vs_excess_return": None, "rank_vs_forward_return": None, "rank_vs_excess_return": None}},
+                "latest_attempted_at": "2024-01-10T15:00:00+00:00",
+            },
+            "evaluation_config": {"benchmark_symbol": "SPY"},
+        },
+    }
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+
+    dashboard_app.render_research_page()
+
+    assert any(call[0] == "markdown" and "Strategy Evaluation" in call[1] for call in fake_st._calls)
+    assert any(call[0] == "selectbox" and call[1] == "Evaluation horizon" for call in fake_st._calls)
+    assert any(call[0] == "dataframe" for call in fake_st._calls)
+
+
 def test_dashboard_app_has_no_use_container_width_calls():
     module_text = (REPO_ROOT / "dashboard_app.py").read_text(encoding="utf-8")
     assert "use_container_width" not in module_text

@@ -4,6 +4,7 @@ from typing import Any
 
 from monitoring_db import MonitoringDatabase
 from dashboard_models import build_dashboard_dataset
+from evaluation_data import fetch_evaluation_dashboard_payload
 from research_data import fetch_research_dashboard_payload
 
 
@@ -11,6 +12,8 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
     db = database_factory(database_url=database_url)
     try:
         research_payload = fetch_research_dashboard_payload(database_url, database_factory=MonitoringDatabase)
+        evaluation_payload = fetch_evaluation_dashboard_payload(database_url, database_factory=MonitoringDatabase)
+        research_payload["evaluation"] = evaluation_payload
     except Exception:
         research_payload = {
             "db_connected": False,
@@ -36,6 +39,30 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
                 "average_confidence_by_regime": [],
             },
             "latest_research_summary": {},
+            "evaluation": {
+                "db_connected": False,
+                "latest_labeling_run": {},
+                "recent_labeled_observations": [],
+                "recent_label_failures": [],
+                "selected_horizon": "20d",
+                "evaluation_analytics": {
+                    "benchmark_symbol": "SPY",
+                    "total_observations": 0,
+                    "labeled_candidates": 0,
+                    "status_counts": {"pending": 0, "partial": 0, "complete": 0, "unavailable": 0, "data_error": 0},
+                    "horizons": {},
+                    "score_buckets": {},
+                    "confidence_buckets": {},
+                    "regime_analysis": {},
+                    "sector_analysis": {},
+                    "signal_analysis": {},
+                    "rank_analysis": {},
+                    "recurring_symbol_analysis": {},
+                    "correlations": {},
+                    "latest_attempted_at": None,
+                },
+                "evaluation_config": {},
+            },
         }
     payload = {
         "db_connected": db.enabled,
