@@ -38,6 +38,7 @@ from dashboard_status import classify_market_clock, format_est
 from logger_setup import logger
 from evaluation_data import fetch_evaluation_dashboard_payload
 from factor_attribution import fetch_factor_attribution_dashboard_payload
+from factor_intelligence_data import fetch_factor_intelligence_dashboard_payload
 from paper_validation_data import fetch_paper_validation_dashboard_payload
 from portfolio_research_data import fetch_portfolio_research_dashboard_payload
 from research_data import fetch_research_dashboard_payload
@@ -90,7 +91,7 @@ THEMES = {
     },
 }
 
-PAGE_OPTIONS = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation"]
+PAGE_OPTIONS = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Factor Intelligence", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
 MODE_OPTIONS = ["Standard Mode", "Focus Mode", "Presentation Mode"]
 THEME_OPTIONS = ["Midnight Blue", "Black Terminal", "Arctic Glass"]
 AUTO_REFRESH_OPTIONS = ["Off", "30 seconds", "60 seconds", "5 minutes"]
@@ -561,12 +562,14 @@ def load_research_summary(database_url: str | None = None, selected_run_id: str 
         research_payload = fetch_research_dashboard_payload(database_value, selected_run_id=selected_run_id, database_factory=MonitoringDatabase)
         evaluation_payload = fetch_evaluation_dashboard_payload(database_value, database_factory=MonitoringDatabase)
         factor_attribution_payload = fetch_factor_attribution_dashboard_payload(database_value, database_factory=MonitoringDatabase)
+        factor_intelligence_payload = fetch_factor_intelligence_dashboard_payload(database_value)
         walk_forward_payload = fetch_walk_forward_dashboard_payload(database_value)
         portfolio_research_payload = fetch_portfolio_research_dashboard_payload(database_value)
         strategy_lab_payload = fetch_strategy_lab_dashboard_payload(database_value)
         paper_validation_payload = fetch_paper_validation_dashboard_payload(database_value)
         research_payload["evaluation"] = evaluation_payload
         research_payload["factor_attribution"] = factor_attribution_payload
+        research_payload["factor_intelligence"] = factor_intelligence_payload
         research_payload["walk_forward"] = walk_forward_payload
         research_payload["portfolio_research"] = portfolio_research_payload
         research_payload["strategy_lab"] = strategy_lab_payload
@@ -637,6 +640,18 @@ def load_research_summary(database_url: str | None = None, selected_run_id: str 
                     "top_factor_combinations": {},
                 },
                 "factor_options": [],
+            },
+            "factor_intelligence": {
+                "db_connected": False,
+                "latest_run": {},
+                "leaderboard": [],
+                "predictive": [],
+                "bucket": [],
+                "stability": [],
+                "regime": [],
+                "redundancy": [],
+                "warnings": [],
+                "research_note": "Historical research analytics only. No automatic strategy-weight updates.",
             },
             "walk_forward": {
                 "db_connected": False,
@@ -2485,6 +2500,71 @@ def render_orders_page(payload):
 
 
 def render_performance_page(payload):
+    research_payload = st.session_state.get("dashboard_research_payload") or {}
+    perf_payload = research_payload.get("performance_intelligence") or {}
+    latest_perf_run = perf_payload.get("latest_run") or {}
+    perf_metrics = perf_payload.get("metrics_map") or {}
+    perf_daily_equity = list(perf_payload.get("daily_equity") or [])
+    perf_trade_stats = list(perf_payload.get("trade_statistics") or [])
+    perf_snapshots = list(perf_payload.get("portfolio_snapshots") or [])
+
+    if latest_perf_run and perf_daily_equity:
+        st.markdown("### PERFORMANCE INTELLIGENCE - READ ONLY")
+        metric_cols = st.columns(6)
+        _metric_card(metric_cols[0], "Portfolio Value", perf_metrics.get("portfolio_value", 0.0), "healthy")
+        _metric_card(metric_cols[1], "Cash", perf_metrics.get("cash", 0.0), "neutral")
+        _metric_card(metric_cols[2], "Win Rate", perf_metrics.get("win_rate", 0.0), "neutral")
+        _metric_card(metric_cols[3], "Sharpe", perf_metrics.get("sharpe_ratio", 0.0), "neutral")
+        _metric_card(metric_cols[4], "Sortino", perf_metrics.get("sortino_ratio", 0.0), "neutral")
+        _metric_card(metric_cols[5], "Calmar", perf_metrics.get("calmar_ratio", 0.0), "neutral")
+
+        st.markdown("#### Equity Curve")
+        st.line_chart({"portfolio_value": [_as_float(item.get("portfolio_value"), 0.0) for item in perf_daily_equity]})
+
+        st.markdown("#### Daily Returns")
+        st.line_chart({"daily_return": [_as_float(item.get("daily_return"), 0.0) for item in perf_daily_equity]})
+
+        st.markdown("#### Drawdown Chart")
+        st.line_chart({"drawdown": [_as_float(item.get("current_drawdown"), 0.0) for item in perf_daily_equity]})
+
+        st.markdown("#### Benchmark Comparison")
+        st.dataframe(
+            [
+                {
+                    "alpha": perf_metrics.get("alpha"),
+                    "beta": perf_metrics.get("beta"),
+                    "tracking_error": perf_metrics.get("tracking_error"),
+                    "excess_return": perf_metrics.get("excess_return"),
+                    "information_ratio": perf_metrics.get("information_ratio"),
+                }
+            ]
+        )
+
+        st.markdown("#### Trade Statistics")
+        st.dataframe(perf_trade_stats)
+
+        st.markdown("#### Sector Allocation")
+        latest_snapshot = perf_snapshots[-1] if perf_snapshots else {}
+        sector_alloc = latest_snapshot.get("sector_allocation") or {}
+        st.dataframe([{"sector": key, "weight": value} for key, value in sorted(sector_alloc.items())])
+
+        st.markdown("#### Position Concentration")
+        st.dataframe(
+            [
+                {
+                    "exposure_pct": perf_metrics.get("exposure_pct"),
+                    "position_concentration": perf_metrics.get("position_concentration"),
+                    "turnover": perf_metrics.get("turnover"),
+                }
+            ]
+        )
+
+        st.markdown("#### Reports")
+        st.dataframe([perf_payload.get("daily_report") or {}])
+        st.dataframe(perf_payload.get("weekly_summary") or [])
+        st.dataframe(perf_payload.get("monthly_summary") or [])
+        return
+
     history = payload.get("portfolio_history") or []
     signal_history = payload.get("signal_history") or []
     order_count_by_day = payload.get("order_count_by_day") or []
@@ -2523,6 +2603,41 @@ def render_performance_page(payload):
         _safe_plotly_chart(drawdown_fig, "Drawdown chart unavailable")
     else:
         st.info("More paper-trading history is needed before this metric is meaningful.")
+
+
+def render_daily_run_page():
+    st.markdown("### DAILY RUN - READ ONLY")
+    payload = st.session_state.get("dashboard_research_payload") or {}
+    daily_payload = payload.get("daily_runs") or {"db_connected": False, "latest_run": {}, "history": []}
+    latest_run = daily_payload.get("latest_run") or {}
+    history = list(daily_payload.get("history") or [])
+    report = latest_run.get("report") or {}
+
+    cols = st.columns(6)
+    _metric_card(cols[0], "Run ID", _safe_text(latest_run.get("run_id"), "N/A"), "neutral")
+    _metric_card(cols[1], "Status", _safe_text(latest_run.get("execution_status"), "N/A"), "warning")
+    _metric_card(cols[2], "Session", _safe_text(latest_run.get("market_session"), "N/A"), "neutral")
+    _metric_card(cols[3], "Candidates", latest_run.get("candidate_count", 0), "neutral")
+    _metric_card(cols[4], "Qualified", latest_run.get("qualified_count", 0), "healthy")
+    _metric_card(cols[5], "Selected", ", ".join(latest_run.get("selected_symbols") or []), "neutral")
+
+    st.markdown("#### Research Summary")
+    st.dataframe(
+        [
+            {
+                "timestamp": latest_run.get("timestamp"),
+                "market_status": latest_run.get("market_status"),
+                "performance_run_id": latest_run.get("performance_run_id"),
+                "paper_validation_run_id": latest_run.get("paper_validation_run_id"),
+            }
+        ]
+    )
+
+    st.markdown("#### Performance Summary")
+    st.dataframe([report])
+
+    st.markdown("#### Historical Runs")
+    st.dataframe(history)
 
     if signal_history:
         dist = {"BUY": 0, "HOLD": 0, "SELL": 0}
@@ -3051,36 +3166,109 @@ def render_research_page():
                 st.info(f"No data available for {label}")
             st.download_button(label, blob, file_name=sanitize_identifier(file_name.replace(".json", "")) + ".json", mime="application/json", key=key, disabled=not has_rows)
 
-    st.markdown("### Read-only exports")
-    export_payload = {
-        "recent_runs": recent_runs,
-        "candidates": candidate_rows,
-        "analytics": analytics,
-    }
-    export_blobs = {
-        "recent_runs": json.dumps(export_payload["recent_runs"], indent=2, sort_keys=True),
-        "candidates": json.dumps(export_payload["candidates"], indent=2, sort_keys=True),
-        "analytics": json.dumps(export_payload["analytics"], indent=2, sort_keys=True),
-    }
-    if hasattr(st, "download_button"):
-        exports = [
-            ("Recent research scans JSON", export_payload.get("recent_runs", []), export_blobs["recent_runs"], "research_runs.json", "application/json", "download_research_runs"),
-            ("Research candidates JSON", export_payload.get("candidates", []), export_blobs["candidates"], "research_candidates.json", "application/json", "download_research_candidates"),
-            ("Research analytics JSON", export_payload.get("recent_runs", []) or export_payload.get("candidates", []), export_blobs["analytics"], "research_analytics.json", "application/json", "download_research_analytics"),
-        ]
-        for label, rows, blob, file_name, mime_type, key in exports:
-            has_rows = bool(rows)
-            if not has_rows:
-                st.info(f"No data available for {label}")
-            st.download_button(
-                label,
-                blob,
-                file_name=sanitize_identifier(file_name.replace(".json", "")) + ".json",
-                mime=mime_type,
-                key=key,
-                disabled=not has_rows,
-            )
 
+def render_factor_intelligence_page():
+    st.markdown("### FACTOR INTELLIGENCE — READ ONLY")
+    payload = st.session_state.get("dashboard_research_payload") or {}
+    factor_payload = payload.get("factor_intelligence") or {
+        "db_connected": False,
+        "latest_run": {},
+        "leaderboard": [],
+        "predictive": [],
+        "bucket": [],
+        "stability": [],
+        "regime": [],
+        "redundancy": [],
+        "warnings": [],
+        "research_note": "Historical research analytics only. No automatic strategy-weight updates.",
+    }
+    latest_run = factor_payload.get("latest_run") or {}
+    leaderboard = list(factor_payload.get("leaderboard") or [])
+    predictive = list(factor_payload.get("predictive") or [])
+    bucket = list(factor_payload.get("bucket") or [])
+    stability = list(factor_payload.get("stability") or [])
+    regime = list(factor_payload.get("regime") or [])
+    redundancy = list(factor_payload.get("redundancy") or [])
+
+    cols = st.columns(6)
+    _metric_card(cols[0], "Run ID", _safe_text(latest_run.get("run_id"), "N/A"), "neutral")
+    _metric_card(cols[1], "Status", _safe_text(latest_run.get("status"), "unknown"), "warning")
+    _metric_card(cols[2], "Date Range", f"{_safe_text(latest_run.get('analysis_start_date'), 'N/A')} -> {_safe_text(latest_run.get('analysis_end_date'), 'N/A')}", "neutral")
+    _metric_card(cols[3], "Forward Horizon", latest_run.get("forward_horizon", "N/A"), "neutral")
+    _metric_card(cols[4], "Sample Count", latest_run.get("sample_count", 0), "healthy")
+    _metric_card(cols[5], "Leaderboard Rows", len(leaderboard), "neutral")
+
+    st.info(_safe_text(factor_payload.get("research_note"), "Historical research analytics only"))
+    warnings = factor_payload.get("warnings") or []
+    if warnings:
+        st.warning(" | ".join(str(item) for item in warnings))
+
+    st.markdown("#### Factor Leaderboard")
+    if leaderboard:
+        leaderboard_rows = []
+        for idx, row in enumerate(leaderboard, start=1):
+            leaderboard_rows.append(
+                {
+                    "rank": idx,
+                    "factor": row.get("name") or row.get("factor_id"),
+                    "category": row.get("category"),
+                    "version": row.get("factor_version"),
+                    "overall_research_score": row.get("overall_research_score"),
+                    "predictive_score": row.get("predictive_score"),
+                    "stability_score": row.get("stability_score"),
+                    "regime_score": row.get("regime_score"),
+                    "sample_count": row.get("sample_count"),
+                    "confidence": row.get("confidence_classification"),
+                    "warning_count": len(row.get("warnings") or []),
+                }
+            )
+        st.dataframe(leaderboard_rows)
+    else:
+        st.info("No completed factor intelligence run found yet.")
+
+    st.markdown("#### Predictive Power")
+    st.dataframe(predictive)
+    st.markdown("#### Bucket / Decile Analysis")
+    st.dataframe(bucket)
+    st.markdown("#### Walk-Forward Stability")
+    st.dataframe(stability)
+    st.markdown("#### Regime Comparison")
+    st.dataframe(regime)
+    st.markdown("#### Redundancy Matrix")
+    st.dataframe(redundancy)
+
+    if leaderboard:
+        selected_factor = st.selectbox("Factor detail", [f"{row.get('factor_id')}:{row.get('factor_version')}" for row in leaderboard], key="dashboard_factor_intelligence_factor")
+        target = next((row for row in leaderboard if f"{row.get('factor_id')}:{row.get('factor_version')}" == selected_factor), {})
+        st.markdown("#### Explanation Panel")
+        st.dataframe(
+            {
+                "strongest_evidence": target.get("strongest_evidence") or [],
+                "weakest_evidence": target.get("weakest_evidence") or [],
+                "warnings": target.get("warnings") or [],
+            }
+        )
+
+    if hasattr(st, "download_button"):
+        export_payload = {
+            "latest_run": latest_run,
+            "leaderboard": leaderboard,
+            "predictive": predictive,
+            "bucket": bucket,
+            "stability": stability,
+            "regime": regime,
+            "redundancy": redundancy,
+            "warnings": warnings,
+        }
+        export_blob = json.dumps(export_payload, indent=2, sort_keys=True)
+        st.download_button(
+            "Factor intelligence JSON",
+            export_blob,
+            file_name=sanitize_identifier("factor_intelligence_dashboard") + ".json",
+            mime="application/json",
+            key="download_factor_intelligence_dashboard",
+            disabled=not bool(leaderboard or predictive),
+        )
 
 def render_dashboard(database_url: str | None = None):
     if st is None:
@@ -3168,13 +3356,15 @@ def render_dashboard(database_url: str | None = None):
         "Alerts": render_alerts_page,
         "Research": render_research_page,
         "Factor Attribution": render_factor_attribution_page,
+        "Factor Intelligence": render_factor_intelligence_page,
         "Walk-Forward Validation": render_walk_forward_validation_page,
         "Portfolio Research": render_portfolio_research_page,
         "Strategy Laboratory": render_strategy_laboratory_page,
         "Paper Validation": render_paper_validation_page,
+        "Daily Run": render_daily_run_page,
     }
     page_renderer = page_renderers.get(selected_page, render_overview_page)
-    if selected_page in {"Research", "Factor Attribution", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation"}:
+    if selected_page in {"Research", "Factor Attribution", "Factor Intelligence", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"}:
         _render_with_error_guard("Research", page_renderer)
     elif selected_page in {"Orders", "Performance"}:
         _render_with_error_guard(selected_page, page_renderer, payload)

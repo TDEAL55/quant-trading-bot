@@ -1,0 +1,1548 @@
+{
+  "candidates": [
+    {
+      "average_dollar_volume": 3728966277.9636,
+      "company_name": "JPM",
+      "confidence": 68.82,
+      "created_at": "2026-07-18T21:31:23.834863+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 86.24,
+          "risk_quality": 81.0,
+          "trend": 100.0,
+          "volatility": 69.7,
+          "volume": 50.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 3728966277.9636,
+              "average_volume_20": 11170345.0,
+              "history_rows": 685,
+              "latest_price": 341.1,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 341.1,
+      "liquidity_score": 91.4318,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 86.24,
+      "observed_order": 1,
+      "overall_score": 83.02,
+      "rank": 1,
+      "ranking_score": 82.4162,
+      "rejection_reasons": [],
+      "rejection_status": "ELIGIBLE",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 81.0,
+      "sector": "Unknown",
+      "signal": "STRONG_BUY",
+      "strategy_reasons": [
+        "Price is above the 20-day EMA",
+        "EMA 20 is above EMA 50",
+        "RSI shows positive but not extreme momentum",
+        "MACD remains bullish",
+        "ATR indicates stable, tradeable movement",
+        "Realized volatility remains contained"
+      ],
+      "symbol": "JPM",
+      "trend_score": 100.0,
+      "volatility_score": 69.7,
+      "volume_score": 50.0
+    },
+    {
+      "average_dollar_volume": 2785974664.2342,
+      "company_name": "UNH",
+      "confidence": 66.35,
+      "created_at": "2026-07-18T21:31:24.132779+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 48.26,
+          "risk_quality": 81.0,
+          "trend": 100.0,
+          "volatility": 68.21,
+          "volume": 86.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 2785974664.2342,
+              "average_volume_20": 6643785.0,
+              "history_rows": 685,
+              "latest_price": 426.09,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 426.09,
+      "liquidity_score": 88.8995,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 48.26,
+      "observed_order": 2,
+      "overall_score": 80.67,
+      "rank": 2,
+      "ranking_score": 80.6115,
+      "rejection_reasons": [],
+      "rejection_status": "ELIGIBLE",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 81.0,
+      "sector": "Unknown",
+      "signal": "STRONG_BUY",
+      "strategy_reasons": [
+        "Price is above the 20-day EMA",
+        "EMA 20 is above EMA 50",
+        "RSI shows positive but not extreme momentum",
+        "Price strength is supported by above-average volume",
+        "Current volume is well above the 20-day average",
+        "ATR indicates stable, tradeable movement"
+      ],
+      "symbol": "UNH",
+      "trend_score": 100.0,
+      "volatility_score": 68.21,
+      "volume_score": 86.0
+    },
+    {
+      "average_dollar_volume": 20263453156.3556,
+      "company_name": "AAPL",
+      "confidence": 65.49,
+      "created_at": "2026-07-18T21:31:23.216612+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 86.0,
+          "risk_quality": 71.0,
+          "trend": 100.0,
+          "volatility": 69.78,
+          "volume": 44.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 20263453156.3556,
+              "average_volume_20": 67415835.0,
+              "history_rows": 685,
+              "latest_price": 333.74,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 333.74,
+      "liquidity_score": 100.0,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 86.0,
+      "observed_order": 3,
+      "overall_score": 81.08,
+      "rank": 3,
+      "ranking_score": 80.234,
+      "rejection_reasons": [],
+      "rejection_status": "ELIGIBLE",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 71.0,
+      "sector": "Unknown",
+      "signal": "STRONG_BUY",
+      "strategy_reasons": [
+        "Price is above the 20-day EMA",
+        "EMA 20 is above EMA 50",
+        "MACD remains bullish",
+        "MACD histogram is positive",
+        "ATR indicates stable, tradeable movement",
+        "Realized volatility remains contained"
+      ],
+      "symbol": "AAPL",
+      "trend_score": 100.0,
+      "volatility_score": 69.78,
+      "volume_score": 44.0
+    },
+    {
+      "average_dollar_volume": 2430859894.4696,
+      "company_name": "XOM",
+      "confidence": 70.28,
+      "created_at": "2026-07-18T21:31:23.922564+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 98.0,
+          "risk_quality": 65.0,
+          "trend": 72.54,
+          "volatility": 69.1,
+          "volume": 50.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 2430859894.4696,
+              "average_volume_20": 17408130.0,
+              "history_rows": 685,
+              "latest_price": 147.36,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 147.36,
+      "liquidity_score": 87.7152,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 98.0,
+      "observed_order": 4,
+      "overall_score": 75.47,
+      "rank": 4,
+      "ranking_score": 73.793,
+      "rejection_reasons": [],
+      "rejection_status": "ELIGIBLE",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 65.0,
+      "sector": "Unknown",
+      "signal": "BUY",
+      "strategy_reasons": [
+        "Price is above the 20-day EMA",
+        "EMA 50 is above EMA 200",
+        "RSI shows positive but not extreme momentum",
+        "MACD remains bullish",
+        "ATR indicates stable, tradeable movement",
+        "Realized volatility remains contained"
+      ],
+      "symbol": "XOM",
+      "trend_score": 72.54,
+      "volatility_score": 69.1,
+      "volume_score": 50.0
+    },
+    {
+      "average_dollar_volume": 14669889067.1937,
+      "company_name": "AMZN",
+      "confidence": 73.0,
+      "created_at": "2026-07-18T21:31:23.219545+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 72.82,
+          "risk_quality": 65.0,
+          "trend": 75.76,
+          "volatility": 68.04,
+          "volume": 44.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 14669889067.1937,
+              "average_volume_20": 61281020.0,
+              "history_rows": 685,
+              "latest_price": 247.23,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 247.23,
+      "liquidity_score": 100.0,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 72.82,
+      "observed_order": 5,
+      "overall_score": 70.39,
+      "rank": 5,
+      "ranking_score": 73.6015,
+      "rejection_reasons": [],
+      "rejection_status": "ELIGIBLE",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 65.0,
+      "sector": "Unknown",
+      "signal": "BUY",
+      "strategy_reasons": [
+        "Price is above the 20-day EMA",
+        "EMA 50 is above EMA 200",
+        "MACD remains bullish",
+        "MACD histogram is positive",
+        "ATR indicates stable, tradeable movement",
+        "Realized volatility remains contained"
+      ],
+      "symbol": "AMZN",
+      "trend_score": 75.76,
+      "volatility_score": 68.04,
+      "volume_score": 44.0
+    },
+    {
+      "average_dollar_volume": 12769808575.9799,
+      "company_name": "META",
+      "confidence": 63.56,
+      "created_at": "2026-07-18T21:31:23.489870+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 98.0,
+          "risk_quality": 65.0,
+          "trend": 70.79,
+          "volatility": 44.96,
+          "volume": 44.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 12769808575.9799,
+              "average_volume_20": 20907800.0,
+              "history_rows": 685,
+              "latest_price": 646.01,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 646.01,
+      "liquidity_score": 100.0,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 98.0,
+      "observed_order": 6,
+      "overall_score": 71.63,
+      "rank": 6,
+      "ranking_score": 71.7745,
+      "rejection_reasons": [],
+      "rejection_status": "ELIGIBLE",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 65.0,
+      "sector": "Unknown",
+      "signal": "BUY",
+      "strategy_reasons": [
+        "Price is above the 20-day EMA",
+        "EMA 20 is above EMA 50",
+        "RSI shows positive but not extreme momentum",
+        "MACD remains bullish",
+        "Benchmark is above the 50-day and 200-day EMAs",
+        "ATR percentage is in a manageable range"
+      ],
+      "symbol": "META",
+      "trend_score": 70.79,
+      "volatility_score": 44.96,
+      "volume_score": 44.0
+    },
+    {
+      "average_dollar_volume": 29306262380.8431,
+      "company_name": "NVDA",
+      "confidence": 65.86,
+      "created_at": "2026-07-18T21:31:23.520836+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 76.14,
+          "risk_quality": 47.0,
+          "trend": 80.3,
+          "volatility": 66.33,
+          "volume": 44.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 29306262380.8431,
+              "average_volume_20": 144982100.0,
+              "history_rows": 685,
+              "latest_price": 202.81,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 202.81,
+      "liquidity_score": 100.0,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 76.14,
+      "observed_order": 7,
+      "overall_score": 70.45,
+      "rank": 7,
+      "ranking_score": 69.9545,
+      "rejection_reasons": [],
+      "rejection_status": "ELIGIBLE",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 47.0,
+      "sector": "Unknown",
+      "signal": "BUY",
+      "strategy_reasons": [
+        "EMA 20 is above EMA 50",
+        "EMA 50 is above EMA 200",
+        "MACD remains bullish",
+        "MACD histogram is positive",
+        "ATR indicates stable, tradeable movement",
+        "Realized volatility remains contained"
+      ],
+      "symbol": "NVDA",
+      "trend_score": 80.3,
+      "volatility_score": 66.33,
+      "volume_score": 44.0
+    },
+    {
+      "average_dollar_volume": 39016356672.7686,
+      "company_name": "SPY",
+      "confidence": 57.98,
+      "created_at": "2026-07-18T21:31:23.215718+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 32.46,
+          "risk_quality": 81.0,
+          "trend": 80.51,
+          "volatility": 65.9,
+          "volume": 44.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 39016356672.7686,
+              "average_volume_20": 52437205.0,
+              "history_rows": 685,
+              "latest_price": 743.29,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 743.29,
+      "liquidity_score": 0.0,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 32.46,
+      "observed_order": 8,
+      "overall_score": 65.13,
+      "rank": null,
+      "ranking_score": null,
+      "rejection_reasons": [
+        "overall score below minimum (65.13 < 70.00)",
+        "confidence below minimum (57.98 < 60.00)"
+      ],
+      "rejection_status": "REJECTED",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 81.0,
+      "sector": "Unknown",
+      "signal": "BUY",
+      "strategy_reasons": [
+        "EMA 20 is above EMA 50",
+        "EMA 50 is above EMA 200",
+        "ATR indicates stable, tradeable movement",
+        "Realized volatility remains contained",
+        "Benchmark is above the 50-day and 200-day EMAs",
+        "ATR percentage is in a manageable range"
+      ],
+      "symbol": "SPY",
+      "trend_score": 80.51,
+      "volatility_score": 65.9,
+      "volume_score": 44.0
+    },
+    {
+      "average_dollar_volume": 29984786419.9387,
+      "company_name": "QQQ",
+      "confidence": 56.61,
+      "created_at": "2026-07-18T21:31:23.216019+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 25.64,
+          "risk_quality": 75.0,
+          "trend": 68.77,
+          "volatility": 69.2,
+          "volume": 50.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 29984786419.9387,
+              "average_volume_20": 41773745.0,
+              "history_rows": 685,
+              "latest_price": 695.33,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 695.33,
+      "liquidity_score": 0.0,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 25.64,
+      "observed_order": 9,
+      "overall_score": 60.88,
+      "rank": null,
+      "ranking_score": null,
+      "rejection_reasons": [
+        "signal is not in allowed scanner signals",
+        "overall score below minimum (60.88 < 70.00)",
+        "confidence below minimum (56.61 < 60.00)"
+      ],
+      "rejection_status": "REJECTED",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 75.0,
+      "sector": "Unknown",
+      "signal": "HOLD",
+      "strategy_reasons": [
+        "EMA 20 is above EMA 50",
+        "EMA 50 is above EMA 200",
+        "ATR indicates stable, tradeable movement",
+        "Realized volatility remains contained",
+        "Benchmark is above the 50-day and 200-day EMAs",
+        "ATR percentage is in a manageable range"
+      ],
+      "symbol": "QQQ",
+      "trend_score": 68.77,
+      "volatility_score": 69.2,
+      "volume_score": 50.0
+    },
+    {
+      "average_dollar_volume": 17715657856.5593,
+      "company_name": "MSFT",
+      "confidence": 57.53,
+      "created_at": "2026-07-18T21:31:23.217382+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 71.28,
+          "risk_quality": 47.0,
+          "trend": 30.91,
+          "volatility": 68.47,
+          "volume": 44.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 17715657856.5593,
+              "average_volume_20": 46852100.0,
+              "history_rows": 685,
+              "latest_price": 393.82,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 393.82,
+      "liquidity_score": 0.0,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 71.28,
+      "observed_order": 10,
+      "overall_score": 54.88,
+      "rank": null,
+      "ranking_score": null,
+      "rejection_reasons": [
+        "signal is not in allowed scanner signals",
+        "overall score below minimum (54.88 < 70.00)",
+        "confidence below minimum (57.53 < 60.00)"
+      ],
+      "rejection_status": "REJECTED",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 47.0,
+      "sector": "Unknown",
+      "signal": "HOLD",
+      "strategy_reasons": [
+        "Price is above the 20-day EMA",
+        "EMA 20 is rising",
+        "MACD remains bullish",
+        "MACD histogram is positive",
+        "ATR indicates stable, tradeable movement",
+        "Realized volatility remains contained"
+      ],
+      "symbol": "MSFT",
+      "trend_score": 30.91,
+      "volatility_score": 68.47,
+      "volume_score": 44.0
+    },
+    {
+      "average_dollar_volume": 12475256837.744,
+      "company_name": "GOOGL",
+      "confidence": 54.63,
+      "created_at": "2026-07-18T21:31:23.263922+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 30.01,
+          "risk_quality": 47.0,
+          "trend": 45.14,
+          "volatility": 67.63,
+          "volume": 44.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 12475256837.744,
+              "average_volume_20": 35355740.0,
+              "history_rows": 685,
+              "latest_price": 346.77,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 346.77,
+      "liquidity_score": 0.0,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 30.01,
+      "observed_order": 11,
+      "overall_score": 50.81,
+      "rank": null,
+      "ranking_score": null,
+      "rejection_reasons": [
+        "signal is not in allowed scanner signals",
+        "overall score below minimum (50.81 < 70.00)",
+        "confidence below minimum (54.63 < 60.00)"
+      ],
+      "rejection_status": "REJECTED",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 47.0,
+      "sector": "Unknown",
+      "signal": "HOLD",
+      "strategy_reasons": [
+        "EMA 50 is above EMA 200",
+        "EMA 200 is rising",
+        "ATR indicates stable, tradeable movement",
+        "Realized volatility remains contained",
+        "Benchmark is above the 50-day and 200-day EMAs",
+        "ATR percentage is in a manageable range"
+      ],
+      "symbol": "GOOGL",
+      "trend_score": 45.14,
+      "volatility_score": 67.63,
+      "volume_score": 44.0
+    },
+    {
+      "average_dollar_volume": 15610267488.6383,
+      "company_name": "AMD",
+      "confidence": 46.42,
+      "created_at": "2026-07-18T21:31:23.532814+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 22.33,
+          "risk_quality": 10.0,
+          "trend": 80.0,
+          "volatility": 12.57,
+          "volume": 44.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 15610267488.6383,
+              "average_volume_20": 29313590.0,
+              "history_rows": 685,
+              "latest_price": 495.76,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 495.76,
+      "liquidity_score": 0.0,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 22.33,
+      "observed_order": 12,
+      "overall_score": 50.52,
+      "rank": null,
+      "ranking_score": null,
+      "rejection_reasons": [
+        "signal is not in allowed scanner signals",
+        "overall score below minimum (50.52 < 70.00)",
+        "confidence below minimum (46.42 < 60.00)",
+        "risk-quality score below minimum (10.00 < 45.00)",
+        "volatility factor below minimum (12.57 < 35.00)"
+      ],
+      "rejection_status": "REJECTED",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 10.0,
+      "sector": "Unknown",
+      "signal": "HOLD",
+      "strategy_reasons": [
+        "EMA 20 is above EMA 50",
+        "EMA 50 is above EMA 200",
+        "Benchmark is above the 50-day and 200-day EMAs"
+      ],
+      "symbol": "AMD",
+      "trend_score": 80.0,
+      "volatility_score": 12.57,
+      "volume_score": 44.0
+    },
+    {
+      "average_dollar_volume": 10000696130.694,
+      "company_name": "AVGO",
+      "confidence": 52.03,
+      "created_at": "2026-07-18T21:31:23.544644+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 74.32,
+          "risk_quality": 32.0,
+          "trend": 39.37,
+          "volatility": 46.41,
+          "volume": 44.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 10000696130.694,
+              "average_volume_20": 26166705.0,
+              "history_rows": 685,
+              "latest_price": 370.83,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 370.83,
+      "liquidity_score": 0.0,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 74.32,
+      "observed_order": 13,
+      "overall_score": 54.32,
+      "rank": null,
+      "ranking_score": null,
+      "rejection_reasons": [
+        "signal is not in allowed scanner signals",
+        "overall score below minimum (54.32 < 70.00)",
+        "confidence below minimum (52.03 < 60.00)",
+        "risk-quality score below minimum (32.00 < 45.00)"
+      ],
+      "rejection_status": "REJECTED",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 32.0,
+      "sector": "Unknown",
+      "signal": "HOLD",
+      "strategy_reasons": [
+        "EMA 50 is above EMA 200",
+        "EMA 200 is rising",
+        "MACD remains bullish",
+        "MACD histogram is positive",
+        "ATR indicates stable, tradeable movement",
+        "Benchmark is above the 50-day and 200-day EMAs"
+      ],
+      "symbol": "AVGO",
+      "trend_score": 39.37,
+      "volatility_score": 46.41,
+      "volume_score": 44.0
+    },
+    {
+      "average_dollar_volume": 2074453912.988,
+      "company_name": "VRT",
+      "confidence": 52.57,
+      "created_at": "2026-07-18T21:31:23.549571+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 23.43,
+          "risk_quality": 10.0,
+          "trend": 43.23,
+          "volatility": 15.41,
+          "volume": 44.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 2074453912.988,
+              "average_volume_20": 6592975.0,
+              "history_rows": 685,
+              "latest_price": 289.56,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 289.56,
+      "liquidity_score": 0.0,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 23.43,
+      "observed_order": 14,
+      "overall_score": 40.0,
+      "rank": null,
+      "ranking_score": null,
+      "rejection_reasons": [
+        "signal is not in allowed scanner signals",
+        "overall score below minimum (40.00 < 70.00)",
+        "confidence below minimum (52.57 < 60.00)",
+        "risk-quality score below minimum (10.00 < 45.00)",
+        "volatility factor below minimum (15.41 < 35.00)"
+      ],
+      "rejection_status": "REJECTED",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 10.0,
+      "sector": "Unknown",
+      "signal": "REDUCE",
+      "strategy_reasons": [
+        "EMA 50 is above EMA 200",
+        "EMA 200 is rising",
+        "Benchmark is above the 50-day and 200-day EMAs"
+      ],
+      "symbol": "VRT",
+      "trend_score": 43.23,
+      "volatility_score": 15.41,
+      "volume_score": 44.0
+    },
+    {
+      "average_dollar_volume": 919145005.4606,
+      "company_name": "CEG",
+      "confidence": 48.6,
+      "created_at": "2026-07-18T21:31:23.697224+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 78.24,
+          "risk_quality": 47.0,
+          "trend": 0.0,
+          "volatility": 66.0,
+          "volume": 19.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 919145005.4606,
+              "average_volume_20": 3608370.0,
+              "history_rows": 685,
+              "latest_price": 252.39,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 252.39,
+      "liquidity_score": 0.0,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 78.24,
+      "observed_order": 15,
+      "overall_score": 43.0,
+      "rank": null,
+      "ranking_score": null,
+      "rejection_reasons": [
+        "signal is not in allowed scanner signals",
+        "overall score below minimum (43.00 < 70.00)",
+        "confidence below minimum (48.60 < 60.00)"
+      ],
+      "rejection_status": "REJECTED",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 47.0,
+      "sector": "Unknown",
+      "signal": "REDUCE",
+      "strategy_reasons": [
+        "MACD remains bullish",
+        "MACD histogram is positive",
+        "ATR indicates stable, tradeable movement",
+        "Realized volatility remains contained",
+        "Benchmark is above the 50-day and 200-day EMAs",
+        "ATR percentage is in a manageable range"
+      ],
+      "symbol": "CEG",
+      "trend_score": 0.0,
+      "volatility_score": 66.0,
+      "volume_score": 19.0
+    },
+    {
+      "average_dollar_volume": 699819403.6623,
+      "company_name": "VST",
+      "confidence": 56.39,
+      "created_at": "2026-07-18T21:31:23.725045+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 34.36,
+          "risk_quality": 65.0,
+          "trend": 36.51,
+          "volatility": 63.53,
+          "volume": 56.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 699819403.6623,
+              "average_volume_20": 4398145.0,
+              "history_rows": 685,
+              "latest_price": 155.44,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 155.44,
+      "liquidity_score": 0.0,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 34.36,
+      "observed_order": 16,
+      "overall_score": 52.28,
+      "rank": null,
+      "ranking_score": null,
+      "rejection_reasons": [
+        "signal is not in allowed scanner signals",
+        "overall score below minimum (52.28 < 70.00)",
+        "confidence below minimum (56.39 < 60.00)"
+      ],
+      "rejection_status": "REJECTED",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 65.0,
+      "sector": "Unknown",
+      "signal": "HOLD",
+      "strategy_reasons": [
+        "EMA 20 is above EMA 50",
+        "Recent volume trend is improving",
+        "Realized volatility remains contained",
+        "Benchmark is above the 50-day and 200-day EMAs",
+        "ATR percentage is in a manageable range"
+      ],
+      "symbol": "VST",
+      "trend_score": 36.51,
+      "volatility_score": 63.53,
+      "volume_score": 56.0
+    },
+    {
+      "average_dollar_volume": 721436658.4132,
+      "company_name": "DLR",
+      "confidence": 51.64,
+      "created_at": "2026-07-18T21:31:23.821879+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 30.5,
+          "risk_quality": 47.0,
+          "trend": 33.34,
+          "volatility": 68.64,
+          "volume": 19.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 721436658.4132,
+              "average_volume_20": 3985845.0,
+              "history_rows": 685,
+              "latest_price": 173.88,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 173.88,
+      "liquidity_score": 0.0,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 30.5,
+      "observed_order": 17,
+      "overall_score": 43.72,
+      "rank": null,
+      "ranking_score": null,
+      "rejection_reasons": [
+        "signal is not in allowed scanner signals",
+        "overall score below minimum (43.72 < 70.00)",
+        "confidence below minimum (51.64 < 60.00)"
+      ],
+      "rejection_status": "REJECTED",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 47.0,
+      "sector": "Unknown",
+      "signal": "REDUCE",
+      "strategy_reasons": [
+        "EMA 50 is above EMA 200",
+        "ATR indicates stable, tradeable movement",
+        "Realized volatility remains contained",
+        "Benchmark is above the 50-day and 200-day EMAs",
+        "ATR percentage is in a manageable range"
+      ],
+      "symbol": "DLR",
+      "trend_score": 33.34,
+      "volatility_score": 68.64,
+      "volume_score": 19.0
+    },
+    {
+      "average_dollar_volume": 675619994.4339,
+      "company_name": "EQIX",
+      "confidence": 51.15,
+      "created_at": "2026-07-18T21:31:23.824305+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 32.69,
+          "risk_quality": 75.0,
+          "trend": 40.46,
+          "volatility": 68.67,
+          "volume": 29.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 675619994.4339,
+              "average_volume_20": 641565.0,
+              "history_rows": 685,
+              "latest_price": 1020.0,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 1020.0,
+      "liquidity_score": 0.0,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 32.69,
+      "observed_order": 18,
+      "overall_score": 50.59,
+      "rank": null,
+      "ranking_score": null,
+      "rejection_reasons": [
+        "signal is not in allowed scanner signals",
+        "overall score below minimum (50.59 < 70.00)",
+        "confidence below minimum (51.15 < 60.00)"
+      ],
+      "rejection_status": "REJECTED",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 75.0,
+      "sector": "Unknown",
+      "signal": "HOLD",
+      "strategy_reasons": [
+        "EMA 50 is above EMA 200",
+        "EMA 200 is rising",
+        "ATR indicates stable, tradeable movement",
+        "Realized volatility remains contained",
+        "Benchmark is above the 50-day and 200-day EMAs",
+        "ATR percentage is in a manageable range"
+      ],
+      "symbol": "EQIX",
+      "trend_score": 40.46,
+      "volatility_score": 68.67,
+      "volume_score": 29.0
+    },
+    {
+      "average_dollar_volume": 2691721586.9586,
+      "company_name": "COST",
+      "confidence": 44.53,
+      "created_at": "2026-07-18T21:31:23.934838+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 67.96,
+          "risk_quality": 47.0,
+          "trend": 4.88,
+          "volatility": 69.72,
+          "volume": 44.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 2691721586.9586,
+              "average_volume_20": 2862105.0,
+              "history_rows": 685,
+              "latest_price": 940.87,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 940.87,
+      "liquidity_score": 0.0,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 67.96,
+      "observed_order": 19,
+      "overall_score": 46.53,
+      "rank": null,
+      "ranking_score": null,
+      "rejection_reasons": [
+        "signal is not in allowed scanner signals",
+        "overall score below minimum (46.53 < 70.00)",
+        "confidence below minimum (44.53 < 60.00)"
+      ],
+      "rejection_status": "REJECTED",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 47.0,
+      "sector": "Unknown",
+      "signal": "HOLD",
+      "strategy_reasons": [
+        "MACD remains bullish",
+        "MACD histogram is positive",
+        "ATR indicates stable, tradeable movement",
+        "Realized volatility remains contained",
+        "Benchmark is above the 50-day and 200-day EMAs",
+        "ATR percentage is in a manageable range"
+      ],
+      "symbol": "COST",
+      "trend_score": 4.88,
+      "volatility_score": 69.72,
+      "volume_score": 44.0
+    },
+    {
+      "average_dollar_volume": 3667272026.7615,
+      "company_name": "LLY",
+      "confidence": 58.34,
+      "created_at": "2026-07-18T21:31:24.097779+00:00",
+      "factor_breakdown": {
+        "component_scores": {
+          "market_regime": 88.0,
+          "momentum": 42.84,
+          "risk_quality": 71.0,
+          "trend": 100.0,
+          "volatility": 67.41,
+          "volume": 29.0
+        },
+        "data_quality": {
+          "factor": {
+            "available_factor_count": 6,
+            "history_sufficient": true,
+            "volume_available": true
+          },
+          "filter": {
+            "metrics": {
+              "average_dollar_volume_20": 3667272026.7615,
+              "average_volume_20": 3121130.0,
+              "history_rows": 685,
+              "latest_price": 1179.11,
+              "missing_percent": 0.0,
+              "stale_business_days": 0
+            },
+            "passed": true,
+            "reasons": [],
+            "warnings": []
+          }
+        },
+        "factors": {
+          "available_factor_count": 6,
+          "history_sufficient": true,
+          "volume_available": true
+        },
+        "warnings": []
+      },
+      "industry": "Unknown",
+      "latest_price": 1179.11,
+      "liquidity_score": 0.0,
+      "market_regime": "strong_bull",
+      "market_regime_score": 88.0,
+      "momentum_score": 42.84,
+      "observed_order": 20,
+      "overall_score": 69.96,
+      "rank": null,
+      "ranking_score": null,
+      "rejection_reasons": [
+        "overall score below minimum (69.96 < 70.00)",
+        "confidence below minimum (58.34 < 60.00)"
+      ],
+      "rejection_status": "REJECTED",
+      "research_run_id": "research-20260718213124390554",
+      "risk_quality_score": 71.0,
+      "sector": "Unknown",
+      "signal": "BUY",
+      "strategy_reasons": [
+        "Price is above the 20-day EMA",
+        "EMA 20 is above EMA 50",
+        "RSI shows positive but not extreme momentum",
+        "ATR indicates stable, tradeable movement",
+        "Realized volatility remains contained",
+        "Benchmark is above the 50-day and 200-day EMAs"
+      ],
+      "symbol": "LLY",
+      "trend_score": 100.0,
+      "volatility_score": 67.41,
+      "volume_score": 29.0
+    }
+  ],
+  "run": {
+    "average_confidence": 58.089,
+    "average_overall_score": 60.7665,
+    "benchmark_symbol": "SPY",
+    "completed_at": "2026-07-18T21:31:24.390940+00:00",
+    "data_mode": "research",
+    "data_source": "live",
+    "eligible_count": 7,
+    "error_count": 0,
+    "factor_weights": {
+      "market_regime": 0.15,
+      "momentum": 0.2,
+      "risk_quality": 0.1,
+      "trend": 0.3,
+      "volatility": 0.1,
+      "volume": 0.15
+    },
+    "market_regime": "strong_bull",
+    "rejected_count": 13,
+    "research_run_id": "research-20260718213124390554",
+    "scanned_count": 20,
+    "scanner_config": {
+      "benchmark_symbol": "SPY",
+      "factor_weights": {
+        "market_regime": 0.15,
+        "momentum": 0.2,
+        "risk_quality": 0.1,
+        "trend": 0.3,
+        "volatility": 0.1,
+        "volume": 0.15
+      },
+      "research_journal_version": "sprint3-research-journal-v1",
+      "scanner_allowed_signals": [
+        "BUY",
+        "STRONG_BUY"
+      ],
+      "scanner_batch_size": 25,
+      "scanner_blocked_regimes": [
+        "strong_bear",
+        "high_volatility_risk_off"
+      ],
+      "scanner_excluded_symbols": [],
+      "scanner_include_etfs": true,
+      "scanner_max_missing_percent": 2.0,
+      "scanner_max_retries": 2,
+      "scanner_max_stale_business_days": 5,
+      "scanner_max_universe_size": 400,
+      "scanner_max_workers": 5,
+      "scanner_min_avg_dollar_volume": 20000000.0,
+      "scanner_min_confidence": 60.0,
+      "scanner_min_history_days": 220,
+      "scanner_min_price": 5.0,
+      "scanner_min_risk_quality": 45.0,
+      "scanner_min_score": 70.0,
+      "scanner_min_volatility_score": 35.0,
+      "scanner_symbol_timeout_seconds": 45,
+      "scanner_universes": [
+        "sp500",
+        "nasdaq100",
+        "midcap_liquid",
+        "ai_software",
+        "semiconductors",
+        "data_center_infra",
+        "utilities_power",
+        "data_center_reits",
+        "benchmarks"
+      ],
+      "scanner_version": "sprint2-scanner-v1",
+      "signal_thresholds": {
+        "buy": 65.0,
+        "hold": 45.0,
+        "reduce": 30.0,
+        "strong_buy": 80.0
+      },
+      "strategy_version": "multi_factor-v1"
+    },
+    "scanner_duration_seconds": 1.2005,
+    "scanner_summary": {
+      "avg_symbol_seconds": 0.06,
+      "benchmark_reused": true,
+      "benchmark_rows": 685,
+      "benchmark_symbol": "SPY",
+      "cache_hits": 0,
+      "duration_seconds": 1.2005,
+      "eligible_count": 7,
+      "error_count": 0,
+      "rejection_count": 13,
+      "retry_count": 0,
+      "success_count": 7,
+      "symbol_count": 20
+    },
+    "scanner_version": "sprint2-scanner-v1",
+    "started_at": "2026-07-18T21:31:24.390960+00:00",
+    "status": "completed",
+    "strategy_version": "multi_factor-v1",
+    "universe_size": 20
+  }
+}

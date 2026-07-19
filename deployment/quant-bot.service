@@ -1,0 +1,16 @@
+[Unit]
+Description=Quant Bot Unattended Paper Daily Run
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Restart=no
+User=quantbot
+Group=quantbot
+WorkingDirectory=/opt/quant-bot
+EnvironmentFile=-/etc/quant-bot/quant-bot.env
+ExecStart=/opt/quant-bot/.venv/bin/python /opt/quant-bot/unattended_daily_runner.py
+ExecStartPost=/usr/bin/env bash /opt/quant-bot/deployment/backup_daily_database.sh
+StandardOutput=journal
+StandardError=journal

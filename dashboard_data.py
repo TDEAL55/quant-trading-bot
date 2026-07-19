@@ -5,7 +5,10 @@ from typing import Any
 from monitoring_db import MonitoringDatabase
 from dashboard_models import build_dashboard_dataset
 from evaluation_data import fetch_evaluation_dashboard_payload
+from daily_run_repository import DailyRunRepository
 from factor_attribution import fetch_factor_attribution_dashboard_payload
+from factor_intelligence_data import fetch_factor_intelligence_dashboard_payload
+from performance_dashboard import fetch_performance_dashboard_payload
 from paper_validation_data import fetch_paper_validation_dashboard_payload
 from portfolio_research_data import fetch_portfolio_research_dashboard_payload
 from research_data import fetch_research_dashboard_payload
@@ -19,16 +22,26 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
         research_payload = fetch_research_dashboard_payload(database_url, database_factory=MonitoringDatabase)
         evaluation_payload = fetch_evaluation_dashboard_payload(database_url, database_factory=MonitoringDatabase)
         factor_attribution_payload = fetch_factor_attribution_dashboard_payload(database_url, database_factory=MonitoringDatabase)
+        factor_intelligence_payload = fetch_factor_intelligence_dashboard_payload(database_url)
         walk_forward_payload = fetch_walk_forward_dashboard_payload(database_url)
         portfolio_research_payload = fetch_portfolio_research_dashboard_payload(database_url)
         strategy_lab_payload = fetch_strategy_lab_dashboard_payload(database_url)
         paper_validation_payload = fetch_paper_validation_dashboard_payload(database_url)
+        performance_payload = fetch_performance_dashboard_payload(database_url)
+        daily_run_repo = DailyRunRepository(database_url=database_url)
+        try:
+            daily_run_payload = daily_run_repo.dashboard_payload()
+        finally:
+            daily_run_repo.close()
         research_payload["evaluation"] = evaluation_payload
         research_payload["factor_attribution"] = factor_attribution_payload
+        research_payload["factor_intelligence"] = factor_intelligence_payload
         research_payload["walk_forward"] = walk_forward_payload
         research_payload["portfolio_research"] = portfolio_research_payload
         research_payload["strategy_lab"] = strategy_lab_payload
         research_payload["paper_validation"] = paper_validation_payload
+        research_payload["performance_intelligence"] = performance_payload
+        research_payload["daily_runs"] = daily_run_payload
     except Exception:
         research_payload = {
             "db_connected": False,
@@ -94,6 +107,18 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
                 },
                 "factor_options": [],
             },
+            "factor_intelligence": {
+                "db_connected": False,
+                "latest_run": {},
+                "leaderboard": [],
+                "predictive": [],
+                "bucket": [],
+                "stability": [],
+                "regime": [],
+                "redundancy": [],
+                "warnings": [],
+                "research_note": "Historical research analytics only. No automatic strategy-weight updates.",
+            },
             "walk_forward": {
                 "db_connected": False,
                 "total_validation_runs": 0,
@@ -119,6 +144,23 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
                 "latest_run": {},
                 "latest_orders": [],
                 "latest_position_snapshots": [],
+                "history": [],
+            },
+            "performance_intelligence": {
+                "db_connected": False,
+                "latest_run": {},
+                "daily_equity": [],
+                "trade_statistics": [],
+                "portfolio_snapshots": [],
+                "metrics": [],
+                "metrics_map": {},
+                "daily_report": {},
+                "weekly_summary": [],
+                "monthly_summary": [],
+            },
+            "daily_runs": {
+                "db_connected": False,
+                "latest_run": {},
                 "history": [],
             },
         }

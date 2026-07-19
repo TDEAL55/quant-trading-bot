@@ -1,0 +1,11 @@
+[Unit]
+Description=Quant Bot Daily Timer
+
+[Timer]
+OnCalendar=*-*-* 09:30:00
+Timezone=America/New_York
+Persistent=true
+Unit=quant-bot.service
+
+[Install]
+WantedBy=timers.target

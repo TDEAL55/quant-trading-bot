@@ -134,3 +134,124 @@ Retention helper SQL is available in `MonitoringDatabase.retention_sql()` and is
 	- `streamlit run dashboard_app.py`
 
 The dashboard must not be connected to LIVE mode or any order-submission endpoint.
+
+## Sprint 10: Factor Intelligence Engine (research-only)
+
+### What it does
+- Registers existing scanner factors in a versioned factor registry.
+- Builds normalized historical factor observations while preserving raw values.
+- Measures predictive relationships versus stored forward-return labels.
+- Computes bucket/decile behavior, walk-forward stability, regime behavior, and factor redundancy.
+- Produces a descriptive factor scorecard and security-level explanation payloads.
+- Exposes read-only CLI and dashboard views for historical research interpretation.
+
+### What it does not prove
+- It does not prove profitability.
+- It does not prove causation.
+- It does not auto-promote factors into production weights.
+- It does not submit broker orders and does not enable LIVE mode.
+
+### Factor registry rules
+- Factor IDs are deterministic and versioned.
+- Duplicate factor_id + version pairs are rejected.
+- Category and direction values are validated.
+- Existing Sprint 1-9 factor calculations remain unchanged.
+
+### Predictive metrics
+- Sample count, valid count, missing count.
+- Pearson and Spearman correlations.
+- Mean/median forward return and optional excess-return equivalents.
+- Top-minus-bottom spread and positive-return rate.
+- Confidence labels and insufficient-data status.
+
+### Bucket analysis
+- Deterministic bucket assignment with tie-safe ordering.
+- Default deciles when sample size allows, fallback to fewer buckets when needed.
+- Monotonicity, direction consistency, spread, and coverage metrics.
+
+### Stability and walk-forward
+- Reuses existing walk-forward window generation.
+- Keeps training and validation windows separated.
+- Reports per-window metrics and aggregate stability classifications.
+
+### Regime analysis
+- Uses observed regime labels at observation time.
+- Preserves unknown regimes.
+- Marks low-sample regime slices as insufficient_data.
+
+### Redundancy analysis
+- Computes pairwise aligned factor correlations.
+- Uses deterministic pair ordering (A/B only, not B/A duplicates).
+- Flags possible redundancy without deleting factors.
+
+### Scorecard interpretation
+- Score is descriptive research evidence only.
+- Component weights are explicit and inspectable in export payloads.
+- Missing evidence lowers confidence and adds warnings.
+
+### Look-ahead prevention
+- Forward returns are only consumed from completed stored labels.
+- Factor values are derived from candidate-time observations, not future returns.
+
+### Data-quality controls
+- Counts and reports duplicates, missing values, invalid values, and excluded rows.
+- Never silently maps missing values to zero.
+
+### Dashboard usage
+- New read-only Factor Intelligence page in Streamlit dashboard.
+- Shows latest run summary, leaderboard, predictive table, buckets, stability, regimes, redundancy, and warnings.
+
+### CLI usage
+Run commands from repository root:
+
+```bash
+python factor_intelligence.py run --start-date 2024-01-01 --end-date 2024-12-31 --forward-horizon 20 --factor-id overall_score --factor-id trend_score --minimum-sample-size 30 --bucket-count 10
+python factor_intelligence.py latest
+python factor_intelligence.py leaderboard --run-id <RUN_ID>
+python factor_intelligence.py factor --factor-id overall_score
+python factor_intelligence.py explain --symbol AAPL --snapshot-id <RUN:DATE>
+python factor_intelligence.py export --run-id <RUN_ID> --output factor_intelligence.json
+```
+
+### Safety reminder
+- Results are historical research analytics only.
+- Strategy weights are not auto-modified.
+- Paper validation behavior remains unchanged.
+- LIVE remains blocked globally.
+
+## Sprint 10.1: Controlled Paper Trading Validation
+
+### Scope
+- Adds a dedicated Sprint 10.1 orchestration module in `sprint_10_1_validation.py`.
+- Reuses existing scanner, research journaling, approval, paper validation, reconciliation, persistence, and dashboard payload readers.
+- Does not modify scanner algorithms, factor engine logic, portfolio construction internals, risk engine internals, or paper broker internals.
+
+### Test profile behavior
+- Uses a strict paper-safe `PaperTestProfile` with `maximum_orders=1`.
+- Requires manual approval simulation (`--manual-approval YES`) before execution.
+- Rejects LIVE mode at the orchestration boundary.
+
+### End-to-end flow
+- Runs scanner and shortlist using existing modules.
+- Captures a compact explainability block from selected candidate factor components.
+- Records a research journal entry for the scan payload.
+- Creates a dedicated paper approval record for the controlled profile.
+- Executes exactly one paper-validation run path using `run_paper_validation`.
+- Fetches the paper-validation dashboard payload for post-run visibility.
+
+### No-candidate behavior
+- Returns structured reason counts from scanner rejection reasons.
+- Returns the closest candidate payload when available.
+- Keeps manual approval and safety controls active even when no trade is executed.
+
+### CLI usage
+
+```bash
+python sprint_10_1_validation.py --database-url <DATABASE_URL> --manual-approval YES --execute
+```
+
+Optional symbol override:
+
+```bash
+python sprint_10_1_validation.py --database-url <DATABASE_URL> --manual-approval YES --execute --symbols SPY,QQQ,AAPL
+```

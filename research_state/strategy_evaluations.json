@@ -1,0 +1,20 @@
+{
+  "evaluations": {
+    "1": {
+      "benchmark_observation_price": null,
+      "benchmark_symbol": "SPY",
+      "completed_at": "2026-07-18T02:25:20.458025+00:00",
+      "created_at": "2026-07-18T02:25:20.458029+00:00",
+      "data_source": "market_data",
+      "error_message": "observation date could not be matched to available trading data",
+      "label_status": "unavailable",
+      "last_attempted_at": "2026-07-18T02:25:20.458013+00:00",
+      "observation_date": "2024-01-01",
+      "observation_price": 100.0,
+      "research_candidate_id": 1,
+      "research_run_id": "research-1",
+      "symbol": "AAA",
+      "updated_at": "2026-07-18T02:25:20.458032+00:00"
+    }
+  }
+}
