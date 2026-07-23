@@ -29,6 +29,33 @@ def test_deployment_config_allows_paper_auto_approval(monkeypatch):
     assert config.auto_approve_paper is True
 
 
+def test_deployment_config_scan_interval_defaults_to_five(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///test.db")
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.delenv("SCAN_INTERVAL_MINUTES", raising=False)
+
+    config = load_deployment_config()
+    assert config.scan_interval_minutes == 5
+
+
+def test_deployment_config_scan_interval_can_be_configured(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///test.db")
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("SCAN_INTERVAL_MINUTES", "15")
+
+    config = load_deployment_config()
+    assert config.scan_interval_minutes == 15
+
+
+def test_deployment_config_scan_interval_rejects_non_positive(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///test.db")
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("SCAN_INTERVAL_MINUTES", "0")
+
+    with pytest.raises(DeploymentConfigError):
+        load_deployment_config()
+
+
 def test_deployment_config_blocks_live(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "sqlite:///test.db")
     monkeypatch.setenv("TRADING_MODE", "LIVE")

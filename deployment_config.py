@@ -56,6 +56,7 @@ class DeploymentConfig:
     run_timezone: str
     run_hour: int
     run_minute: int
+    scan_interval_minutes: int
     notifications_enabled: bool
     kill_switch: bool
 
@@ -78,6 +79,7 @@ def load_deployment_config(environ: dict[str, str] | None = None) -> DeploymentC
     run_timezone = str(env.get("RUN_TIMEZONE", "America/New_York")).strip() or "America/New_York"
     run_hour = _parse_int("RUN_HOUR", env.get("RUN_HOUR", "9"), minimum=0, maximum=23)
     run_minute = _parse_int("RUN_MINUTE", env.get("RUN_MINUTE", "30"), minimum=0, maximum=59)
+    scan_interval_minutes = _parse_int("SCAN_INTERVAL_MINUTES", env.get("SCAN_INTERVAL_MINUTES", "5"), minimum=1)
     notifications_enabled = _parse_bool(env.get("NOTIFICATIONS_ENABLED"), default=False)
     kill_switch = _parse_bool(env.get("KILL_SWITCH"), default=False)
 
@@ -106,6 +108,7 @@ def load_deployment_config(environ: dict[str, str] | None = None) -> DeploymentC
         run_timezone=run_timezone,
         run_hour=run_hour,
         run_minute=run_minute,
+        scan_interval_minutes=scan_interval_minutes,
         notifications_enabled=notifications_enabled,
         kill_switch=kill_switch,
     )
