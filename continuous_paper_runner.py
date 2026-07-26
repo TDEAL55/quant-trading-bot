@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from daily_research_runner import run_daily_research_cycle
+from continuous_scan_cycle import run_continuous_scan_cycle
 from deployment_config import load_deployment_config
 from logger_setup import logger
 from run_lock import DailyRunLock, RunLockBusyError
@@ -62,6 +62,12 @@ def _seconds_until_next_market_open(now_eastern: datetime) -> float:
     return max(0.0, (target - now_eastern).total_seconds())
 
 
+def _result_value(result: Any, key: str, default: Any = None) -> Any:
+    if isinstance(result, dict):
+        return result.get(key, default)
+    return getattr(result, key, default)
+
+
 def _new_order_count(execution: dict[str, Any]) -> int:
     paper_order = execution.get("paper_order") or {}
     order_id = str(paper_order.get("order_id") or "").strip()
@@ -72,10 +78,10 @@ def _new_order_count(execution: dict[str, Any]) -> int:
 
 
 def _confirmed_submitted_order_count(result: dict[str, Any]) -> int:
-    if str(result.get("execution_status") or "").strip().lower() != "completed":
+    if str(_result_value(result, "execution_status") or "").strip().lower() != "completed":
         return 0
 
-    execution = result.get("execution") or {}
+    execution = _result_value(result, "execution") or {}
     risk = execution.get("risk_result") or {}
     checks = risk.get("checks") or {}
     reconciliation = execution.get("reconciliation") or {}
@@ -132,10 +138,11 @@ def _normalize_daily_state(state: dict[str, Any], market_date: str) -> dict[str,
 def run_continuous_paper_runner(
     database_url: str | None = None,
     config_loader: Callable[[], Any] = load_deployment_config,
-    runner: Callable[..., dict[str, Any]] = run_daily_research_cycle,
+    runner: Callable[..., Any] = run_continuous_scan_cycle,
     now_provider: Callable[[], datetime] = lambda: datetime.now(EASTERN_TZ),
     sleep_fn: Callable[[float], None] = time.sleep,
     lock_factory: Callable[..., DailyRunLock] = DailyRunLock,
+    state_path: str | Path | None = None,
     max_iterations: int | None = None,
     stop_event: Any | None = None,
     max_cycles: int | None = None,
@@ -158,7 +165,7 @@ def run_continuous_paper_runner(
 
     max_daily_orders = min(configured_max_daily_orders, 1)
     lock_path = Path(config.database_path).with_suffix(".continuous.lock")
-    state_path = Path(config.database_path).with_suffix(".continuous.state.json")
+    resolved_state_path = Path(state_path) if state_path is not None else Path(config.database_path).with_suffix(".continuous.state.json")
 
     stats = {
         "cycles": 0,
@@ -191,7 +198,7 @@ def run_continuous_paper_runner(
                 stats["cycles"] += 1
                 continue
 
-            state = _normalize_daily_state(_load_daily_state(state_path), market_date)
+            state = _normalize_daily_state(_load_daily_state(resolved_state_path), market_date)
             if int(state.get("orders_submitted") or 0) >= max_daily_orders:
                 stats["quota_skips"] += 1
                 _log_event(
@@ -218,14 +225,14 @@ def run_continuous_paper_runner(
 
                 if confirmed_order_count > 0:
                     state["orders_submitted"] = int(state.get("orders_submitted") or 0) + int(confirmed_order_count)
-                    _save_daily_state(state_path, state)
+                    _save_daily_state(resolved_state_path, state)
 
                 stats["scans_completed"] += 1
                 _log_event(
                     "continuous_runner_scan_completed",
                     timestamp=now_eastern.isoformat(),
                     market_date=market_date,
-                    execution_status=result.get("execution_status"),
+                    execution_status=_result_value(result, "execution_status"),
                     confirmed_order_count=confirmed_order_count,
                     orders_submitted=state.get("orders_submitted"),
                 )
