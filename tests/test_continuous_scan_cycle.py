@@ -8,6 +8,8 @@ from continuous_scan_cycle import ContinuousScanCycleResult, run_continuous_scan
 class _Config:
     trading_mode = "PAPER"
     database_url = "sqlite:///unused.db"
+    max_open_positions = 10
+    max_position_equity_percent = 10.0
 
 
 class _Broker:
@@ -208,3 +210,93 @@ def test_continuous_scan_cycle_enforces_duplicate_protection():
     assert result.confirmed_order_count == 0
     assert broker.submissions == []
     assert repo.saved is None
+
+
+def test_continuous_scan_cycle_uses_broker_positions_as_source_of_truth():
+    broker = _Broker()
+    broker._positions = {"AAA": {"quantity": 3.0, "avg_price": 100.0}}
+    repo = _Repo()
+
+    def _scan_runner(universe):
+        return _scan_payload(symbol="AAA", price=100.0)
+
+    def _shortlist_runner(scan_payload, positions, cash, portfolio_value):
+        return {
+            "selected": [
+                {
+                    "rank": 1,
+                    "symbol": "AAA",
+                    "score": 82.0,
+                    "confidence": 76.0,
+                    "suggested_paper_notional": 1000.0,
+                }
+            ],
+            "rejected": [],
+            "portfolio_warnings": [],
+            "selection_summary": {"selected_count": 1},
+        }
+
+    # positions_loader intentionally disagrees; broker state should win.
+    result = run_continuous_scan_cycle(
+        database_url="sqlite:///unused.db",
+        config_loader=_config_loader,
+        now_provider=lambda: datetime(2026, 7, 22, 10, 10, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=_scan_runner,
+        shortlist_runner=_shortlist_runner,
+        scan_persistor=lambda **kwargs: {"storage": "database", "run_id": kwargs["run_payload"]["run_id"]},
+        execution_repo_factory=lambda **kwargs: repo,
+        positions_loader=lambda: ([], 0.0, 0.0),
+        persist=True,
+    )
+
+    assert result.execution_status == "risk_rejected"
+    assert result.execution["risk_result"]["checks"]["existing_position"] is False
+    assert broker.submissions == []
+
+
+def test_continuous_scan_cycle_enforces_max_open_positions():
+    broker = _Broker()
+    broker._positions = {
+        "AAA": {"quantity": 1.0, "avg_price": 100.0},
+        "BBB": {"quantity": 1.0, "avg_price": 100.0},
+    }
+    repo = _Repo()
+
+    class _Cfg(_Config):
+        max_open_positions = 2
+
+    def _scan_runner(universe):
+        return _scan_payload(symbol="CCC", price=100.0)
+
+    def _shortlist_runner(scan_payload, positions, cash, portfolio_value):
+        return {
+            "selected": [
+                {
+                    "rank": 1,
+                    "symbol": "CCC",
+                    "score": 82.0,
+                    "confidence": 76.0,
+                    "suggested_paper_notional": 1000.0,
+                }
+            ],
+            "rejected": [],
+            "portfolio_warnings": [],
+            "selection_summary": {"selected_count": 1},
+        }
+
+    result = run_continuous_scan_cycle(
+        database_url="sqlite:///unused.db",
+        config_loader=lambda: _Cfg(),
+        now_provider=lambda: datetime(2026, 7, 22, 10, 10, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=_scan_runner,
+        shortlist_runner=_shortlist_runner,
+        scan_persistor=lambda **kwargs: {"storage": "database", "run_id": kwargs["run_payload"]["run_id"]},
+        execution_repo_factory=lambda **kwargs: repo,
+        persist=True,
+    )
+
+    assert result.execution_status == "risk_rejected"
+    assert result.execution["risk_result"]["checks"]["max_open_positions"] is False
+    assert broker.submissions == []

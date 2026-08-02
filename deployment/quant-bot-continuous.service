@@ -1,0 +1,19 @@
+[Unit]
+Description=Quant Bot Continuous PAPER Scan Runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+User=quantbot
+Group=quantbot
+WorkingDirectory=/home/quantbot/quant-trading-bot
+EnvironmentFile=-/etc/quant-bot/quant-bot.env
+ExecStart=/home/quantbot/quant-trading-bot/.venv/bin/python /home/quantbot/quant-trading-bot/continuous_paper_runner.py
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

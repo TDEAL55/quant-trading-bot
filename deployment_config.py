@@ -56,14 +56,18 @@ class DeploymentConfig:
     trading_mode: str
     auto_approve_paper: bool
     max_daily_orders: int
+    max_open_positions: int
+    max_position_equity_percent: float
     paper_broker_backend: str
     alpaca_order_submission_enabled: bool
     alpaca_paper_base_url: str
     scan_symbols: tuple[str, ...]
+    scan_only_during_market_hours: bool
     run_timezone: str
     run_hour: int
     run_minute: int
     scan_interval_minutes: int
+    continuous_runner_dry_run: bool
     notifications_enabled: bool
     kill_switch: bool
 
@@ -82,16 +86,22 @@ def load_deployment_config(environ: dict[str, str] | None = None) -> DeploymentC
     database_url = str(env.get("DATABASE_URL", "sqlite:////var/lib/quant-bot/quant-bot.db")).strip()
     trading_mode = str(env.get("TRADING_MODE", "PAPER")).strip().upper() or "PAPER"
     auto_approve_paper = _parse_bool(env.get("AUTO_APPROVE_PAPER"), default=False)
-    max_daily_orders = _parse_int("MAX_DAILY_ORDERS", env.get("MAX_DAILY_ORDERS", "1"), minimum=1)
+    max_daily_orders = _parse_int("MAX_DAILY_ORDERS", env.get("MAX_DAILY_ORDERS", "5"), minimum=1)
+    max_open_positions = _parse_int("MAX_OPEN_POSITIONS", env.get("MAX_OPEN_POSITIONS", "10"), minimum=1)
+    max_position_equity_percent = float(str(env.get("MAX_POSITION_EQUITY_PERCENT", "10")).strip() or "10")
+    if max_position_equity_percent <= 0 or max_position_equity_percent > 100:
+        raise DeploymentConfigError("MAX_POSITION_EQUITY_PERCENT must be > 0 and <= 100")
     paper_broker_backend = str(env.get("PAPER_BROKER_BACKEND", "SIMULATED")).strip().upper() or "SIMULATED"
     alpaca_order_submission_enabled = _parse_bool(env.get("ALPACA_ORDER_SUBMISSION_ENABLED"), default=False)
     alpaca_paper_base_url = str(env.get("ALPACA_PAPER_BASE_URL", ALPACA_PAPER_ENDPOINT)).strip() or ALPACA_PAPER_ENDPOINT
-    scan_symbols_raw = str(env.get("SCAN_SYMBOLS", "JPM,MSFT,AAPL")).strip()
+    scan_symbols_raw = str(env.get("SCAN_SYMBOLS", "")).strip()
     scan_symbols = tuple(symbol.strip().upper() for symbol in scan_symbols_raw.split(",") if symbol.strip())
+    scan_only_during_market_hours = _parse_bool(env.get("SCAN_ONLY_DURING_MARKET_HOURS"), default=True)
     run_timezone = str(env.get("RUN_TIMEZONE", "America/New_York")).strip() or "America/New_York"
     run_hour = _parse_int("RUN_HOUR", env.get("RUN_HOUR", "9"), minimum=0, maximum=23)
     run_minute = _parse_int("RUN_MINUTE", env.get("RUN_MINUTE", "30"), minimum=0, maximum=59)
     scan_interval_minutes = _parse_int("SCAN_INTERVAL_MINUTES", env.get("SCAN_INTERVAL_MINUTES", "5"), minimum=1)
+    continuous_runner_dry_run = _parse_bool(env.get("CONTINUOUS_RUNNER_DRY_RUN"), default=False)
     notifications_enabled = _parse_bool(env.get("NOTIFICATIONS_ENABLED"), default=False)
     kill_switch = _parse_bool(env.get("KILL_SWITCH"), default=False)
 
@@ -119,9 +129,6 @@ def load_deployment_config(environ: dict[str, str] | None = None) -> DeploymentC
         if not str(env.get("ALPACA_API_KEY", "")).strip() or not str(env.get("ALPACA_API_SECRET", "")).strip():
             raise DeploymentConfigError("ALPACA_API_KEY and ALPACA_API_SECRET are required for PAPER_BROKER_BACKEND=ALPACA")
 
-    if not scan_symbols:
-        raise DeploymentConfigError("SCAN_SYMBOLS must include at least one symbol")
-
     _validate_sqlite_url(database_url)
 
     return DeploymentConfig(
@@ -130,14 +137,18 @@ def load_deployment_config(environ: dict[str, str] | None = None) -> DeploymentC
         trading_mode=trading_mode,
         auto_approve_paper=auto_approve_paper,
         max_daily_orders=max_daily_orders,
+        max_open_positions=max_open_positions,
+        max_position_equity_percent=max_position_equity_percent,
         paper_broker_backend=paper_broker_backend,
         alpaca_order_submission_enabled=alpaca_order_submission_enabled,
         alpaca_paper_base_url=alpaca_paper_base_url,
         scan_symbols=scan_symbols,
+        scan_only_during_market_hours=scan_only_during_market_hours,
         run_timezone=run_timezone,
         run_hour=run_hour,
         run_minute=run_minute,
         scan_interval_minutes=scan_interval_minutes,
+        continuous_runner_dry_run=continuous_runner_dry_run,
         notifications_enabled=notifications_enabled,
         kill_switch=kill_switch,
     )

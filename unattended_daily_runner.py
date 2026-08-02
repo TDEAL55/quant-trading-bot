@@ -14,6 +14,7 @@ from daily_research_runner import run_daily_research_cycle
 from deployment_config import DeploymentConfigError, load_deployment_config
 from discord_notifier import DiscordNotifier
 from run_lock import DailyRunLock, RunLockBusyError
+from stock_universe import load_stock_universe
 
 
 EASTERN_TZ = ZoneInfo("America/New_York")
@@ -290,7 +291,9 @@ def run_unattended_daily_cycle(
             notification_counts["sent"] += int(startup_ok)
             notification_counts["failed"] += int(not startup_ok)
 
-            configured_symbols = [str(item).upper() for item in list(getattr(config, "scan_symbols", ("JPM", "MSFT", "AAPL"))) if str(item).strip()]
+            configured_symbols = [str(item).upper() for item in list(getattr(config, "scan_symbols", ())) if str(item).strip()]
+            if not configured_symbols:
+                configured_symbols = [str((row or {}).get("symbol") or "").upper() for row in list(load_stock_universe()) if str((row or {}).get("symbol") or "").strip()]
             try:
                 try:
                     cycle_output = cycle_runner(

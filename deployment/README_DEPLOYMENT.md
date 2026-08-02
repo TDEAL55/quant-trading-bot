@@ -2,6 +2,8 @@
 
 This profile runs autonomous PAPER trading only. LIVE mode is hard-blocked.
 
+For intraday autonomous mode, use the continuous service (`continuous_paper_runner.py`) so the process remains active and scans every `SCAN_INTERVAL_MINUTES` during market hours.
+
 ## Components reused
 
 - `quant-bot.service`: existing oneshot systemd service.
@@ -24,14 +26,18 @@ PAPER_BROKER_BACKEND=ALPACA
 ALPACA_API_KEY=REPLACE_ME
 ALPACA_API_SECRET=REPLACE_ME
 ALPACA_PAPER_BASE_URL=https://paper-api.alpaca.markets
-ALPACA_ORDER_SUBMISSION_ENABLED=false
+ALPACA_ORDER_SUBMISSION_ENABLED=true
 AUTO_APPROVE_PAPER=true
 NOTIFICATIONS_ENABLED=false
 KILL_SWITCH=false
 RUN_TIMEZONE=America/New_York
 SCAN_INTERVAL_MINUTES=5
-MAX_DAILY_ORDERS=1
-SCAN_SYMBOLS=JPM,MSFT,AAPL
+SCAN_ONLY_DURING_MARKET_HOURS=true
+CONTINUOUS_RUNNER_DRY_RUN=false
+MAX_DAILY_ORDERS=5
+MAX_OPEN_POSITIONS=10
+MAX_POSITION_EQUITY_PERCENT=10
+SCAN_SYMBOLS=
 
 PAPER_DAILY_CYCLE_ENABLED=true
 PAPER_DAILY_AUTO_ENTRY_EXECUTION=true
@@ -119,7 +125,17 @@ source .venv/bin/activate
 python unattended_daily_runner.py
 ```
 
-10. Install/refresh service and timer, then restart
+10. Install/refresh continuous intraday service
+
+```bash
+cd /home/quantbot/quant-trading-bot
+sudo cp deployment/quant-bot-continuous.service /etc/systemd/system/quant-bot-continuous.service
+sudo systemctl daemon-reload
+sudo systemctl enable quant-bot-continuous.service
+sudo systemctl restart quant-bot-continuous.service
+```
+
+11. (Optional) Keep existing daily oneshot service/timer for end-of-day summary/backup workflows
 
 ```bash
 cd /home/quantbot/quant-trading-bot
@@ -130,26 +146,33 @@ sudo systemctl restart quant-bot.timer
 sudo systemctl start quant-bot.service
 ```
 
-11. Verify service status
+12. Verify continuous service status
+
+```bash
+systemctl status quant-bot-continuous.service --no-pager
+```
+
+13. Verify daily service status (optional)
 
 ```bash
 systemctl status quant-bot.service --no-pager
 ```
 
-12. Verify timer status and next run
+14. Verify timer status and next run
 
 ```bash
 systemctl status quant-bot.timer --no-pager
 systemctl list-timers quant-bot.timer --all
 ```
 
-13. View live logs
+15. View live logs
 
 ```bash
+journalctl -u quant-bot-continuous.service -f -n 200
 journalctl -u quant-bot.service -f -n 200
 ```
 
-14. Confirm no live broker order path was called
+16. Confirm no live broker order path was called
 
 ```bash
 journalctl -u quant-bot.service -n 500 --no-pager | grep -Ei "broker execution blocked|no broker orders were submitted|Trading mode must be exactly PAPER|LIVE trading is hard-blocked"

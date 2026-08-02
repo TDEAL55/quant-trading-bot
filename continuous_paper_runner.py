@@ -146,6 +146,7 @@ def run_continuous_paper_runner(
     max_iterations: int | None = None,
     stop_event: Any | None = None,
     max_cycles: int | None = None,
+    dry_run_override: bool | None = None,
 ) -> dict[str, int]:
     config = config_loader()
     if str(config.trading_mode).upper() != "PAPER":
@@ -163,7 +164,9 @@ def run_continuous_paper_runner(
     if configured_max_daily_orders < 1:
         raise ValueError("MAX_DAILY_ORDERS must be at least 1")
 
-    max_daily_orders = min(configured_max_daily_orders, 1)
+    max_daily_orders = configured_max_daily_orders
+    scan_only_during_market_hours = bool(getattr(config, "scan_only_during_market_hours", True))
+    dry_run = bool(getattr(config, "continuous_runner_dry_run", False)) if dry_run_override is None else bool(dry_run_override)
     lock_path = Path(config.database_path).with_suffix(".continuous.lock")
     resolved_state_path = Path(state_path) if state_path is not None else Path(config.database_path).with_suffix(".continuous.state.json")
 
@@ -186,7 +189,7 @@ def run_continuous_paper_runner(
             now_eastern = _to_eastern(now_provider())
             market_date = now_eastern.date().isoformat()
 
-            if not _is_market_open(now_eastern):
+            if scan_only_during_market_hours and not _is_market_open(now_eastern):
                 sleep_seconds = _seconds_until_next_market_open(now_eastern)
                 stats["closed_market_sleeps"] += 1
                 _log_event(
@@ -218,8 +221,8 @@ def run_continuous_paper_runner(
                     stats["scans_attempted"] += 1
                     result = runner(
                         database_url=database_url or config.database_url,
-                        manual_approval="YES",
                         persist=True,
+                        dry_run=dry_run,
                     )
                 confirmed_order_count = _confirmed_submitted_order_count(result)
 
@@ -277,6 +280,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Continuous paper trading runner")
     parser.add_argument("--database-url", default=None)
     parser.add_argument("--max-iterations", type=int, default=None)
+    parser.add_argument("--dry-run", action="store_true", help="Force dry-run mode for continuous 5-minute scans")
     args = parser.parse_args()
 
     stop_event = _SignalStopEvent()
@@ -292,6 +296,7 @@ def main() -> int:
         database_url=args.database_url,
         max_iterations=args.max_iterations,
         stop_event=stop_event,
+        dry_run_override=True if args.dry_run else None,
     )
     return 0
 

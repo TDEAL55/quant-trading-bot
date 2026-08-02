@@ -358,8 +358,8 @@ def test_daily_quota_only_increments_after_confirmed_submission(tmp_path):
     assert payload["orders_submitted"] == 1
 
 
-def test_max_daily_orders_is_hard_capped_to_one(tmp_path):
-    cfg = _config(tmp_path, max_daily_orders=100)
+def test_max_daily_orders_uses_configured_limit(tmp_path):
+    cfg = _config(tmp_path, max_daily_orders=2)
     sleeps = []
     calls = {"runner": 0}
     state_path = _state_path(tmp_path)
@@ -382,8 +382,8 @@ def test_max_daily_orders_is_hard_capped_to_one(tmp_path):
         max_iterations=2,
     )
 
-    assert calls["runner"] == 1
-    assert stats["quota_skips"] == 1
+    assert calls["runner"] == 2
+    assert stats["quota_skips"] == 0
     assert sleeps == [300, 300]
 
 
