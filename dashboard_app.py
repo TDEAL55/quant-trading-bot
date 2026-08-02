@@ -2388,7 +2388,7 @@ def render_account_page(payload, view):
     second_row = st.columns(3)
     _metric_card(second_row[0], "Unrealized P&L", format_currency(view["unrealized_paper_pl"]), "buy" if view["unrealized_paper_pl"] >= 0 else "sell")
     _metric_card(second_row[1], "Realized P&L", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] >= 0 else "sell")
-    _metric_card(second_row[2], "Account Status", view["account_status"], "healthy" if view["account_status"].lower() == "active" else "warning")
+    _metric_card(second_row[2], "Account Status", view["account_status"], "healthy" if _is_active_account_status(view["account_status"]) else "warning")
 
     st.markdown("### Portfolio Allocation", unsafe_allow_html=True)
     if go is not None:
@@ -2663,6 +2663,25 @@ def render_daily_run_page():
         st.info("More paper-trading history is needed before this metric is meaningful.")
 
 
+def _normalized_account_status(value):
+    if value is None:
+        return "unknown"
+    name = getattr(value, "name", None)
+    if isinstance(name, str) and name.strip():
+        return name.strip().lower()
+    enum_value = getattr(value, "value", None)
+    if isinstance(enum_value, str) and enum_value.strip():
+        return enum_value.strip().lower()
+    text = str(value or "").strip().lower()
+    if "." in text:
+        text = text.split(".")[-1]
+    return text or "unknown"
+
+
+def _is_active_account_status(value):
+    return _normalized_account_status(value) == "active"
+
+
 def _event_style(level):
     if level == "critical":
         return "error", "❗"
@@ -2675,7 +2694,7 @@ def build_activity_timeline(payload, view):
     events = []
     if payload.get("latest_run"):
         events.append({"event": "Worker started", "time": view.get("last_run_timestamp"), "level": "info"})
-        if str(view.get("account_status", "")).lower() == "active":
+        if _is_active_account_status(view.get("account_status", "")):
             events.append({"event": "Account authenticated", "time": view.get("last_run_timestamp"), "level": "info"})
         events.append({"event": f"Market checked ({view['market_status']['label']})", "time": view.get("last_run_timestamp"), "level": "info"})
         events.append({"event": f"Signal generated ({view.get('generated_signal', 'HOLD')})", "time": view.get("last_run_timestamp"), "level": "info"})
@@ -2717,7 +2736,7 @@ def render_system_health_page(payload, view):
     cols = st.columns(3)
     _metric_card(cols[0], "Bot Status", view["bot_health"]["label"], view["bot_health"]["style"])
     _metric_card(cols[1], "Database", "Connected" if payload.get("db_connected") else "Disconnected", "healthy" if payload.get("db_connected") else "error")
-    _metric_card(cols[2], "Alpaca Paper Authentication", "Active" if view["account_status"].lower() == "active" else view["account_status"], "healthy" if view["account_status"].lower() == "active" else "warning")
+    _metric_card(cols[2], "Alpaca Paper Authentication", "Active" if _is_active_account_status(view["account_status"]) else view["account_status"], "healthy" if _is_active_account_status(view["account_status"]) else "warning")
 
     st.markdown("### Bot Activity Timeline")
     events = build_activity_timeline(payload, view)
@@ -2798,7 +2817,7 @@ def render_notification_center(payload, view):
 def _component_status(payload, view):
     db_ok = payload.get("db_connected")
     bot_ok = bool(payload.get("latest_run")) and view.get("bot_health", {}).get("style") != "error"
-    alpaca_ok = str(view.get("account_status", "")).lower() == "active"
+    alpaca_ok = _is_active_account_status(view.get("account_status", ""))
     review_warning = bool(view.get("review_required"))
     status = {
         "GitHub": "healthy",
@@ -2872,7 +2891,7 @@ def render_mission_control_summary(view):
 def render_achievement_milestones(payload):
     st.markdown("### Achievement Milestones")
     has_run = bool(payload.get("recent_runs"))
-    has_auth = any(str((payload.get("latest_account") or {}).get("account_status", "")).upper() == "ACTIVE" for _ in [0])
+    has_auth = any(_is_active_account_status((payload.get("latest_account") or {}).get("account_status", "")) for _ in [0])
     has_state = bool(payload.get("latest_run"))
     has_record = bool(payload.get("signal_history"))
     has_order = any(_as_bool(o.get("submitted")) for o in (payload.get("recent_orders") or []))

@@ -38,6 +38,21 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return float(default)
 
 
+def _normalize_account_status(value: Any) -> str:
+    if value is None:
+        return "UNKNOWN"
+    name = getattr(value, "name", None)
+    if isinstance(name, str) and name.strip():
+        return name.strip().upper()
+    enum_value = getattr(value, "value", None)
+    if isinstance(enum_value, str) and enum_value.strip():
+        return enum_value.strip().upper()
+    text = str(value).strip()
+    if "." in text:
+        text = text.split(".")[-1]
+    return (text or "UNKNOWN").upper()
+
+
 def _to_decimal(value: Any) -> Decimal:
     return Decimal(str(value))
 
@@ -125,7 +140,7 @@ class AlpacaPaperBroker:
 
     def _validate_account_ready(self) -> None:
         account = self._fetch_account()
-        status = str(getattr(account, "status", "")).upper()
+        status = _normalize_account_status(getattr(account, "status", ""))
         if status not in {"ACTIVE"}:
             raise RuntimeError(f"Alpaca account is not active: {status or 'UNKNOWN'}")
         if bool(getattr(account, "trading_blocked", False)):
@@ -136,7 +151,7 @@ class AlpacaPaperBroker:
     def get_account(self) -> dict[str, Any]:
         account = self._fetch_account()
         return {
-            "status": str(getattr(account, "status", "unknown") or "unknown"),
+            "status": _normalize_account_status(getattr(account, "status", "unknown")),
             "account_number": str(getattr(account, "account_number", "") or ""),
             "currency": str(getattr(account, "currency", "USD") or "USD"),
             "buying_power": _to_float(getattr(account, "buying_power", 0.0), 0.0),
