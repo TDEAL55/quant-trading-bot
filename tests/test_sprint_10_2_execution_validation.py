@@ -110,6 +110,7 @@ class _BrokerStub:
 
 
 def test_execution_validation_completes(monkeypatch):
+    monkeypatch.setenv("PAPER_BROKER_BACKEND", "SIMULATED")
     monkeypatch.setattr("sprint_10_2_execution_validation.download_price_data", lambda *args, **kwargs: _fake_market_df())
     monkeypatch.setattr("sprint_10_2_execution_validation.run_scan", lambda universe: _scan_payload("AAA"))
     monkeypatch.setattr(
@@ -146,6 +147,7 @@ def test_execution_validation_completes(monkeypatch):
 
 
 def test_execution_validation_no_trade(monkeypatch):
+    monkeypatch.setenv("PAPER_BROKER_BACKEND", "SIMULATED")
     monkeypatch.setattr("sprint_10_2_execution_validation.download_price_data", lambda *args, **kwargs: _fake_market_df())
     monkeypatch.setattr(
         "sprint_10_2_execution_validation.run_scan",

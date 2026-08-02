@@ -150,3 +150,30 @@ def test_existing_client_order_is_recovered_without_duplicate_submit(monkeypatch
     assert recovered["client_order_id"] == "cid-existing"
     assert recovered["recovered_existing"] is True
     assert client.submit_calls == 0
+
+
+def test_submit_order_accepts_execution_path_kwargs(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+    monkeypatch.setenv("ALPACA_PAPER_BASE_URL", ALPACA_PAPER_ENDPOINT)
+    monkeypatch.setenv("ALPACA_ORDER_SUBMISSION_ENABLED", "true")
+
+    client = _TradingClient()
+    broker = AlpacaPaperBroker(mode="PAPER", trading_client=client)
+
+    # This mirrors the execution path args and proves `reference_price` is accepted.
+    order = broker.submit_order(
+        side="buy",
+        ticker="AAPL",
+        quantity=1.0,
+        reference_price=199.25,
+        order_type="market",
+        time_in_force="day",
+        allow_fractional=True,
+        wait_for_fill=False,
+    )
+
+    assert order["order_id"] == "new-oid"
+    assert order["client_order_id"] == "new-cid"
+    assert order["reference_price"] == pytest.approx(199.25, rel=1e-9)
+    assert client.submit_calls == 1

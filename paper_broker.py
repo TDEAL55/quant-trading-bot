@@ -177,7 +177,10 @@ def create_paper_broker(
     if selected_mode == "LIVE":
         raise RuntimeError("LIVE mode is blocked")
 
-    selected_backend = str(backend or os.getenv("PAPER_BROKER_BACKEND", PAPER_BROKER_BACKEND)).strip().upper()
+    if backend is None and selected_mode == "SIMULATION":
+        selected_backend = "SIMULATED"
+    else:
+        selected_backend = str(backend or os.getenv("PAPER_BROKER_BACKEND", PAPER_BROKER_BACKEND)).strip().upper()
     if selected_backend not in {"ALPACA", "SIMULATED"}:
         raise RuntimeError("PAPER_BROKER_BACKEND must be ALPACA or SIMULATED")
 

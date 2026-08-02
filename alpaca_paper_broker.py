@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+import hashlib
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -77,6 +78,19 @@ def _order_side(value: str) -> Any:
     if OrderSide is None:
         return normalized
     return OrderSide.BUY if normalized == "buy" else OrderSide.SELL
+
+
+def _default_client_order_id(symbol: str, side: str, quantity: float, order_type: str, time_in_force: str) -> str:
+    payload = {
+        "symbol": str(symbol or "").upper(),
+        "side": str(side or "").lower(),
+        "quantity": round(_to_float(quantity, 0.0), 8),
+        "order_type": str(order_type or "market").lower(),
+        "time_in_force": str(time_in_force or "day").lower(),
+        "trade_date": datetime.now(timezone.utc).date().isoformat(),
+    }
+    digest = hashlib.sha256(str(payload).encode("utf-8")).hexdigest()[:24]
+    return f"qtb-{digest}"
 
 
 def normalize_alpaca_order(order: Any) -> dict[str, Any]:
@@ -239,23 +253,30 @@ class AlpacaPaperBroker:
         side: str,
         ticker: str,
         quantity: float,
-        *,
-        client_order_id: str,
-        order_type: str = "market",
-        time_in_force: str = "day",
-        allow_fractional: bool = False,
-        wait_for_fill: bool = True,
-        poll_seconds: float = 1.0,
-        max_wait_seconds: float = 45.0,
+        **kwargs: Any,
     ) -> dict[str, Any]:
+        client_order_id = str(kwargs.get("client_order_id") or "").strip()
+        order_type = str(kwargs.get("order_type") or "market")
+        time_in_force = str(kwargs.get("time_in_force") or "day")
+        allow_fractional = bool(kwargs.get("allow_fractional", False))
+        wait_for_fill = bool(kwargs.get("wait_for_fill", True))
+        poll_seconds = float(kwargs.get("poll_seconds", 1.0))
+        max_wait_seconds = float(kwargs.get("max_wait_seconds", 45.0))
+        reference_price = _to_float(kwargs.get("reference_price"), 0.0)
+
         symbol = str(ticker or "").strip().upper()
         if not symbol:
             raise RuntimeError("symbol is required")
         self._validate_quantity(symbol=symbol, quantity=quantity, allow_fractional=allow_fractional)
 
+        if not client_order_id:
+            client_order_id = _default_client_order_id(symbol=symbol, side=side, quantity=quantity, order_type=order_type, time_in_force=time_in_force)
+
         existing = self.get_order_by_client_order_id(client_order_id)
         if existing:
             existing["recovered_existing"] = True
+            if reference_price > 0:
+                existing.setdefault("reference_price", reference_price)
             if wait_for_fill:
                 return self.wait_for_order(client_order_id=client_order_id, poll_seconds=poll_seconds, max_wait_seconds=max_wait_seconds)
             return existing
@@ -267,6 +288,7 @@ class AlpacaPaperBroker:
                 "side": str(side or "").lower(),
                 "requested_quantity": _to_float(quantity, 0.0),
                 "client_order_id": str(client_order_id or ""),
+                "reference_price": reference_price,
                 "broker_backend": "ALPACA",
             }
 
@@ -288,10 +310,14 @@ class AlpacaPaperBroker:
             )
             submitted = self._trading_client.submit_order(order_data=order_request)
             submitted_order = normalize_alpaca_order(submitted)
+            if reference_price > 0:
+                submitted_order["reference_price"] = reference_price
         except Exception:
             recovered = self.get_order_by_client_order_id(client_order_id)
             if recovered:
                 recovered["recovered_after_submit_error"] = True
+                if reference_price > 0:
+                    recovered.setdefault("reference_price", reference_price)
                 submitted_order = recovered
             else:
                 raise
