@@ -91,7 +91,7 @@ THEMES = {
     },
 }
 
-PAGE_OPTIONS = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Factor Intelligence", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
+PAGE_OPTIONS = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
 MODE_OPTIONS = ["Standard Mode", "Focus Mode", "Presentation Mode"]
 THEME_OPTIONS = ["Midnight Blue", "Black Terminal", "Arctic Glass"]
 AUTO_REFRESH_OPTIONS = ["Off", "30 seconds", "60 seconds", "5 minutes"]
@@ -3053,6 +3053,56 @@ def render_research_page():
     else:
         st.info("No candidates available for the selected research scan.")
 
+    st.markdown("### Quantum Score Engine")
+    quantum_payload = payload.get("quantum_score") or {}
+    quantum_top = list(quantum_payload.get("top_candidates") or [])
+    latest_quantum_run = dict(quantum_payload.get("latest_run") or {})
+    quantum_selected = dict(quantum_payload.get("selected_candidate") or {})
+    quantum_details = dict(quantum_payload.get("candidate_details") or {})
+
+    quantum_cols = st.columns(4)
+    _metric_card(quantum_cols[0], "Score Version", _safe_text(latest_quantum_run.get("score_version"), "N/A"), "neutral")
+    _metric_card(quantum_cols[1], "Scored Symbols", latest_quantum_run.get("symbol_count", 0), "neutral")
+    _metric_card(quantum_cols[2], "Eligible", latest_quantum_run.get("eligible_count", 0), "healthy")
+    _metric_card(quantum_cols[3], "Selected", _safe_text(quantum_selected.get("symbol"), "N/A"), "warning")
+
+    if quantum_top:
+        rank_rows = [
+            {
+                "rank": row.get("rank"),
+                "symbol": row.get("symbol"),
+                "final_score": row.get("final_score"),
+                "data_quality": row.get("data_quality_status"),
+                "market_regime": row.get("market_regime"),
+                "risk_reward_ratio": row.get("risk_reward_ratio"),
+                "is_selected": bool(row.get("is_selected")),
+            }
+            for row in quantum_top
+        ]
+        st.dataframe(rank_rows[:50])
+
+        symbol_options = [str(row.get("symbol") or "") for row in quantum_top if row.get("symbol")]
+        if symbol_options:
+            selected_symbol = st.selectbox("Quantum symbol drill-down", symbol_options, index=0)
+            selected_row = next((row for row in quantum_top if str(row.get("symbol") or "") == selected_symbol), quantum_top[0])
+            st.markdown("#### Quantum Drill-down")
+            st.markdown(f"- Symbol: {_safe_text(selected_row.get('symbol'))}")
+            st.markdown(f"- Final score: {_safe_text(selected_row.get('final_score'))}")
+            st.markdown(f"- Data quality: {_safe_text(selected_row.get('data_quality_status'))}")
+            st.markdown(f"- Rejection reasons: {_safe_text(', '.join(selected_row.get('rejection_reasons') or []) or 'None')}")
+            st.markdown(f"- Warnings: {_safe_text('; '.join(selected_row.get('warnings') or []) or 'None')}")
+
+            component_rows = list(quantum_details.get("components") or [])
+            strategy_rows = list(quantum_details.get("strategy_scores") or [])
+            if component_rows:
+                st.markdown("##### Component Contributions")
+                st.dataframe(component_rows)
+            if strategy_rows:
+                st.markdown("##### Strategy-specific Scores")
+                st.dataframe(strategy_rows)
+    else:
+        st.info("No quantum-score records available yet.")
+
     st.markdown("### Analytics")
     analytics_cols = st.columns(3)
     _metric_card(analytics_cols[0], "Score Distribution", len(analytics.get("score_distribution", [])), "neutral")
@@ -3289,6 +3339,72 @@ def render_factor_intelligence_page():
             disabled=not bool(leaderboard or predictive),
         )
 
+
+def render_self_improving_page():
+    st.markdown("### SELF-IMPROVING INTELLIGENCE — REVIEW ONLY")
+    payload = st.session_state.get("dashboard_research_payload") or {}
+    intel = payload.get("self_improving") or {
+        "db_connected": False,
+        "trade_memory": [],
+        "strategy_leaderboard": [],
+        "latest_regime": {},
+        "strategy_regime_matrix": [],
+        "factor_effectiveness": [],
+        "allocation_recommendations": [],
+        "strategy_state_recommendations": [],
+        "weight_change_recommendations": [],
+        "daily_report": {},
+        "weekly_report": {},
+    }
+
+    top = st.columns(6)
+    _metric_card(top[0], "DB", "Connected" if intel.get("db_connected") else "Disconnected", "healthy" if intel.get("db_connected") else "error")
+    _metric_card(top[1], "Trade Memory", len(intel.get("trade_memory") or []), "neutral")
+    _metric_card(top[2], "Leaderboard Rows", len(intel.get("strategy_leaderboard") or []), "neutral")
+    _metric_card(top[3], "Regime", _safe_text((intel.get("latest_regime") or {}).get("regime_id"), "N/A"), "warning")
+    _metric_card(top[4], "Factor Rows", len(intel.get("factor_effectiveness") or []), "neutral")
+    _metric_card(top[5], "Allocation Recos", len(intel.get("allocation_recommendations") or []), "healthy")
+
+    st.info("Recommendation-only mode. No automatic strategy-state, weight, or allocation changes are executed from this view.")
+
+    st.markdown("#### Strategy Leaderboard")
+    st.dataframe(intel.get("strategy_leaderboard") or [])
+
+    st.markdown("#### Latest Market Regime")
+    st.dataframe([intel.get("latest_regime") or {}])
+
+    st.markdown("#### Strategy-Regime Compatibility")
+    st.dataframe(intel.get("strategy_regime_matrix") or [])
+
+    st.markdown("#### Factor Effectiveness")
+    st.dataframe(intel.get("factor_effectiveness") or [])
+
+    st.markdown("#### Allocation Recommendations")
+    st.dataframe(intel.get("allocation_recommendations") or [])
+
+    st.markdown("#### Strategy-State Recommendations")
+    st.dataframe(intel.get("strategy_state_recommendations") or [])
+
+    st.markdown("#### Weight-Change Recommendations")
+    st.dataframe(intel.get("weight_change_recommendations") or [])
+
+    st.markdown("#### Daily Report Snapshot")
+    st.dataframe([intel.get("daily_report") or {}])
+
+    st.markdown("#### Weekly Report Snapshot")
+    st.dataframe([intel.get("weekly_report") or {}])
+
+    if hasattr(st, "download_button"):
+        export_blob = json.dumps(intel, indent=2, sort_keys=True)
+        st.download_button(
+            "Self-improving intelligence JSON",
+            export_blob,
+            file_name=sanitize_identifier("self_improving_intelligence_dashboard") + ".json",
+            mime="application/json",
+            key="download_self_improving_intelligence_dashboard",
+            disabled=not bool(intel.get("db_connected")),
+        )
+
 def render_dashboard(database_url: str | None = None):
     if st is None:
         raise RuntimeError("streamlit is required to run the dashboard")
@@ -3376,6 +3492,7 @@ def render_dashboard(database_url: str | None = None):
         "Research": render_research_page,
         "Factor Attribution": render_factor_attribution_page,
         "Factor Intelligence": render_factor_intelligence_page,
+        "Self-Improving": render_self_improving_page,
         "Walk-Forward Validation": render_walk_forward_validation_page,
         "Portfolio Research": render_portfolio_research_page,
         "Strategy Laboratory": render_strategy_laboratory_page,
@@ -3383,7 +3500,7 @@ def render_dashboard(database_url: str | None = None):
         "Daily Run": render_daily_run_page,
     }
     page_renderer = page_renderers.get(selected_page, render_overview_page)
-    if selected_page in {"Research", "Factor Attribution", "Factor Intelligence", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"}:
+    if selected_page in {"Research", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"}:
         _render_with_error_guard("Research", page_renderer)
     elif selected_page in {"Orders", "Performance"}:
         _render_with_error_guard(selected_page, page_renderer, payload)

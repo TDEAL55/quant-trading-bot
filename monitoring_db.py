@@ -2,6 +2,7 @@ import os
 import contextlib
 import sqlite3
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -564,3 +565,158 @@ class MonitoringDatabase:
             """,
             (int(run_id), int(limit)),
         )
+
+    def insert_quantum_score_run(self, payload: dict[str, Any]) -> int:
+        self.execute(
+            """
+            INSERT INTO quantum_score_runs (
+                scanner_run_id, score_version, started_at, completed_at,
+                symbol_count, eligible_count, selected_symbol, selected_strategy_id,
+                selected_final_score, configuration_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload.get("scanner_run_id"),
+                payload.get("score_version"),
+                payload.get("started_at"),
+                payload.get("completed_at"),
+                payload.get("symbol_count"),
+                payload.get("eligible_count"),
+                payload.get("selected_symbol"),
+                payload.get("selected_strategy_id"),
+                payload.get("selected_final_score"),
+                self._stable_json(payload.get("configuration") or {}),
+                payload.get("created_at"),
+            ),
+        )
+        row = self.query_one("SELECT id FROM quantum_score_runs ORDER BY id DESC LIMIT 1")
+        return int((row or {}).get("id") or 0)
+
+    def insert_quantum_security_score(self, run_id: int, payload: dict[str, Any]) -> int:
+        self.execute(
+            """
+            INSERT INTO quantum_security_scores (
+                run_id, symbol, rank, is_selected, strategy_eligibility,
+                final_score, data_quality_status, score_timestamp, score_version,
+                market_regime, risk_reward_ratio, warnings_json,
+                rejection_reasons_json, factor_values_json, weights_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                payload.get("symbol"),
+                payload.get("rank"),
+                1 if payload.get("is_selected") else 0,
+                1 if payload.get("strategy_eligibility") else 0,
+                payload.get("final_score"),
+                payload.get("data_quality_status"),
+                payload.get("score_timestamp"),
+                payload.get("score_version"),
+                payload.get("market_regime"),
+                payload.get("risk_reward_ratio"),
+                self._stable_json(payload.get("warnings") or []),
+                self._stable_json(payload.get("rejection_reasons") or []),
+                self._stable_json(payload.get("factor_values") or {}),
+                self._stable_json(payload.get("weights") or {}),
+                payload.get("created_at"),
+            ),
+        )
+        row = self.query_one("SELECT id FROM quantum_security_scores ORDER BY id DESC LIMIT 1")
+        return int((row or {}).get("id") or 0)
+
+    def insert_quantum_component_contribution(self, security_score_id: int, payload: dict[str, Any]):
+        self.execute(
+            """
+            INSERT INTO quantum_component_contributions (
+                security_score_id, component_name, normalized_score,
+                weight, weighted_contribution, penalty_points, warning
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(security_score_id),
+                payload.get("component_name"),
+                payload.get("normalized_score"),
+                payload.get("weight"),
+                payload.get("weighted_contribution"),
+                payload.get("penalty_points"),
+                payload.get("warning"),
+            ),
+        )
+
+    def insert_quantum_strategy_score(self, security_score_id: int, payload: dict[str, Any]):
+        self.execute(
+            """
+            INSERT INTO quantum_strategy_scores (
+                security_score_id, strategy_id, strategy_version,
+                strategy_score, confidence, eligible,
+                required_factors_json, rejection_reasons_json, warnings_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(security_score_id),
+                payload.get("strategy_id"),
+                payload.get("strategy_version"),
+                payload.get("strategy_score"),
+                payload.get("confidence"),
+                1 if payload.get("eligible") else 0,
+                self._stable_json(payload.get("required_factors") or []),
+                self._stable_json(payload.get("rejection_reasons") or []),
+                self._stable_json(payload.get("warnings") or []),
+            ),
+        )
+
+    def insert_quantum_rejection(self, security_score_id: int, reason: str, source: str = "quantum"):
+        self.execute(
+            """
+            INSERT INTO quantum_score_rejections (
+                security_score_id, rejection_reason, source, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                int(security_score_id),
+                str(reason),
+                str(source),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+    def fetch_latest_quantum_score_run(self) -> dict[str, Any] | None:
+        return self.query_one("SELECT * FROM quantum_score_runs ORDER BY started_at DESC LIMIT 1")
+
+    def fetch_top_quantum_scores(self, run_id: int | None = None, limit: int = 25) -> list[dict[str, Any]]:
+        if run_id is None:
+            latest = self.fetch_latest_quantum_score_run()
+            run_id = int((latest or {}).get("id") or 0)
+        if not run_id:
+            return []
+        return self.query_all(
+            """
+            SELECT *
+            FROM quantum_security_scores
+            WHERE run_id = ?
+            ORDER BY rank ASC, final_score DESC, symbol ASC
+            LIMIT ?
+            """,
+            (int(run_id), int(limit)),
+        )
+
+    def fetch_quantum_score_details(self, security_score_id: int) -> dict[str, Any]:
+        score_row = self.query_one("SELECT * FROM quantum_security_scores WHERE id = ?", (int(security_score_id),)) or {}
+        components = self.query_all(
+            "SELECT * FROM quantum_component_contributions WHERE security_score_id = ? ORDER BY component_name ASC",
+            (int(security_score_id),),
+        )
+        strategy_scores = self.query_all(
+            "SELECT * FROM quantum_strategy_scores WHERE security_score_id = ? ORDER BY strategy_id ASC",
+            (int(security_score_id),),
+        )
+        rejections = self.query_all(
+            "SELECT * FROM quantum_score_rejections WHERE security_score_id = ? ORDER BY id ASC",
+            (int(security_score_id),),
+        )
+        return {
+            "score": score_row,
+            "components": components,
+            "strategy_scores": strategy_scores,
+            "rejections": rejections,
+        }

@@ -76,6 +76,14 @@ def build_portfolio_shortlist(
     for candidate in ranked_candidates[: max(max_candidates, 0)]:
         symbol = str(candidate.get("symbol", "")).upper()
         sector = str(candidate.get("sector") or "Unknown")
+        quantum = dict(candidate.get("quantum_score") or {})
+        quantum_rejections = set(str(reason) for reason in list(quantum.get("rejection_reasons") or []))
+        strategy_scores = dict(candidate.get("strategy_specific_scores") or {})
+        eligible_strategies = [
+            str(item.get("strategy_id") or sid)
+            for sid, item in strategy_scores.items()
+            if bool((item or {}).get("eligible"))
+        ]
 
         if len(selected) >= max_positions:
             rejected.append({"symbol": symbol, "reason": "maximum positions reached", "rank": candidate.get("rank")})
@@ -88,6 +96,18 @@ def build_portfolio_shortlist(
             continue
         if symbol in cooldown_set:
             rejected.append({"symbol": symbol, "reason": "symbol in cooldown", "rank": candidate.get("rank")})
+            continue
+        if "stale_data" in quantum_rejections:
+            rejected.append({"symbol": symbol, "reason": "stale market data", "rank": candidate.get("rank")})
+            continue
+        if "average_dollar_volume_below_minimum" in quantum_rejections or "minimum_price_check_failed" in quantum_rejections:
+            rejected.append({"symbol": symbol, "reason": "liquidity/price guardrail failed", "rank": candidate.get("rank")})
+            continue
+        if "invalid_reward_risk_structure" in quantum_rejections or "reward_risk_below_minimum" in quantum_rejections:
+            rejected.append({"symbol": symbol, "reason": "reward/risk guardrail failed", "rank": candidate.get("rank")})
+            continue
+        if not eligible_strategies:
+            rejected.append({"symbol": symbol, "reason": "no eligible strategy signal", "rank": candidate.get("rank")})
             continue
 
         current_sector_count = sector_counts.get(sector, 0)
@@ -117,6 +137,10 @@ def build_portfolio_shortlist(
                 "sector": sector,
                 "score": float(candidate.get("overall_score") or 0.0),
                 "confidence": float(candidate.get("confidence") or 0.0),
+                "quantum_score": quantum,
+                "strategy_specific_scores": strategy_scores,
+                "eligible_strategy_ids": sorted(set(eligible_strategies)),
+                "score_version": str(candidate.get("score_version") or quantum.get("score_version") or "quantum_v1"),
                 "suggested_max_allocation_percent": float(proposed_symbol_alloc),
                 "suggested_paper_notional": round(float(suggested_notional), 2),
                 "reasons_selected": [
@@ -124,7 +148,7 @@ def build_portfolio_shortlist(
                     "passes diversification constraints",
                     "within cash reserve policy",
                 ],
-                "warnings": ["research candidate only - no order submitted"],
+                "warnings": ["research candidate only - no order submitted", *list(quantum.get("warnings") or [])],
             }
         )
 

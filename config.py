@@ -162,7 +162,7 @@ SCANNER_UNIVERSES = _parse_csv_env(
     )
 )
 SCANNER_INCLUDE_ETFS = _parse_bool_env(os.getenv("SCANNER_INCLUDE_ETFS", "true"), default=True)
-SCANNER_MAX_UNIVERSE_SIZE = int(os.getenv("SCANNER_MAX_UNIVERSE_SIZE", "400"))
+SCANNER_MAX_UNIVERSE_SIZE = int(os.getenv("SCANNER_MAX_UNIVERSE_SIZE", "0"))
 SCANNER_EXCLUDED_SYMBOLS = _parse_csv_env(os.getenv("SCANNER_EXCLUDED_SYMBOLS", ""))
 SCANNER_ADDITIONAL_SYMBOLS = _parse_csv_env(os.getenv("SCANNER_ADDITIONAL_SYMBOLS", ""))
 

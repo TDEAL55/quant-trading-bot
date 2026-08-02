@@ -49,6 +49,92 @@ class MonitoringScannerRepository(ScannerRepository):
             self.db.insert_portfolio_candidate(run_id, candidate)
         for review in payload.position_reviews:
             self.db.insert_position_review(run_id, review)
+
+        score_versions = [
+            str((item.get("quantum_score") or {}).get("score_version") or "")
+            for item in payload.results
+            if isinstance(item, dict)
+        ]
+        score_version = next((value for value in score_versions if value), "quantum_v1")
+        selected = list(payload.candidates or [])
+        selected_primary = dict(selected[0]) if selected else {}
+        selected_quantum = dict(selected_primary.get("quantum_score") or {})
+        selected_strategies = list(selected_primary.get("eligible_strategy_ids") or [])
+
+        quantum_run_id = self.db.insert_quantum_score_run(
+            {
+                "scanner_run_id": run_id,
+                "score_version": score_version,
+                "started_at": run.get("started_at") or _utc_iso(),
+                "completed_at": run.get("completed_at") or _utc_iso(),
+                "symbol_count": len(payload.results),
+                "eligible_count": len([item for item in payload.results if bool(item.get("eligible"))]),
+                "selected_symbol": selected_primary.get("symbol"),
+                "selected_strategy_id": selected_strategies[0] if selected_strategies else None,
+                "selected_final_score": selected_quantum.get("final_score"),
+                "configuration": {
+                    "component_weights": selected_quantum.get("component_weights") or {},
+                    "score_version": score_version,
+                },
+                "created_at": _utc_iso(),
+            }
+        )
+
+        selected_symbols = {str(item.get("symbol") or "").upper() for item in selected}
+        for result in payload.results:
+            quantum = dict(result.get("quantum_score") or {})
+            if not quantum:
+                continue
+            strategy_scores = dict(result.get("strategy_specific_scores") or {})
+            security_id = self.db.insert_quantum_security_score(
+                quantum_run_id,
+                {
+                    "symbol": str(result.get("symbol") or "").upper(),
+                    "rank": result.get("rank"),
+                    "is_selected": str(result.get("symbol") or "").upper() in selected_symbols,
+                    "strategy_eligibility": any(bool((row or {}).get("eligible")) for row in strategy_scores.values()),
+                    "final_score": quantum.get("final_score"),
+                    "data_quality_status": quantum.get("data_quality_status"),
+                    "score_timestamp": quantum.get("calculation_timestamp"),
+                    "score_version": quantum.get("score_version"),
+                    "market_regime": quantum.get("market_regime"),
+                    "risk_reward_ratio": (quantum.get("risk_reward") or {}).get("reward_risk_ratio"),
+                    "warnings": list(quantum.get("warnings") or []),
+                    "rejection_reasons": list(quantum.get("rejection_reasons") or []),
+                    "factor_values": dict(quantum.get("factor_values") or {}),
+                    "weights": dict(quantum.get("component_weights") or {}),
+                    "created_at": _utc_iso(),
+                },
+            )
+
+            normalized = dict(quantum.get("normalized_component_scores") or {})
+            weights = dict(quantum.get("component_weights") or {})
+            contributions = dict(quantum.get("weighted_contributions") or {})
+            penalties_by_component = {
+                str(item.get("component") or ""): float(item.get("penalty_points") or 0.0)
+                for item in list(quantum.get("missing_data_penalties") or [])
+            }
+            for component, normalized_score in normalized.items():
+                self.db.insert_quantum_component_contribution(
+                    security_id,
+                    {
+                        "component_name": component,
+                        "normalized_score": normalized_score,
+                        "weight": weights.get(component),
+                        "weighted_contribution": contributions.get(component),
+                        "penalty_points": penalties_by_component.get(component, 0.0),
+                        "warning": None,
+                    },
+                )
+
+            for strategy_id, strategy_payload in strategy_scores.items():
+                row = dict(strategy_payload or {})
+                row.setdefault("strategy_id", strategy_id)
+                self.db.insert_quantum_strategy_score(security_id, row)
+
+            for reason in list(quantum.get("rejection_reasons") or []):
+                self.db.insert_quantum_rejection(security_id, str(reason), source="quantum")
+
         return {"storage": "database", "run_id": run_id, "saved_at": _utc_iso()}
 
 

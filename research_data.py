@@ -105,6 +105,8 @@ def build_research_candidate_records(scanner_payload: dict[str, Any], research_r
     for position, row in enumerate(ordered_rows, start=1):
         components = dict(row.get("component_scores") or {})
         factors = dict((row.get("data_quality") or {}).get("factor") or {})
+        quantum = dict(row.get("quantum_score") or {})
+        strategy_specific_scores = dict(row.get("strategy_specific_scores") or {})
         rejection_reasons = list(row.get("rejection_reasons") or [])
         status = "REJECTED" if rejection_reasons or not row.get("eligible") else "ELIGIBLE"
         records.append(
@@ -134,6 +136,8 @@ def build_research_candidate_records(scanner_payload: dict[str, Any], research_r
                 "factor_breakdown": {
                     "component_scores": components,
                     "factors": factors,
+                    "quantum_score": quantum,
+                    "strategy_specific_scores": strategy_specific_scores,
                     "warnings": list(row.get("warnings") or []),
                     "data_quality": dict(row.get("data_quality") or {}),
                 },

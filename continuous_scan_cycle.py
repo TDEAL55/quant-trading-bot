@@ -343,7 +343,14 @@ def run_continuous_scan_cycle(
                 persistence_payload={"scan": {"status": "saved" if persist else "skipped"}, "execution": {"status": "skipped"}},
             )
 
-        selected_strategy = sorted(tradable_signals, key=lambda item: float(item.get("confidence") or 0.0), reverse=True)[0]
+        selected_strategy = sorted(
+            tradable_signals,
+            key=lambda item: (
+                -float(item.get("strategy_score") or 0.0),
+                -float(item.get("confidence") or 0.0),
+                str(item.get("strategy_id") or ""),
+            ),
+        )[0]
 
         max_position_equity_percent = _effective_max_position_equity_percent(config)
         max_open_positions = _effective_max_open_positions(config)
@@ -398,6 +405,11 @@ def run_continuous_scan_cycle(
         trade_value = float(planned_order.get("notional") or 0.0)
         supports_scaling = bool(selected_strategy.get("supports_scaling", False))
         existing_qty = float((broker_positions.get(selected_symbol) or {}).get("quantity") or 0.0)
+        selected_quantum = dict(selected_candidate.get("quantum_score") or {})
+        quantum_rejections = {str(item) for item in list(selected_quantum.get("rejection_reasons") or [])}
+        stale_data_ok = "stale_data" not in quantum_rejections
+        liquidity_ok = "average_dollar_volume_below_minimum" not in quantum_rejections and "minimum_price_check_failed" not in quantum_rejections
+        reward_risk_ok = "invalid_reward_risk_structure" not in quantum_rejections and "reward_risk_below_minimum" not in quantum_rejections
         risk_checks = {
             "position_size": bool(trade_value <= notional_cap_by_equity),
             "cash": bool(float(broker_cash) >= trade_value),
@@ -406,6 +418,9 @@ def run_continuous_scan_cycle(
             "existing_position": bool(existing_qty <= 0 or supports_scaling),
             "open_entry_order": not _has_open_entry_order(broker_open_orders, selected_symbol),
             "max_open_positions": bool(_position_count(broker_positions) < int(max_open_positions) or (existing_qty > 0 and supports_scaling)),
+            "stale_data": bool(stale_data_ok),
+            "liquidity": bool(liquidity_ok),
+            "reward_risk": bool(reward_risk_ok),
             "duplicate_protection": True,
         }
 

@@ -37,6 +37,7 @@ def _cfg(tmp_path, **overrides):
         "database_path": db_path,
         "notifications_enabled": True,
         "max_daily_orders": 100000,
+        "scan_symbols": ("AAPL", "MSFT", "SPY"),
     }
     values.update(overrides)
     return type("Cfg", (), values)()

@@ -21,12 +21,20 @@ class MockTradingClient:
     def __init__(self, account=None, positions=None):
         self.account = account or MockAccount()
         self.positions = positions or [MockPosition("SPY", "2", "500.10", "1000.20")]
+        self.assets = [
+            {"symbol": "AAPL", "asset_class": "US_EQUITY", "status": "ACTIVE", "tradable": True},
+            {"symbol": "MSFT", "asset_class": "US_EQUITY", "status": "ACTIVE", "tradable": True},
+        ]
 
     def get_account(self):
         return self.account
 
     def get_all_positions(self):
         return self.positions
+
+    def get_all_assets(self, filter=None):
+        del filter
+        return self.assets
 
 
 def test_alpaca_client_fails_safely_when_credentials_missing(monkeypatch):
@@ -65,3 +73,13 @@ def test_alpaca_client_submit_order_is_disabled(monkeypatch):
 
     with pytest.raises(NotImplementedError, match="disabled in alpaca_client"):
         client.submit_order("buy", "SPY", 1)
+
+
+def test_alpaca_client_reads_assets_api(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+
+    client = create_alpaca_client(mode="PAPER", trading_client=MockTradingClient())
+    rows = client.get_assets()
+    assert len(rows) == 2
+    assert rows[0]["symbol"] == "AAPL"

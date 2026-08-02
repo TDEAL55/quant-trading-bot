@@ -2,8 +2,13 @@ import os
 
 try:
     from alpaca.trading.client import TradingClient
+    from alpaca.trading.enums import AssetClass, AssetStatus
+    from alpaca.trading.requests import GetAssetsRequest
 except ImportError:  # pragma: no cover - covered indirectly through runtime checks
     TradingClient = None
+    AssetClass = None
+    AssetStatus = None
+    GetAssetsRequest = None
 
 
 class AlpacaClient:
@@ -83,6 +88,32 @@ class AlpacaClient:
     def get_positions(self):
         """Backward-compatible alias for current positions."""
         return self.get_current_positions()
+
+    def get_assets(self):
+        """Return assets visible to the connected paper account."""
+        self._require_safe_action("get_assets")
+        getter = getattr(self._trading_client, "get_all_assets", None)
+        if getter is None:
+            raise RuntimeError("Trading client does not support assets API")
+
+        # Prefer server-side filtering when available.
+        if GetAssetsRequest is not None and AssetClass is not None and AssetStatus is not None:
+            try:
+                req = GetAssetsRequest(asset_class=AssetClass.US_EQUITY, status=AssetStatus.ACTIVE)
+                rows = getter(filter=req)
+                if rows is not None:
+                    return list(rows)
+            except TypeError:
+                pass
+            except Exception:
+                pass
+
+        # Fallback for mocked clients or older SDK behavior.
+        try:
+            rows = getter()
+        except TypeError:
+            rows = getter(None)
+        return list(rows or [])
 
     def submit_order(self, *args, **kwargs):
         """Order submission remains blocked for safety."""

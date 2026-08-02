@@ -11,7 +11,9 @@ from factor_intelligence_data import fetch_factor_intelligence_dashboard_payload
 from performance_dashboard import fetch_performance_dashboard_payload
 from paper_validation_data import fetch_paper_validation_dashboard_payload
 from portfolio_research_data import fetch_portfolio_research_dashboard_payload
+from quantum_score_data import fetch_quantum_score_dashboard_payload
 from research_data import fetch_research_dashboard_payload
+from self_improving_data import fetch_self_improving_dashboard_payload
 from strategy_lab_data import fetch_strategy_lab_dashboard_payload
 from walk_forward_data import fetch_walk_forward_dashboard_payload
 
@@ -28,6 +30,8 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
         strategy_lab_payload = fetch_strategy_lab_dashboard_payload(database_url)
         paper_validation_payload = fetch_paper_validation_dashboard_payload(database_url)
         performance_payload = fetch_performance_dashboard_payload(database_url)
+        quantum_payload = fetch_quantum_score_dashboard_payload(database_url)
+        self_improving_payload = fetch_self_improving_dashboard_payload(database_url)
         daily_run_repo = DailyRunRepository(database_url=database_url)
         try:
             daily_run_payload = daily_run_repo.dashboard_payload()
@@ -41,6 +45,8 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
         research_payload["strategy_lab"] = strategy_lab_payload
         research_payload["paper_validation"] = paper_validation_payload
         research_payload["performance_intelligence"] = performance_payload
+        research_payload["quantum_score"] = quantum_payload
+        research_payload["self_improving"] = self_improving_payload
         research_payload["daily_runs"] = daily_run_payload
     except Exception:
         research_payload = {
@@ -157,6 +163,26 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
                 "daily_report": {},
                 "weekly_summary": [],
                 "monthly_summary": [],
+            },
+            "quantum_score": {
+                "db_connected": False,
+                "latest_run": {},
+                "top_candidates": [],
+                "selected_candidate": {},
+                "candidate_details": {},
+            },
+            "self_improving": {
+                "db_connected": False,
+                "trade_memory": [],
+                "strategy_leaderboard": [],
+                "latest_regime": {},
+                "strategy_regime_matrix": [],
+                "factor_effectiveness": [],
+                "allocation_recommendations": [],
+                "strategy_state_recommendations": [],
+                "weight_change_recommendations": [],
+                "daily_report": {},
+                "weekly_report": {},
             },
             "daily_runs": {
                 "db_connected": False,

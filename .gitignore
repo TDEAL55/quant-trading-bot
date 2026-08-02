@@ -25,3 +25,10 @@ paper_order_ledger.json
 paper_order_ledger_archive.json
 paper_order_tickets.json
 paper_portfolio.json
+
+# Local test/runtime artifacts
+pytest_autonomy.xml
+pytest_latest_q.txt
+pytest_latest_q.err.txt
+pytest_q.xml
+x.db

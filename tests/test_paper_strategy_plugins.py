@@ -9,15 +9,31 @@ def test_strategy_plugins_emit_expected_fields_and_ids():
         "latest_price": 100.0,
         "overall_score": 82.0,
         "confidence": 70.0,
+        "quantum_score": {
+            "data_quality_status": "ok",
+            "normalized_component_scores": {
+                "trend_strength": 70.0,
+                "relative_strength": 65.0,
+                "momentum_quality": 72.0,
+                "volume_confirmation": 68.0,
+                "volatility_quality": 60.0,
+                "liquidity_quality": 75.0,
+                "risk_reward_quality": 66.0,
+                "market_regime_alignment": 64.0,
+            },
+            "risk_reward": {"reward_risk_ratio": 1.8},
+            "warnings": [],
+            "rejection_reasons": [],
+        },
     }
     rows = evaluate_all_strategies(payload)
 
     ids = {row["strategy_id"] for row in rows}
     assert ids == {
-        "trend_momentum",
-        "ma_trend_follow",
-        "short_term_mean_reversion",
-        "breakout_volume_confirmation",
+        "trend_momentum_v1",
+        "moving_average_trend_v1",
+        "short_term_mean_reversion_v1",
+        "volume_breakout_v1",
     }
     for row in rows:
         assert row["strategy_version"] == "1.0.0"
@@ -27,3 +43,7 @@ def test_strategy_plugins_emit_expected_fields_and_ids():
         assert "stop" in row
         assert "target_or_exit_rule" in row
         assert "market_regime" in row
+        assert "quantum_score" in row
+        assert "strategy_score" in row
+        assert "expected_reward_risk" in row
+        assert "data_quality_status" in row
