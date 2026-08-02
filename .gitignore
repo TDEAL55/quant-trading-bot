@@ -13,3 +13,15 @@ TWO_WEEK_REPORT.md
 .overnight_cache/
 .paper_daily_state.json
 .paper_daily_state.json.*
+
+# Local runtime state
+.discord_cycle_state.json
+backups/
+full_test_out.txt
+paper_closed_trades.json
+paper_daily_cycle_history.json
+paper_exit_ledger.json
+paper_order_ledger.json
+paper_order_ledger_archive.json
+paper_order_tickets.json
+paper_portfolio.json

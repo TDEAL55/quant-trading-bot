@@ -1,0 +1,341 @@
+from __future__ import annotations
+
+import os
+import time
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Any
+
+try:
+    from alpaca.trading.client import TradingClient
+    from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
+    from alpaca.trading.requests import GetOrdersRequest, MarketOrderRequest
+except Exception:  # pragma: no cover - import failures are handled at runtime
+    TradingClient = None
+    OrderSide = None
+    QueryOrderStatus = None
+    TimeInForce = None
+    GetOrdersRequest = None
+    MarketOrderRequest = None
+
+
+ALPACA_PAPER_ENDPOINT = "https://paper-api.alpaca.markets"
+FINAL_ORDER_STATUSES = {"filled", "canceled", "expired", "rejected", "done_for_day"}
+
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_url(url: str) -> str:
+    return str(url or "").strip().rstrip("/").lower()
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _to_decimal(value: Any) -> Decimal:
+    return Decimal(str(value))
+
+
+def _is_true(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _time_in_force(value: str) -> Any:
+    normalized = str(value or "day").strip().lower()
+    if TimeInForce is None:
+        return normalized
+    if normalized == "gtc":
+        return TimeInForce.GTC
+    return TimeInForce.DAY
+
+
+def _order_side(value: str) -> Any:
+    normalized = str(value or "").strip().lower()
+    if normalized not in {"buy", "sell"}:
+        raise RuntimeError("order side must be BUY or SELL")
+    if OrderSide is None:
+        return normalized
+    return OrderSide.BUY if normalized == "buy" else OrderSide.SELL
+
+
+def normalize_alpaca_order(order: Any) -> dict[str, Any]:
+    if not order:
+        return {}
+    return {
+        "order_id": str(getattr(order, "id", "") or ""),
+        "client_order_id": str(getattr(order, "client_order_id", "") or ""),
+        "symbol": str(getattr(order, "symbol", "") or "").upper(),
+        "side": str(getattr(order, "side", "") or "").lower(),
+        "requested_quantity": _to_float(getattr(order, "qty", 0.0), 0.0),
+        "filled_quantity": _to_float(getattr(order, "filled_qty", 0.0), 0.0),
+        "order_type": str(getattr(order, "order_type", "market") or "market").lower(),
+        "time_in_force": str(getattr(order, "time_in_force", "day") or "day").lower(),
+        "submitted_at": str(getattr(order, "submitted_at", "") or ""),
+        "updated_at": str(getattr(order, "updated_at", "") or ""),
+        "status": str(getattr(order, "status", "unknown") or "unknown").lower(),
+        "average_fill_price": _to_float(getattr(order, "filled_avg_price", 0.0), 0.0),
+        "rejection_reason": str(getattr(order, "failed_at", "") or "") if str(getattr(order, "status", "")).lower() == "rejected" else "",
+        "broker_backend": "ALPACA",
+    }
+
+
+class AlpacaPaperBroker:
+    """Paper-only Alpaca broker with duplicate-safe client order recovery."""
+
+    def __init__(self, mode: str | None = None, trading_client: Any | None = None):
+        selected_mode = str(mode or os.getenv("TRADING_MODE", "PAPER")).strip().upper()
+        if selected_mode == "LIVE":
+            raise RuntimeError("LIVE mode is blocked for Alpaca paper broker")
+        if selected_mode not in {"PAPER", "SIMULATION"}:
+            raise RuntimeError("mode must be PAPER or SIMULATION")
+
+        self.mode = selected_mode
+        self.backend = "ALPACA"
+        self.api_key = str(os.getenv("ALPACA_API_KEY", "")).strip()
+        self.api_secret = str(os.getenv("ALPACA_API_SECRET", "")).strip()
+        self.base_url = str(os.getenv("ALPACA_PAPER_BASE_URL", ALPACA_PAPER_ENDPOINT)).strip() or ALPACA_PAPER_ENDPOINT
+        self.order_submission_enabled = _is_true(os.getenv("ALPACA_ORDER_SUBMISSION_ENABLED", "false"))
+
+        if _normalize_url(self.base_url) != _normalize_url(ALPACA_PAPER_ENDPOINT):
+            raise RuntimeError("ALPACA_PAPER_BASE_URL must be https://paper-api.alpaca.markets")
+        if not self.api_key or not self.api_secret:
+            raise RuntimeError("Missing required Alpaca credentials: ALPACA_API_KEY, ALPACA_API_SECRET")
+
+        self._trading_client = trading_client or self._create_trading_client()
+        self._validate_account_ready()
+
+    def _create_trading_client(self) -> Any:
+        if TradingClient is None:
+            raise RuntimeError("alpaca-py is required. Install alpaca-py before using Alpaca paper broker.")
+        return TradingClient(
+            api_key=self.api_key,
+            secret_key=self.api_secret,
+            paper=True,
+            url_override=self.base_url,
+        )
+
+    def _fetch_account(self) -> Any:
+        return self._trading_client.get_account()
+
+    def _validate_account_ready(self) -> None:
+        account = self._fetch_account()
+        status = str(getattr(account, "status", "")).upper()
+        if status not in {"ACTIVE"}:
+            raise RuntimeError(f"Alpaca account is not active: {status or 'UNKNOWN'}")
+        if bool(getattr(account, "trading_blocked", False)):
+            raise RuntimeError("Alpaca account is trading_blocked")
+        if bool(getattr(account, "account_blocked", False)):
+            raise RuntimeError("Alpaca account is account_blocked")
+
+    def get_account(self) -> dict[str, Any]:
+        account = self._fetch_account()
+        return {
+            "status": str(getattr(account, "status", "unknown") or "unknown"),
+            "account_number": str(getattr(account, "account_number", "") or ""),
+            "currency": str(getattr(account, "currency", "USD") or "USD"),
+            "buying_power": _to_float(getattr(account, "buying_power", 0.0), 0.0),
+            "cash": _to_float(getattr(account, "cash", 0.0), 0.0),
+            "equity": _to_float(getattr(account, "equity", 0.0), 0.0),
+            "portfolio_value": _to_float(getattr(account, "portfolio_value", getattr(account, "equity", 0.0)), 0.0),
+            "trading_blocked": bool(getattr(account, "trading_blocked", False)),
+            "account_blocked": bool(getattr(account, "account_blocked", False)),
+            "paper_endpoint_confirmed": True,
+            "broker_backend": "ALPACA",
+        }
+
+    def get_account_status(self) -> str:
+        return str(self.get_account().get("status") or "unknown")
+
+    def get_buying_power(self) -> float:
+        return float(self.get_account().get("buying_power") or 0.0)
+
+    def get_cash(self) -> float:
+        return float(self.get_account().get("cash") or 0.0)
+
+    def get_equity(self) -> float:
+        return float(self.get_account().get("equity") or 0.0)
+
+    def get_portfolio_value(self) -> float:
+        return float(self.get_account().get("portfolio_value") or 0.0)
+
+    def get_positions(self) -> dict[str, dict[str, float]]:
+        rows = self._trading_client.get_all_positions()
+        result: dict[str, dict[str, float]] = {}
+        for position in rows or []:
+            symbol = str(getattr(position, "symbol", "") or "").upper()
+            if not symbol:
+                continue
+            result[symbol] = {
+                "quantity": _to_float(getattr(position, "qty", 0.0), 0.0),
+                "avg_price": _to_float(getattr(position, "avg_entry_price", 0.0), 0.0),
+                "market_value": _to_float(getattr(position, "market_value", 0.0), 0.0),
+            }
+        return result
+
+    def get_open_orders(self) -> list[dict[str, Any]]:
+        if GetOrdersRequest is not None and QueryOrderStatus is not None:
+            request = GetOrdersRequest(status=QueryOrderStatus.OPEN)
+            rows = self._trading_client.get_orders(filter=request)
+        else:
+            rows = self._trading_client.get_orders()
+        return [normalize_alpaca_order(row) for row in rows or []]
+
+    def get_order_by_id(self, order_id: str) -> dict[str, Any] | None:
+        order_id = str(order_id or "").strip()
+        if not order_id:
+            return None
+        order = self._trading_client.get_order_by_id(order_id)
+        return normalize_alpaca_order(order)
+
+    def get_order_by_client_order_id(self, client_order_id: str) -> dict[str, Any] | None:
+        cid = str(client_order_id or "").strip()
+        if not cid:
+            return None
+        try:
+            order = self._trading_client.get_order_by_client_id(cid)
+        except Exception:
+            return None
+        normalized = normalize_alpaca_order(order)
+        return normalized or None
+
+    def _validate_quantity(self, symbol: str, quantity: float, allow_fractional: bool) -> None:
+        qty = _to_float(quantity, 0.0)
+        if qty <= 0:
+            raise RuntimeError("quantity must be greater than zero")
+        if not allow_fractional and abs(qty - round(qty)) > 1e-9:
+            raise RuntimeError("fractional quantity is not allowed for this order")
+        try:
+            asset = self._trading_client.get_asset(str(symbol).upper())
+        except Exception:
+            return
+        if not bool(getattr(asset, "tradable", True)):
+            raise RuntimeError(f"asset is not tradable: {symbol}")
+        if abs(qty - round(qty)) > 1e-9 and not bool(getattr(asset, "fractionable", False)):
+            raise RuntimeError(f"asset does not support fractional orders: {symbol}")
+
+    def submit_order(
+        self,
+        side: str,
+        ticker: str,
+        quantity: float,
+        *,
+        client_order_id: str,
+        order_type: str = "market",
+        time_in_force: str = "day",
+        allow_fractional: bool = False,
+        wait_for_fill: bool = True,
+        poll_seconds: float = 1.0,
+        max_wait_seconds: float = 45.0,
+    ) -> dict[str, Any]:
+        symbol = str(ticker or "").strip().upper()
+        if not symbol:
+            raise RuntimeError("symbol is required")
+        self._validate_quantity(symbol=symbol, quantity=quantity, allow_fractional=allow_fractional)
+
+        existing = self.get_order_by_client_order_id(client_order_id)
+        if existing:
+            existing["recovered_existing"] = True
+            if wait_for_fill:
+                return self.wait_for_order(client_order_id=client_order_id, poll_seconds=poll_seconds, max_wait_seconds=max_wait_seconds)
+            return existing
+
+        if not self.order_submission_enabled:
+            return {
+                "status": "submission_blocked_by_config",
+                "symbol": symbol,
+                "side": str(side or "").lower(),
+                "requested_quantity": _to_float(quantity, 0.0),
+                "client_order_id": str(client_order_id or ""),
+                "broker_backend": "ALPACA",
+            }
+
+        order_kind = str(order_type or "market").strip().lower()
+        if order_kind != "market":
+            raise RuntimeError("only market order type is supported for first PAPER deployment")
+
+        side_value = _order_side(side)
+        tif_value = _time_in_force(time_in_force)
+        qty_decimal = _to_decimal(quantity)
+
+        try:
+            order_request = MarketOrderRequest(
+                symbol=symbol,
+                qty=qty_decimal,
+                side=side_value,
+                time_in_force=tif_value,
+                client_order_id=str(client_order_id),
+            )
+            submitted = self._trading_client.submit_order(order_data=order_request)
+            submitted_order = normalize_alpaca_order(submitted)
+        except Exception:
+            recovered = self.get_order_by_client_order_id(client_order_id)
+            if recovered:
+                recovered["recovered_after_submit_error"] = True
+                submitted_order = recovered
+            else:
+                raise
+
+        if wait_for_fill:
+            return self.wait_for_order(
+                order_id=str(submitted_order.get("order_id") or ""),
+                client_order_id=str(client_order_id),
+                poll_seconds=poll_seconds,
+                max_wait_seconds=max_wait_seconds,
+            )
+        return submitted_order
+
+    def wait_for_order(
+        self,
+        *,
+        order_id: str | None = None,
+        client_order_id: str | None = None,
+        poll_seconds: float = 1.0,
+        max_wait_seconds: float = 45.0,
+    ) -> dict[str, Any]:
+        started = time.monotonic()
+        last_seen: dict[str, Any] | None = None
+        while True:
+            order = None
+            if order_id:
+                order = self.get_order_by_id(order_id)
+            if not order and client_order_id:
+                order = self.get_order_by_client_order_id(client_order_id)
+            if order:
+                last_seen = order
+                status = str(order.get("status") or "unknown").lower()
+                if status in FINAL_ORDER_STATUSES:
+                    return order
+            if (time.monotonic() - started) >= float(max_wait_seconds):
+                if last_seen:
+                    last_seen["timed_out_waiting_for_final_status"] = True
+                    return last_seen
+                raise RuntimeError("Timed out waiting for Alpaca order status")
+            time.sleep(max(float(poll_seconds), 0.1))
+
+    def cancel_order(self, order_id: str) -> dict[str, Any]:
+        oid = str(order_id or "").strip()
+        if not oid:
+            raise RuntimeError("order_id is required")
+        self._trading_client.cancel_order_by_id(oid)
+        canceled = self.get_order_by_id(oid) or {"order_id": oid, "status": "canceled"}
+        return canceled
+
+    def reconcile_symbol(self, symbol: str, expected_quantity: float, tolerance: float = 1e-6) -> dict[str, Any]:
+        positions = self.get_positions()
+        actual_qty = _to_float((positions.get(str(symbol).upper()) or {}).get("quantity"), 0.0)
+        expected_qty = _to_float(expected_quantity, 0.0)
+        mismatch = abs(actual_qty - expected_qty) > float(tolerance)
+        return {
+            "symbol": str(symbol).upper(),
+            "expected_quantity": expected_qty,
+            "actual_quantity": actual_qty,
+            "matched": not mismatch,
+            "difference": round(actual_qty - expected_qty, 6),
+            "broker_backend": "ALPACA",
+        }

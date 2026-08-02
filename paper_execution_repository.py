@@ -240,10 +240,11 @@ class MonitoringPaperExecutionRepository:
                                 paper_order_id, run_id, symbol, side, quantity, notional,
                                 target_weight, current_weight, weight_delta, reference_price,
                                 proposed_at, risk_status, risk_reason, submission_status,
-                                broker_order_id, submitted_at, filled_quantity,
+                                broker_order_id, client_order_id, requested_quantity, broker_backend,
+                                order_type, time_in_force, broker_updated_at, rejection_reason, submitted_at, filled_quantity,
                                 average_fill_price, filled_at, canceled_at, failed_at,
                                 error_message, order_payload_json, created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """
                         ),
                         (
@@ -262,6 +263,13 @@ class MonitoringPaperExecutionRepository:
                             item.get("risk_reason"),
                             item.get("submission_status") or "not_submitted",
                             item.get("broker_order_id"),
+                            item.get("client_order_id"),
+                            item.get("requested_quantity"),
+                            item.get("broker_backend"),
+                            item.get("order_type"),
+                            item.get("time_in_force"),
+                            item.get("broker_updated_at"),
+                            item.get("rejection_reason"),
                             item.get("submitted_at"),
                             item.get("filled_quantity"),
                             item.get("average_fill_price"),

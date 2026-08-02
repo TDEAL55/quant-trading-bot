@@ -168,9 +168,9 @@ def test_partial_labeling_and_update_to_complete(tmp_path, monkeypatch):
     assert row["forward_20d_status"] == "pending"
     repo.close()
 
-    complete_dates = _business_dates("2026-07-10", 25)
-    complete_symbol_frame = _frame(complete_dates, [100.0 + i for i in range(25)])
-    complete_benchmark_frame = _frame(complete_dates, [100.0] * 25)
+    complete_dates = _business_dates(partial_dates[0].date().isoformat(), 30)
+    complete_symbol_frame = _frame(complete_dates, [100.0 + i for i in range(len(complete_dates))])
+    complete_benchmark_frame = _frame(complete_dates, [100.0] * len(complete_dates))
 
     def complete_loader(symbol, start, end):
         return complete_benchmark_frame if symbol == "SPY" else complete_symbol_frame

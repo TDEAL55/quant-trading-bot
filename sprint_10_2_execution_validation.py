@@ -14,6 +14,7 @@ from factor_intelligence import FactorIntelligenceConfig, FactorIntelligenceEngi
 from factor_registry import build_default_registry
 from market_data import download_price_data
 from paper_approval import build_approval_record
+from paper_broker import create_paper_broker
 from paper_execution_repository import MonitoringPaperExecutionRepository, PaperValidationRunPayload
 from paper_reconciliation import reconcile_paper_positions
 from paper_validation_data import fetch_paper_validation_dashboard_payload
@@ -21,7 +22,6 @@ from research_journal import journal_scanner_run
 from risk_manager import RiskManager
 from scanner_runner import SAMPLE_SYMBOLS, run_scan, run_shortlist_only
 from security_factor_explainability import build_security_explanation
-from sprint_10_1_validation import SimulatedFillBroker
 
 
 @dataclass(frozen=True)
@@ -162,6 +162,18 @@ def _execution_fingerprint(symbol: str, quantity: float, mode: str) -> str:
     return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()[:24]
 
 
+def _client_order_id(strategy_id: str, execution_fingerprint: str, symbol: str, side: str, quantity: float) -> str:
+    payload = {
+        "strategy_id": str(strategy_id or ""),
+        "execution_fingerprint": str(execution_fingerprint or ""),
+        "symbol": str(symbol or "").upper(),
+        "side": str(side or "").upper(),
+        "quantity": round(float(quantity or 0.0), 6),
+    }
+    digest = hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()[:24]
+    return f"qtb-{digest}"
+
+
 def _compute_expected_positions(
     positions: dict[str, dict[str, float]],
     symbol: str,
@@ -193,6 +205,7 @@ def run_sprint_10_2_execution_validation(
     profile: ExecutionProfile | None = None,
     manual_approval: str = "NO",
     symbols: list[str] | None = None,
+    broker: Any | None = None,
     persist: bool = True,
 ) -> dict[str, Any]:
     selected_profile = profile or ExecutionProfile()
@@ -226,9 +239,12 @@ def run_sprint_10_2_execution_validation(
     except Exception as exc:
         factor_intelligence_error = f"{type(exc).__name__}: {exc}"
 
-    broker = SimulatedFillBroker(mode=selected_profile.mode, buying_power=10000.0, positions={})
-    pre_positions = broker.get_positions()
-    cash_before = float(broker.get_buying_power() or 0.0)
+    broker_instance = broker or create_paper_broker(mode=selected_profile.mode)
+    broker_mode = str(getattr(broker_instance, "mode", selected_profile.mode) or "").upper()
+    if broker_mode == "LIVE":
+        raise RuntimeError("LIVE broker is rejected")
+    pre_positions = broker_instance.get_positions()
+    cash_before = float(broker_instance.get_buying_power() or 0.0)
 
     shortlist = run_shortlist_only(
         scan_payload,
@@ -361,12 +377,34 @@ def run_sprint_10_2_execution_validation(
     if persist:
         repo.create_approval(approval_payload)
 
-    fill = broker.submit_order(side="buy", ticker=symbol, quantity=quantity, reference_price=reference_price)
+    client_order_id = _client_order_id(
+        strategy_id=selected_profile.profile_id,
+        execution_fingerprint=execution_fp,
+        symbol=symbol,
+        side="BUY",
+        quantity=quantity,
+    )
+
+    fill = broker_instance.submit_order(
+        side="buy",
+        ticker=symbol,
+        quantity=quantity,
+        reference_price=reference_price,
+        client_order_id=client_order_id,
+        order_type="market",
+        time_in_force="day",
+        allow_fractional=True,
+        wait_for_fill=True,
+    )
+    fill_status = str(fill.get("status") or "unknown").lower()
     fill_price = float(fill.get("average_fill_price") or reference_price)
-    filled_qty = float(fill.get("filled_quantity") or quantity)
+    filled_qty = float(fill.get("filled_quantity") or 0.0)
     order_id = str(fill.get("order_id") or "")
-    post_cash = float(broker.get_buying_power() or cash_before)
-    post_positions = broker.get_positions()
+    if fill_status in {"pending", "new", "accepted"}:
+        fill_price = float(reference_price)
+        filled_qty = 0.0
+    post_cash = float(broker_instance.get_buying_power() or cash_before)
+    post_positions = broker_instance.get_positions()
 
     expected_cash = round(cash_before - (filled_qty * fill_price), 6)
     expected_positions = _compute_expected_positions(pre_positions, symbol=symbol, side="BUY", quantity=filled_qty, fill_price=fill_price)
@@ -382,7 +420,7 @@ def run_sprint_10_2_execution_validation(
         actual_buying_power=post_cash,
         orders=[
             {
-                "submission_status": "filled",
+                "submission_status": fill_status,
                 "filled_quantity": filled_qty,
                 "quantity": quantity,
                 "average_fill_price": fill_price,
@@ -390,6 +428,10 @@ def run_sprint_10_2_execution_validation(
         ],
         tolerance=0.01,
     )
+
+    reconciliation_status = str(reconciliation.get("reconciliation_status") or "")
+    is_reconciliation_ok = reconciliation_status in {"matched", "matched_with_tolerance"} and int(reconciliation.get("position_mismatch_count") or 0) == 0
+    run_status = "completed" if is_reconciliation_ok and fill_status not in {"failed", "rejected", "canceled", "expired"} else "failed"
 
     run_id = f"sprint-10-2-{_utc_now().strftime('%Y%m%d%H%M%S%f')}"
     run_payload = {
@@ -405,14 +447,14 @@ def run_sprint_10_2_execution_validation(
         "started_at": _utc_iso(),
         "completed_at": _utc_iso(),
         "mode": selected_profile.mode,
-        "status": "completed",
+        "status": run_status,
         "dry_run": False,
         "proposed_order_count": 1,
         "approved_order_count": 1,
         "rejected_order_count": 0,
-        "submitted_order_count": 1,
-        "filled_order_count": 1,
-        "failed_order_count": 0,
+        "submitted_order_count": 0 if fill_status == "submission_blocked_by_config" else 1,
+        "filled_order_count": 1 if fill_status in {"filled", "partially_filled"} and filled_qty > 0 else 0,
+        "failed_order_count": 1 if fill_status in {"failed", "rejected", "canceled", "expired"} else 0,
         "configuration": {
             "portfolio": {"top_n": 1, "maximum_orders": 1},
             "risk": risk_checks,
@@ -429,7 +471,7 @@ def run_sprint_10_2_execution_validation(
         "performance": {
             "total_duration": round(time.perf_counter() - started, 6),
         },
-        "warnings": [],
+        "warnings": list(reconciliation.get("warnings") or []),
         "error_message": None,
         "created_at": _utc_iso(),
         "updated_at": _utc_iso(),
@@ -440,6 +482,7 @@ def run_sprint_10_2_execution_validation(
         "symbol": symbol,
         "side": "BUY",
         "quantity": quantity,
+        "requested_quantity": quantity,
         "notional": notional,
         "target_weight": 1.0,
         "current_weight": 0.0,
@@ -448,14 +491,29 @@ def run_sprint_10_2_execution_validation(
         "proposed_at": _utc_iso(),
         "risk_status": "approved",
         "risk_reason": "approved",
-        "submission_status": "filled",
+        "submission_status": fill_status,
         "broker_order_id": order_id,
+        "client_order_id": client_order_id,
+        "broker_backend": str(fill.get("broker_backend") or getattr(broker_instance, "backend", "UNKNOWN")),
+        "order_type": str(fill.get("order_type") or "market"),
+        "time_in_force": str(fill.get("time_in_force") or "day"),
+        "broker_updated_at": str(fill.get("updated_at") or ""),
+        "rejection_reason": str(fill.get("rejection_reason") or ""),
         "submitted_at": _utc_iso(),
         "filled_quantity": filled_qty,
         "average_fill_price": fill_price,
-        "filled_at": _utc_iso(),
-        "error_message": None,
-        "order_payload": {"source": "sprint_10_2_execution_validation"},
+        "filled_at": _utc_iso() if fill_status in {"filled", "partially_filled"} and filled_qty > 0 else None,
+        "error_message": "" if fill_status not in {"failed", "rejected", "canceled", "expired"} else str(fill.get("rejection_reason") or fill.get("error_message") or ""),
+        "order_payload": {
+            "source": "sprint_10_2_execution_validation",
+            "broker_backend": str(fill.get("broker_backend") or getattr(broker_instance, "backend", "UNKNOWN")),
+            "requested_quantity": quantity,
+            "order_type": str(fill.get("order_type") or "market"),
+            "time_in_force": str(fill.get("time_in_force") or "day"),
+            "status": fill_status,
+            "rejection_reason": str(fill.get("rejection_reason") or ""),
+            "updated_at": str(fill.get("updated_at") or ""),
+        },
         "created_at": _utc_iso(),
         "updated_at": _utc_iso(),
     }
@@ -482,7 +540,7 @@ def run_sprint_10_2_execution_validation(
     dashboard_updated = str((dashboard_payload.get("latest_run") or {}).get("run_id") or "") == run_id
 
     return {
-        "status": "completed",
+        "status": run_status,
         "market": market,
         "universe_size": len(universe),
         "qualified_securities": len(selected),
@@ -498,9 +556,12 @@ def run_sprint_10_2_execution_validation(
         "risk_result": {"approved": True, "checks": risk_checks},
         "paper_order": {
             "order_id": order_id,
+            "client_order_id": client_order_id,
             "symbol": symbol,
             "shares": quantity,
             "fill_price": fill_price,
+            "status": fill_status,
+            "submission_message": "SUBMISSION_BLOCKED_BY_CONFIG" if fill_status == "submission_blocked_by_config" else "",
             "timestamp": _utc_iso(),
         },
         "cash_before": cash_before,

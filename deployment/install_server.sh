@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_PATH="/opt/quant-bot"
+PROJECT_PATH="/home/quantbot/quant-trading-bot"
 APP_USER="quantbot"
 APP_GROUP="quantbot"
 ENV_PATH="/etc/quant-bot/quant-bot.env"

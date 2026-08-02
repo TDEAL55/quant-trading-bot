@@ -86,12 +86,26 @@ class MonitoringDatabase:
         if not self.enabled:
             return
         if self.engine == "sqlite":
+            cursor = self.conn.cursor()
             try:
-                self.conn.executescript(sql_text)
+                statements = [part.strip() for part in str(sql_text or "").split(";") if str(part).strip()]
+                for statement in statements:
+                    try:
+                        cursor.execute(statement)
+                    except sqlite3.OperationalError as exc:
+                        lowered = str(exc).lower()
+                        normalized_stmt = statement.lower().replace("\n", " ")
+                        is_add_column = normalized_stmt.startswith("alter table") and " add column " in normalized_stmt
+                        if is_add_column and "duplicate column name" in lowered:
+                            continue
+                        raise
                 self.conn.commit()
             except Exception:
                 self._rollback_safe()
                 raise
+            finally:
+                with contextlib.suppress(Exception):
+                    cursor.close()
             return
 
         cur = self.conn.cursor()

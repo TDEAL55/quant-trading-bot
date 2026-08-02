@@ -14,6 +14,7 @@ API_KEY = os.getenv("API_KEY", "")
 API_SECRET = os.getenv("API_SECRET", "")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET", "")
+ALPACA_PAPER_BASE_URL = os.getenv("ALPACA_PAPER_BASE_URL", "https://paper-api.alpaca.markets")
 
 
 TICKER_SYMBOL = os.getenv("TICKER_SYMBOL", "SPY")
@@ -26,6 +27,8 @@ MAX_POSITION_SIZE = float(os.getenv("MAX_POSITION_SIZE", "0.25"))
 MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "500"))
 DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "500"))
 TRADING_MODE = os.getenv("TRADING_MODE", "SIMULATION").upper()
+PAPER_BROKER_BACKEND = os.getenv("PAPER_BROKER_BACKEND", "SIMULATED").strip().upper()
+ALPACA_ORDER_SUBMISSION_ENABLED = str(os.getenv("ALPACA_ORDER_SUBMISSION_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
 PAPER_API_BASE_URL = os.getenv("PAPER_API_BASE_URL", "")
 PAPER_API_USERNAME = os.getenv("PAPER_API_USERNAME", "")
 PAPER_API_PASSWORD = os.getenv("PAPER_API_PASSWORD", "")
@@ -200,3 +203,21 @@ POSITION_REVIEW_MAX_HOLD_DAYS = int(os.getenv("POSITION_REVIEW_MAX_HOLD_DAYS", "
 POSITION_REVIEW_RISK_OFF_REGIMES = _parse_csv_env(
     os.getenv("POSITION_REVIEW_RISK_OFF_REGIMES", "strong_bear,high_volatility_risk_off")
 )
+
+MAX_RISK_PER_TRADE_PERCENT = float(os.getenv("MAX_RISK_PER_TRADE_PERCENT", "1.0"))
+MAX_TOTAL_OPEN_RISK_PERCENT = float(os.getenv("MAX_TOTAL_OPEN_RISK_PERCENT", "4.0"))
+ATR_PERIOD = int(os.getenv("ATR_PERIOD", "14"))
+STOP_ATR_MULTIPLIER = float(os.getenv("STOP_ATR_MULTIPLIER", "2.0"))
+TARGET_ATR_MULTIPLIER = float(os.getenv("TARGET_ATR_MULTIPLIER", "3.0"))
+MIN_REWARD_RISK_RATIO = float(os.getenv("MIN_REWARD_RISK_RATIO", "1.5"))
+LOCAL_PAPER_EXECUTION_ENABLED = str(os.getenv("LOCAL_PAPER_EXECUTION_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
+LOCAL_PAPER_STARTING_CASH = float(os.getenv("LOCAL_PAPER_STARTING_CASH", "10000"))
+LOCAL_PAPER_POSITION_MONITOR_ENABLED = str(os.getenv("LOCAL_PAPER_POSITION_MONITOR_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
+EXIT_CONFLICT_POLICY = os.getenv("EXIT_CONFLICT_POLICY", "STOP_FIRST").strip().upper()
+PAPER_DAILY_CYCLE_ENABLED = str(os.getenv("PAPER_DAILY_CYCLE_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
+PAPER_DAILY_AUTO_ENTRY_EXECUTION = str(os.getenv("PAPER_DAILY_AUTO_ENTRY_EXECUTION", "true")).strip().lower() in {"1", "true", "yes", "on"}
+PAPER_DAILY_MAX_NEW_POSITIONS = int(os.getenv("PAPER_DAILY_MAX_NEW_POSITIONS", "0"))
+PAPER_MAX_OPEN_POSITIONS = int(os.getenv("PAPER_MAX_OPEN_POSITIONS", "0"))
+PAPER_DAILY_REQUIRE_LEDGER_INTEGRITY_PASS = str(os.getenv("PAPER_DAILY_REQUIRE_LEDGER_INTEGRITY_PASS", "true")).strip().lower() in {"1", "true", "yes", "on"}
+DISCORD_WEBHOOK_URL = str(os.getenv("DISCORD_WEBHOOK_URL", "")).strip()
+DISCORD_NO_TRADE_NOTIFICATION_MINUTES = int(os.getenv("DISCORD_NO_TRADE_NOTIFICATION_MINUTES", "60"))

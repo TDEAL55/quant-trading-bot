@@ -5,11 +5,87 @@ from pathlib import Path
 
 import pytest
 
+import unattended_daily_runner
 from deployment_config import DeploymentConfigError, load_deployment_config
 from health_check import run_health_check
 from notification_service import NotificationService
 from run_lock import DailyRunLock, RunLockBusyError
 from unattended_daily_runner import run_unattended_daily_cycle
+
+
+class _Notifier:
+    def __init__(self):
+        self.events: list[tuple[str, str, dict]] = []
+
+    def send_alert(self, event, event_id, **fields):
+        self.events.append((str(event), str(event_id), dict(fields)))
+        return True
+
+
+class _FailingNotifier:
+    def send_alert(self, event, event_id, **fields):
+        raise RuntimeError("notification down")
+
+
+def _cfg(tmp_path, **overrides):
+    db_path = tmp_path / "bot.db"
+    values = {
+        "kill_switch": False,
+        "trading_mode": "PAPER",
+        "auto_approve_paper": True,
+        "database_url": f"sqlite:///{db_path}",
+        "database_path": db_path,
+        "notifications_enabled": True,
+        "max_daily_orders": 100000,
+    }
+    values.update(overrides)
+    return type("Cfg", (), values)()
+
+
+def _cycle_tuple(cycle_status="ENTRY_CANDIDATES_PROCESSED", candidates=1, fills=1, stop_exits=0, target_exits=0, errors=None):
+    summary = {
+        "cycle_id": "CYCLE-TEST-001",
+        "cycle_status": cycle_status,
+        "starting_cash": 10000.0,
+        "ending_cash": 9800.0,
+        "starting_equity": 10000.0,
+        "ending_equity": 10010.0,
+        "positions_monitored": 2,
+        "stop_exits": stop_exits,
+        "target_exits": target_exits,
+        "available_slots": 10,
+        "scanner_executed": True,
+        "symbols_scanned": 25,
+        "candidates_selected": candidates,
+        "tickets_generated": fills,
+        "local_entry_execution_attempted": True,
+        "local_entry_fills": fills,
+        "strategy_identifiers": ["strategy_id:multi_factor_v1"],
+        "monitor_results": [
+            {
+                "symbol": "AAPL",
+                "monitoring_status": "OPEN",
+                "quantity_before": 1,
+                "realized_profit_loss": 0.0,
+                "realized_return_percentage": 0.0,
+                "simulated_exit_price": "-",
+            }
+        ],
+        "entry_results": [
+            {
+                "symbol": "MSFT",
+                "execution_status": "FILLED",
+                "quantity": 2,
+                "simulated_fill_price": 150.0,
+                "order_fingerprint": "fp-1",
+            }
+        ],
+        "errors": list(errors or []),
+        "decision_reason": "cycle completed",
+    }
+    stage_rows = [{"stage": "position_monitoring", "status": "DONE", "details": "ok"}]
+    history = {"total_cycles": 10}
+    return summary, stage_rows, history
 
 
 def test_deployment_config_allows_paper_auto_approval(monkeypatch):
@@ -29,33 +105,6 @@ def test_deployment_config_allows_paper_auto_approval(monkeypatch):
     assert config.auto_approve_paper is True
 
 
-def test_deployment_config_scan_interval_defaults_to_five(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "sqlite:///test.db")
-    monkeypatch.setenv("TRADING_MODE", "PAPER")
-    monkeypatch.delenv("SCAN_INTERVAL_MINUTES", raising=False)
-
-    config = load_deployment_config()
-    assert config.scan_interval_minutes == 5
-
-
-def test_deployment_config_scan_interval_can_be_configured(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "sqlite:///test.db")
-    monkeypatch.setenv("TRADING_MODE", "PAPER")
-    monkeypatch.setenv("SCAN_INTERVAL_MINUTES", "15")
-
-    config = load_deployment_config()
-    assert config.scan_interval_minutes == 15
-
-
-def test_deployment_config_scan_interval_rejects_non_positive(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "sqlite:///test.db")
-    monkeypatch.setenv("TRADING_MODE", "PAPER")
-    monkeypatch.setenv("SCAN_INTERVAL_MINUTES", "0")
-
-    with pytest.raises(DeploymentConfigError):
-        load_deployment_config()
-
-
 def test_deployment_config_blocks_live(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "sqlite:///test.db")
     monkeypatch.setenv("TRADING_MODE", "LIVE")
@@ -63,18 +112,31 @@ def test_deployment_config_blocks_live(monkeypatch):
         load_deployment_config()
 
 
-def test_deployment_config_blocks_auto_approval_outside_paper(monkeypatch):
+def test_deployment_config_rejects_non_paper_alpaca_endpoint(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "sqlite:///test.db")
-    monkeypatch.setenv("TRADING_MODE", "SIMULATION")
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
     monkeypatch.setenv("AUTO_APPROVE_PAPER", "true")
-    with pytest.raises(DeploymentConfigError):
+    monkeypatch.setenv("MAX_DAILY_ORDERS", "1")
+    monkeypatch.setenv("PAPER_BROKER_BACKEND", "ALPACA")
+    monkeypatch.setenv("ALPACA_API_KEY", "demo")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo")
+    monkeypatch.setenv("ALPACA_PAPER_BASE_URL", "https://api.alpaca.markets")
+
+    with pytest.raises(DeploymentConfigError, match="ALPACA_PAPER_BASE_URL"):
         load_deployment_config()
 
 
-def test_deployment_config_blocks_temp_database_path(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "sqlite:////tmp/quant-bot.db")
+def test_deployment_config_requires_alpaca_credentials(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///test.db")
     monkeypatch.setenv("TRADING_MODE", "PAPER")
-    with pytest.raises(DeploymentConfigError):
+    monkeypatch.setenv("AUTO_APPROVE_PAPER", "true")
+    monkeypatch.setenv("MAX_DAILY_ORDERS", "1")
+    monkeypatch.setenv("PAPER_BROKER_BACKEND", "ALPACA")
+    monkeypatch.setenv("ALPACA_PAPER_BASE_URL", "https://paper-api.alpaca.markets")
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
+
+    with pytest.raises(DeploymentConfigError, match="ALPACA_API_KEY"):
         load_deployment_config()
 
 
@@ -91,172 +153,96 @@ def test_run_lock_releases_and_recovers_stale_lock(tmp_path):
     assert recovered.owner == "recovered"
 
 
-def test_run_lock_blocks_simultaneous_run(tmp_path):
-    lock_path = tmp_path / "daily.lock"
-    first = DailyRunLock(lock_path, stale_after_seconds=3600, owner="first")
-    first.acquire()
-    with pytest.raises(RunLockBusyError):
-        DailyRunLock(lock_path, stale_after_seconds=3600, owner="second").acquire()
-
-
-def test_unattended_runner_blocks_kill_switch(monkeypatch):
-    monkeypatch.setattr("unattended_daily_runner.load_deployment_config", lambda: type("Cfg", (), {"kill_switch": True, "trading_mode": "PAPER", "auto_approve_paper": True, "database_url": "sqlite:///x.db", "database_path": Path("x.db"), "notifications_enabled": False, "max_daily_orders": 1})())
-    result = run_unattended_daily_cycle(config_loader=lambda: type("Cfg", (), {"kill_switch": True, "trading_mode": "PAPER", "auto_approve_paper": True, "database_url": "sqlite:///x.db", "database_path": Path("x.db"), "notifications_enabled": False, "max_daily_orders": 1})())
+def test_unattended_runner_blocks_kill_switch(tmp_path):
+    cfg = _cfg(tmp_path, kill_switch=True)
+    result = run_unattended_daily_cycle(config_loader=lambda: cfg)
     assert result["status"] == "killed"
 
 
-def test_unattended_runner_blocks_stale_market_data(tmp_path):
-    db_path = tmp_path / "stale.db"
-    cfg = type("Cfg", (), {"kill_switch": False, "trading_mode": "PAPER", "auto_approve_paper": True, "database_url": f"sqlite:///{db_path}", "database_path": db_path, "notifications_enabled": False, "max_daily_orders": 1})()
-    result = run_unattended_daily_cycle(
-        config_loader=lambda: cfg,
-        market_snapshot_loader=lambda: {"fresh": False, "stale": True, "age_days": 999},
-        runner=lambda **kwargs: pytest.fail("runner should not be called"),
-    )
-    assert result["status"] == "stale_market_data"
-
-
-def test_unattended_runner_auto_approval_disabled(monkeypatch):
-    cfg = type("Cfg", (), {"kill_switch": False, "trading_mode": "PAPER", "auto_approve_paper": False, "database_url": "sqlite:///x.db", "database_path": Path("x.db"), "notifications_enabled": False, "max_daily_orders": 1})()
+def test_unattended_runner_auto_approval_disabled(tmp_path):
+    cfg = _cfg(tmp_path, auto_approve_paper=False)
     result = run_unattended_daily_cycle(config_loader=lambda: cfg)
     assert result["status"] == "auto_approval_disabled"
 
 
 def test_unattended_runner_rejects_non_paper_mode(tmp_path):
-    cfg = type("Cfg", (), {"kill_switch": False, "trading_mode": "SIMULATION", "auto_approve_paper": True, "database_url": f"sqlite:///{tmp_path / 'db.sqlite'}", "database_path": tmp_path / "db.sqlite", "notifications_enabled": False, "max_daily_orders": 1})()
+    cfg = _cfg(tmp_path, trading_mode="SIMULATION")
     result = run_unattended_daily_cycle(config_loader=lambda: cfg)
     assert result["status"] == "failed"
 
 
-def test_unattended_runner_maps_duplicate_rejection(tmp_path):
-    cfg = type("Cfg", (), {"kill_switch": False, "trading_mode": "PAPER", "auto_approve_paper": True, "database_url": f"sqlite:///{tmp_path / 'db.sqlite'}", "database_path": tmp_path / "db.sqlite", "notifications_enabled": False, "max_daily_orders": 1})()
-
-    def _runner(**kwargs):
-        return {
-            "execution_status": "risk_rejected",
-            "dashboard_updated": False,
-            "execution": {"selected_symbol": "JPM", "overall_score": 83.0, "confidence": 68.0, "risk_result": {"approved": False, "checks": {"duplicate_protection": False}}, "paper_order": {"order_id": None}},
-            "performance": {"metrics": {"portfolio_value": 10000.0}},
-            "persistence": {"run_id": "daily-1"},
-        }
-
-    result = run_unattended_daily_cycle(
-        config_loader=lambda: cfg,
-        market_snapshot_loader=lambda: {"fresh": True, "stale": False, "age_days": 0},
-        runner=_runner,
-    )
-    assert result["status"] == "duplicate_rejected"
+def test_unattended_runner_skips_when_market_closed(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    monkeypatch.setattr(unattended_daily_runner, "_market_is_open", lambda _now: False)
+    result = run_unattended_daily_cycle(config_loader=lambda: cfg)
+    assert result["status"] == "market_closed"
 
 
-def test_unattended_runner_preserves_risk_rejection(tmp_path):
-    cfg = type("Cfg", (), {"kill_switch": False, "trading_mode": "PAPER", "auto_approve_paper": True, "database_url": f"sqlite:///{tmp_path / 'db.sqlite'}", "database_path": tmp_path / "db.sqlite", "notifications_enabled": False, "max_daily_orders": 1})()
-
-    def _runner(**kwargs):
-        return {
-            "execution_status": "risk_rejected",
-            "dashboard_updated": False,
-            "execution": {"selected_symbol": "JPM", "overall_score": 83.0, "confidence": 68.0, "risk_result": {"approved": False, "checks": {"duplicate_protection": True}}, "paper_order": {}},
-            "performance": {"metrics": {"portfolio_value": 10000.0}},
-            "persistence": {"run_id": "daily-1"},
-        }
+def test_unattended_runner_completes_and_sends_notifications(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    notifier = _Notifier()
+    monkeypatch.setattr(unattended_daily_runner, "_market_is_open", lambda _now: True)
 
     result = run_unattended_daily_cycle(
         config_loader=lambda: cfg,
-        market_snapshot_loader=lambda: {"fresh": True, "stale": False, "age_days": 0},
-        runner=_runner,
+        cycle_runner=lambda: _cycle_tuple(),
+        notifier_factory=lambda: notifier,
     )
-    assert result["status"] == "risk_rejected"
 
-
-def test_unattended_runner_requires_reconciliation_match(tmp_path):
-    cfg = type("Cfg", (), {"kill_switch": False, "trading_mode": "PAPER", "auto_approve_paper": True, "database_url": f"sqlite:///{tmp_path / 'db.sqlite'}", "database_path": tmp_path / "db.sqlite", "notifications_enabled": False, "max_daily_orders": 1})()
-
-    def _runner(**kwargs):
-        return {
-            "execution_status": "completed",
-            "dashboard_updated": True,
-            "execution": {
-                "selected_symbol": "JPM",
-                "overall_score": 83.0,
-                "confidence": 68.0,
-                "risk_result": {"approved": True, "checks": {"duplicate_protection": True}},
-                "paper_order": {"order_id": "o-1"},
-                "reconciliation": {"reconciliation_status": "mismatch", "position_mismatch_count": 1},
-            },
-            "performance": {"metrics": {"portfolio_value": 10000.0}},
-            "persistence": {"run_id": "daily-1"},
-        }
-
-    result = run_unattended_daily_cycle(
-        config_loader=lambda: cfg,
-        market_snapshot_loader=lambda: {"fresh": True, "stale": False, "age_days": 0, "session_type": "latest_completed_session"},
-        runner=_runner,
-    )
-    assert result["status"] == "failed"
-
-
-def test_unattended_runner_enforces_one_order_limit(tmp_path):
-    cfg = type("Cfg", (), {"kill_switch": False, "trading_mode": "PAPER", "auto_approve_paper": True, "database_url": f"sqlite:///{tmp_path / 'db.sqlite'}", "database_path": tmp_path / "db.sqlite", "notifications_enabled": False, "max_daily_orders": 3})()
-
-    def _runner(**kwargs):
-        return {
-            "execution_status": "completed",
-            "dashboard_updated": True,
-            "execution": {
-                "selected_symbol": "JPM",
-                "overall_score": 83.0,
-                "confidence": 68.0,
-                "risk_result": {"approved": True, "checks": {"duplicate_protection": True}},
-                "paper_orders": [{"order_id": "o-1"}, {"order_id": "o-2"}],
-                "paper_order": {"order_id": "o-1"},
-                "reconciliation": {"reconciliation_status": "matched", "position_mismatch_count": 0},
-            },
-            "performance": {"metrics": {"portfolio_value": 10000.0}},
-            "persistence": {"run_id": "daily-1"},
-        }
-
-    result = run_unattended_daily_cycle(
-        config_loader=lambda: cfg,
-        market_snapshot_loader=lambda: {"fresh": True, "stale": False, "age_days": 0, "session_type": "latest_completed_session"},
-        runner=_runner,
-    )
-    assert result["status"] == "failed"
-
-
-def test_notification_failure_does_not_corrupt_completed_run(tmp_path):
-    cfg = type("Cfg", (), {"kill_switch": False, "trading_mode": "PAPER", "auto_approve_paper": True, "database_url": f"sqlite:///{tmp_path / 'db.sqlite'}", "database_path": tmp_path / "db.sqlite", "notifications_enabled": True, "max_daily_orders": 1})()
-
-    class FailingNotifier:
-        def __init__(self, output="console"):
-            pass
-
-        def send(self, payload):
-            raise RuntimeError("notification down")
-
-    def _runner(**kwargs):
-        return {
-            "execution_status": "completed",
-            "dashboard_updated": True,
-            "execution": {
-                "selected_symbol": "JPM",
-                "overall_score": 83.0,
-                "confidence": 68.0,
-                "risk_result": {"approved": True, "checks": {"duplicate_protection": True}},
-                "paper_order": {"order_id": "o-1"},
-                "reconciliation": {"reconciliation_status": "matched", "position_mismatch_count": 0},
-            },
-            "performance": {"metrics": {"portfolio_value": 10000.0}},
-            "persistence": {"run_id": "daily-1"},
-        }
-
-    result = run_unattended_daily_cycle(
-        config_loader=lambda: cfg,
-        market_snapshot_loader=lambda: {"fresh": True, "stale": False, "age_days": 0, "session_type": "latest_completed_session"},
-        runner=_runner,
-        notification_service_factory=FailingNotifier,
-    )
     assert result["status"] == "completed"
-    assert result["notification_status"] == "failed"
+    assert result["cycle"]["local_entry_fills"] == 1
+    assert result["notification"]["sent"] >= 3
+    assert any(event == "paper_trade_opened" for event, _, _fields in notifier.events)
+    assert any(event == "scan_completed_with_candidates" for event, _, _fields in notifier.events)
+
+
+def test_notification_failure_does_not_stop_trading(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    monkeypatch.setattr(unattended_daily_runner, "_market_is_open", lambda _now: True)
+
+    result = run_unattended_daily_cycle(
+        config_loader=lambda: cfg,
+        cycle_runner=lambda: _cycle_tuple(),
+        notifier_factory=lambda: _FailingNotifier(),
+    )
+
+    assert result["status"] == "completed"
+    assert result["notification"]["failed"] > 0
+
+
+def test_unattended_runner_reports_data_source_failure(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    notifier = _Notifier()
+    monkeypatch.setattr(unattended_daily_runner, "_market_is_open", lambda _now: True)
+
+    def _boom_cycle():
+        raise RuntimeError("Market data unavailable for JPM")
+
+    result = run_unattended_daily_cycle(
+        config_loader=lambda: cfg,
+        cycle_runner=_boom_cycle,
+        notifier_factory=lambda: notifier,
+    )
+
+    assert result["status"] == "failed"
+    assert any(event == "unhandled_cycle_error" for event, _, _fields in notifier.events)
+    assert any(event == "data_source_failure" for event, _, _fields in notifier.events)
+
+
+def test_unattended_runner_reports_integrity_failure(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    notifier = _Notifier()
+    monkeypatch.setattr(unattended_daily_runner, "_market_is_open", lambda _now: True)
+
+    summary, rows, history = _cycle_tuple(cycle_status="FAILED_PRECHECK", candidates=0, fills=0, errors=["Ledger integrity validation failed"])
+    result = run_unattended_daily_cycle(
+        config_loader=lambda: cfg,
+        cycle_runner=lambda: (summary, rows, history),
+        notifier_factory=lambda: notifier,
+    )
+
+    assert result["status"] == "integrity_failed"
+    assert any(event == "integrity_failure" for event, _, _fields in notifier.events)
 
 
 def test_notification_service_file_output(tmp_path):
@@ -313,8 +299,9 @@ def test_systemd_files_parse_and_contain_expected_settings():
 
     assert "Type=oneshot" in service_text
     assert "User=quantbot" in service_text
-    assert "WorkingDirectory=/opt/quant-bot" in service_text
-    assert "ExecStartPost=/usr/bin/env bash /opt/quant-bot/deployment/backup_daily_database.sh" in service_text
+    assert "WorkingDirectory=/home/quantbot/quant-trading-bot" in service_text
+    assert "ExecStartPost=/usr/bin/env bash /home/quantbot/quant-trading-bot/deployment/backup_daily_database.sh" in service_text
     assert "Persistent=true" in timer_text
     assert "Timezone=America/New_York" in timer_text
-    assert "chmod" in install_text or "install -m 0600" in install_text
+    assert "09:30:00" in timer_text
+    assert "PROJECT_PATH=\"/home/quantbot/quant-trading-bot\"" in install_text

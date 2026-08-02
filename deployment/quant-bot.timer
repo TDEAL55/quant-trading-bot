@@ -1,8 +1,8 @@
 [Unit]
-Description=Quant Bot Daily Timer
+Description=Quant Bot Intraday Timer
 
 [Timer]
-OnCalendar=*-*-* 09:30:00
+OnCalendar=Mon..Fri *-*-* 09:30:00
 Timezone=America/New_York
 Persistent=true
 Unit=quant-bot.service

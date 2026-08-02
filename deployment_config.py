@@ -6,6 +6,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 
+ALPACA_PAPER_ENDPOINT = "https://paper-api.alpaca.markets"
+
+
 class DeploymentConfigError(ValueError):
     pass
 
@@ -53,6 +56,10 @@ class DeploymentConfig:
     trading_mode: str
     auto_approve_paper: bool
     max_daily_orders: int
+    paper_broker_backend: str
+    alpaca_order_submission_enabled: bool
+    alpaca_paper_base_url: str
+    scan_symbols: tuple[str, ...]
     run_timezone: str
     run_hour: int
     run_minute: int
@@ -76,6 +83,11 @@ def load_deployment_config(environ: dict[str, str] | None = None) -> DeploymentC
     trading_mode = str(env.get("TRADING_MODE", "PAPER")).strip().upper() or "PAPER"
     auto_approve_paper = _parse_bool(env.get("AUTO_APPROVE_PAPER"), default=False)
     max_daily_orders = _parse_int("MAX_DAILY_ORDERS", env.get("MAX_DAILY_ORDERS", "1"), minimum=1)
+    paper_broker_backend = str(env.get("PAPER_BROKER_BACKEND", "SIMULATED")).strip().upper() or "SIMULATED"
+    alpaca_order_submission_enabled = _parse_bool(env.get("ALPACA_ORDER_SUBMISSION_ENABLED"), default=False)
+    alpaca_paper_base_url = str(env.get("ALPACA_PAPER_BASE_URL", ALPACA_PAPER_ENDPOINT)).strip() or ALPACA_PAPER_ENDPOINT
+    scan_symbols_raw = str(env.get("SCAN_SYMBOLS", "JPM,MSFT,AAPL")).strip()
+    scan_symbols = tuple(symbol.strip().upper() for symbol in scan_symbols_raw.split(",") if symbol.strip())
     run_timezone = str(env.get("RUN_TIMEZONE", "America/New_York")).strip() or "America/New_York"
     run_hour = _parse_int("RUN_HOUR", env.get("RUN_HOUR", "9"), minimum=0, maximum=23)
     run_minute = _parse_int("RUN_MINUTE", env.get("RUN_MINUTE", "30"), minimum=0, maximum=59)
@@ -97,6 +109,19 @@ def load_deployment_config(environ: dict[str, str] | None = None) -> DeploymentC
     if auto_approve_paper and trading_mode != "PAPER":
         raise DeploymentConfigError("AUTO_APPROVE_PAPER may only be true in PAPER mode")
 
+    if paper_broker_backend not in {"ALPACA", "SIMULATED"}:
+        raise DeploymentConfigError("PAPER_BROKER_BACKEND must be ALPACA or SIMULATED")
+
+    if paper_broker_backend == "ALPACA":
+        normalized_url = alpaca_paper_base_url.rstrip("/").lower()
+        if normalized_url != ALPACA_PAPER_ENDPOINT:
+            raise DeploymentConfigError("ALPACA_PAPER_BASE_URL must be https://paper-api.alpaca.markets")
+        if not str(env.get("ALPACA_API_KEY", "")).strip() or not str(env.get("ALPACA_API_SECRET", "")).strip():
+            raise DeploymentConfigError("ALPACA_API_KEY and ALPACA_API_SECRET are required for PAPER_BROKER_BACKEND=ALPACA")
+
+    if not scan_symbols:
+        raise DeploymentConfigError("SCAN_SYMBOLS must include at least one symbol")
+
     _validate_sqlite_url(database_url)
 
     return DeploymentConfig(
@@ -105,6 +130,10 @@ def load_deployment_config(environ: dict[str, str] | None = None) -> DeploymentC
         trading_mode=trading_mode,
         auto_approve_paper=auto_approve_paper,
         max_daily_orders=max_daily_orders,
+        paper_broker_backend=paper_broker_backend,
+        alpaca_order_submission_enabled=alpaca_order_submission_enabled,
+        alpaca_paper_base_url=alpaca_paper_base_url,
+        scan_symbols=scan_symbols,
         run_timezone=run_timezone,
         run_hour=run_hour,
         run_minute=run_minute,
