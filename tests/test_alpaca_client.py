@@ -83,3 +83,27 @@ def test_alpaca_client_reads_assets_api(monkeypatch):
     rows = client.get_assets()
     assert len(rows) == 2
     assert rows[0]["symbol"] == "AAPL"
+
+
+def test_alpaca_client_assets_fallback_when_filtered_results_empty(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+
+    class EmptyFilteredTradingClient(MockTradingClient):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def get_all_assets(self, filter=None):
+            self.calls.append(filter)
+            if filter is not None:
+                return []
+            return self.assets
+
+    client_backend = EmptyFilteredTradingClient()
+    client = create_alpaca_client(mode="PAPER", trading_client=client_backend)
+    rows = client.get_assets()
+
+    assert len(rows) == 2
+    assert rows[0]["symbol"] == "AAPL"
+    assert len(client_backend.calls) >= 1

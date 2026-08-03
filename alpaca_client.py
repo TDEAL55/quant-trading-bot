@@ -101,7 +101,7 @@ class AlpacaClient:
             try:
                 req = GetAssetsRequest(asset_class=AssetClass.US_EQUITY, status=AssetStatus.ACTIVE)
                 rows = getter(filter=req)
-                if rows is not None:
+                if rows:
                     return list(rows)
             except TypeError:
                 pass

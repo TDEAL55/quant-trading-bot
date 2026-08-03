@@ -124,7 +124,7 @@ def test_exactly_930_et_is_open(tmp_path):
 
     assert calls["runner"] == 1
     assert stats["closed_market_sleeps"] == 0
-    assert sleeps == [300]
+    assert sleeps == []
 
 
 def test_exactly_1600_et_is_closed(tmp_path):
@@ -387,7 +387,7 @@ def test_max_daily_orders_uses_configured_limit(tmp_path):
 
     assert calls["runner"] == 2
     assert stats["quota_skips"] == 0
-    assert sleeps == [300, 300]
+    assert sleeps == [300]
 
 
 def test_each_loop_path_sleeps_once(tmp_path):
@@ -419,6 +419,9 @@ def test_each_loop_path_sleeps_once(tmp_path):
     )
     assert sleeps_quota == [300]
 
+    # Reset state so lock-busy and exception paths exercise scan-interval behavior.
+    state_path.write_text(json.dumps({"market_date": "2026-07-22", "orders_submitted": 0}) + "\n", encoding="utf-8")
+
     sleeps_lock = []
 
     class BusyLock:
@@ -440,7 +443,7 @@ def test_each_loop_path_sleeps_once(tmp_path):
         lock_factory=BusyLock,
         max_iterations=1,
     )
-    assert sleeps_lock == [300]
+    assert sleeps_lock == []
 
     sleeps_exc = []
 
@@ -455,7 +458,7 @@ def test_each_loop_path_sleeps_once(tmp_path):
         sleep_fn=lambda seconds: sleeps_exc.append(seconds),
         max_iterations=1,
     )
-    assert sleeps_exc == [300]
+    assert sleeps_exc == []
 
 
 def test_lock_is_held_while_runner_executes_with_no_nested_scheduler_lock(tmp_path):
@@ -526,10 +529,10 @@ def test_keyboard_interrupt_during_sleep_shuts_down_cleanly(tmp_path):
         state_path=state_path,
         now_provider=_Clock([datetime(2026, 7, 22, 10, 0, tzinfo=EASTERN_TZ)]),
         sleep_fn=_interrupting_sleep,
-        max_iterations=1,
+        max_iterations=2,
     )
 
-    assert stats["cycles"] == 0
+    assert stats["cycles"] == 1
 
 
 def test_scan_interval_path_continues_after_lock_busy_and_exception(tmp_path):
@@ -574,7 +577,7 @@ def test_scan_interval_path_continues_after_lock_busy_and_exception(tmp_path):
 
     assert stats["lock_skips"] == 1
     assert stats["scans_failed"] == 1
-    assert sleeps == [300, 300]
+    assert sleeps == [300]
 
 
 def test_build_full_universe_dry_run_command_uses_pipefail_and_python_exit_code():

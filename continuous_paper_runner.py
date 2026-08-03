@@ -325,9 +325,10 @@ def run_continuous_paper_runner(
                     error_type=type(exc).__name__,
                     error_message=str(exc),
                 )
-
-            sleep_fn(scan_interval_seconds)
             stats["cycles"] += 1
+            if effective_max_iterations is not None and stats["cycles"] >= int(effective_max_iterations):
+                break
+            sleep_fn(scan_interval_seconds)
     except KeyboardInterrupt:
         _log_event("continuous_runner_shutdown", run_id=run_id, reason="keyboard_interrupt", cycles=stats["cycles"])
 
