@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import random
 import time
+import tracemalloc
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta, timezone
 from threading import Lock
@@ -16,6 +17,8 @@ from config import (
     SCANNER_BATCH_SIZE,
     SCANNER_BLOCKED_REGIMES,
     SCANNER_DATA_REQUEST_TIMEOUT_SECONDS,
+    SCANNER_DEEP_SCORE_LIMIT,
+    SCANNER_LIGHTWEIGHT_BATCH_SIZE,
     SCANNER_PROGRESS_EVERY,
     SCANNER_MAX_SCAN_SECONDS,
     SCANNER_MAX_MISSING_PERCENT,
@@ -36,7 +39,7 @@ from config import (
     SCANNER_RANK_WEIGHT_TREND,
     SCANNER_SYMBOL_TIMEOUT_SECONDS,
 )
-from market_data import download_price_data
+from market_data import download_price_data, download_price_data_batch
 from quantum_score_engine import calculate_quantum_score, compute_strategy_specific_scores, rank_scored_candidates
 from scanner_filters import validate_symbol_data
 from stock_universe import normalize_symbol
@@ -56,6 +59,55 @@ def _history_window(lookback_days: int = 1000) -> tuple[str, str]:
     end_date = datetime.now(timezone.utc).date()
     start_date = end_date - timedelta(days=max(int(lookback_days), 30))
     return start_date.isoformat(), end_date.isoformat()
+
+
+def _memory_snapshot_mb() -> tuple[float, float]:
+    try:
+        current, peak = tracemalloc.get_traced_memory()
+        return round(float(current) / (1024 * 1024), 4), round(float(peak) / (1024 * 1024), 4)
+    except Exception:
+        return 0.0, 0.0
+
+
+def _coarse_metrics(symbol: str, history: pd.DataFrame, benchmark_history: pd.DataFrame) -> dict[str, float] | None:
+    close_series = pd.to_numeric(history.get("close", pd.Series(dtype=float)), errors="coerce").dropna()
+    volume_series = pd.to_numeric(history.get("volume", pd.Series(dtype=float)), errors="coerce").dropna()
+    benchmark_close = pd.to_numeric(benchmark_history.get("close", pd.Series(dtype=float)), errors="coerce").dropna()
+    if len(close_series) < 21 or len(volume_series) < 21 or len(benchmark_close) < 21:
+        return None
+
+    latest_price = float(close_series.iloc[-1])
+    ret5 = float((close_series.iloc[-1] / close_series.iloc[-6]) - 1.0)
+    ret20 = float((close_series.iloc[-1] / close_series.iloc[-21]) - 1.0)
+    benchmark_ret20 = float((benchmark_close.iloc[-1] / benchmark_close.iloc[-21]) - 1.0)
+    rel_strength = ret20 - benchmark_ret20
+    avg_volume_20 = float(volume_series.tail(20).mean())
+    volume_ratio = float(volume_series.iloc[-1] / max(avg_volume_20, 1.0))
+    volatility = float(close_series.pct_change().tail(20).std(ddof=0) * math.sqrt(252))
+    recent_high = float(close_series.tail(20).max())
+    distance_from_recent_high = float((latest_price / max(recent_high, 0.0001)) - 1.0)
+    avg_dollar_volume_20 = float((close_series.tail(20) * volume_series.tail(20)).mean())
+
+    # Coarse score is cheap and monotonic, then refined by full quantum scoring.
+    coarse_score = (
+        (ret5 * 100.0) * 0.20
+        + (ret20 * 100.0) * 0.35
+        + (rel_strength * 100.0) * 0.25
+        + (min(max(volume_ratio, 0.0), 3.0) * 10.0) * 0.10
+        + (max(0.0, 1.0 - min(abs(distance_from_recent_high), 0.30) / 0.30) * 100.0) * 0.10
+        - (min(max(volatility, 0.0), 1.0) * 10.0)
+    )
+    return {
+        "symbol": str(symbol),
+        "coarse_score": float(round(coarse_score, 6)),
+        "ret5": float(round(ret5, 6)),
+        "ret20": float(round(ret20, 6)),
+        "rel_strength_vs_spy": float(round(rel_strength, 6)),
+        "volume_ratio": float(round(volume_ratio, 6)),
+        "volatility": float(round(volatility, 6)),
+        "distance_from_recent_high": float(round(distance_from_recent_high, 6)),
+        "avg_dollar_volume_20": float(round(avg_dollar_volume_20, 4)),
+    }
 
 
 def _build_error_result(symbol_record: dict[str, Any], message: str) -> dict[str, Any]:
@@ -565,23 +617,53 @@ def scan_universe(
     symbol_records: list[dict[str, Any]],
     benchmark_symbol: str = BENCHMARK_SYMBOL,
     data_loader: Callable[[str, str, str], pd.DataFrame] = download_price_data,
+    data_loader_batch: Callable[[list[str], str, str], dict[str, pd.DataFrame]] = download_price_data_batch,
     max_workers: int = SCANNER_MAX_WORKERS,
     symbol_timeout_seconds: int = SCANNER_SYMBOL_TIMEOUT_SECONDS,
     request_timeout_seconds: int = SCANNER_DATA_REQUEST_TIMEOUT_SECONDS,
     max_retries: int = SCANNER_MAX_RETRIES,
     batch_size: int = SCANNER_BATCH_SIZE,
+    lightweight_batch_size: int = SCANNER_LIGHTWEIGHT_BATCH_SIZE,
+    deep_score_limit: int = SCANNER_DEEP_SCORE_LIMIT,
     progress_every: int = SCANNER_PROGRESS_EVERY,
     max_scan_seconds: int = SCANNER_MAX_SCAN_SECONDS,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    if data_loader_batch is download_price_data_batch and data_loader is not download_price_data:
+        def _batch_from_single(symbols: list[str], start_date: str, end_date: str) -> dict[str, pd.DataFrame]:
+            mapped: dict[str, pd.DataFrame] = {}
+            errors: dict[str, Exception] = {}
+            for symbol in symbols:
+                try:
+                    mapped[str(symbol).upper()] = data_loader(symbol, start_date, end_date)
+                except Exception as exc:
+                    errors[str(symbol).upper()] = exc
+                    continue
+            setattr(_batch_from_single, "_last_errors", errors)
+            return mapped
+
+        data_loader_batch = _batch_from_single
+
     started = time.perf_counter()
     deadline = started + float(max_scan_seconds if int(max_scan_seconds) > 0 else 365 * 24 * 3600)
-    metadata_pass_records: list[dict[str, Any]] = []
-    seen_symbols: set[str] = set()
+    tracemalloc.start()
+
+    stage_timers: dict[str, float] = {}
+    stage_counts: dict[str, dict[str, int]] = {}
     filtered_count_by_reason: dict[str, int] = {}
     scan_results: list[dict[str, Any]] = []
+    timed_out_symbols: list[str] = []
+    slow_symbols: list[tuple[float, str, str]] = []
+    retries = 0
+    rate_limit_retries = 0
+    cache_stats = {"cache_hits": 0}
+    deadline_hit = False
 
     universe_total_count = len(symbol_records)
+
+    stage_started = time.perf_counter()
+    metadata_pass_records: list[dict[str, Any]] = []
+    seen_symbols: set[str] = set()
     for record in symbol_records:
         symbol = normalize_symbol(record.get("symbol", ""))
         normalized_record = {**record, "symbol": symbol}
@@ -592,6 +674,11 @@ def scan_universe(
             continue
         seen_symbols.add(symbol)
         metadata_pass_records.append(normalized_record)
+    stage_timers["metadata_filter_seconds"] = round(max(time.perf_counter() - stage_started, 0.0), 4)
+    stage_counts["metadata"] = {
+        "entered": int(universe_total_count),
+        "exited": int(len(metadata_pass_records)),
+    }
 
     if progress_callback:
         progress_callback(
@@ -603,180 +690,261 @@ def scan_universe(
             }
         )
 
+    stage_started = time.perf_counter()
     start_date, end_date = _history_window(lookback_days=max(1000, int(SCANNER_MIN_HISTORY_DAYS) * 3))
+    light_start, light_end = _history_window(lookback_days=max(90, min(180, int(SCANNER_MIN_HISTORY_DAYS))))
+    lightweight_history_min = max(40, min(120, int(SCANNER_MIN_HISTORY_DAYS)))
+    benchmark_history = pd.DataFrame()
+    benchmark_light_history = pd.DataFrame()
     try:
         with ThreadPoolExecutor(max_workers=1) as executor:
             benchmark_history = executor.submit(data_loader, benchmark_symbol, start_date, end_date).result(
                 timeout=max(float(request_timeout_seconds), 1.0)
             )
+        benchmark_light_history = benchmark_history.tail(max(40, lightweight_history_min)).copy()
     except FutureTimeoutError as exc:
         raise TimeoutError(f"benchmark history timed out after {request_timeout_seconds}s") from exc
+    stage_timers["benchmark_fetch_seconds"] = round(max(time.perf_counter() - stage_started, 0.0), 4)
 
-    retries = 0
-    rate_limit_retries = 0
-    completed = 0
-    cache_stats = {"cache_hits": 0}
     lightweight_survivors: list[dict[str, Any]] = []
-
-    light_start, light_end = _history_window(lookback_days=max(90, min(180, int(SCANNER_MIN_HISTORY_DAYS))))
-    lightweight_history_min = max(40, min(120, int(SCANNER_MIN_HISTORY_DAYS)))
+    lightweight_features: dict[str, dict[str, float]] = {}
+    lightweight_processed = 0
 
     if progress_callback:
         progress_callback(
             {
                 "event": "lightweight_scan_start",
                 "total": int(len(metadata_pass_records)),
-                "batch_size": int(max(batch_size, 1)),
+                "batch_size": int(max(lightweight_batch_size, 1)),
             }
         )
 
-    for batch_start in range(0, len(metadata_pass_records), max(batch_size, 1)):
+    stage_started = time.perf_counter()
+    for batch_start in range(0, len(metadata_pass_records), max(lightweight_batch_size, 1)):
         if time.perf_counter() >= deadline:
+            deadline_hit = True
             for item in metadata_pass_records[batch_start:]:
+                symbol = normalize_symbol(item.get("symbol", ""))
+                timed_out_symbols.append(symbol)
                 scan_results.append(_build_error_result(item, "scan timeout: lightweight stage exceeded SCANNER_MAX_SCAN_SECONDS"))
             break
-        batch = metadata_pass_records[batch_start : batch_start + max(batch_size, 1)]
-        with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
-            future_items = [
-                (
-                    executor.submit(
-                        _download_with_retry,
-                        symbol=normalize_symbol(item.get("symbol", "")),
-                        start_date=light_start,
-                        end_date=light_end,
-                        bucket="lightweight",
-                        data_loader=data_loader,
-                        cache_ttl_seconds=_DEFAULT_CACHE_TTL_SECONDS,
-                        cache_stats=cache_stats,
-                        max_retries=max_retries,
-                    ),
-                    item,
+
+        batch = metadata_pass_records[batch_start : batch_start + max(lightweight_batch_size, 1)]
+        symbols = [normalize_symbol(item.get("symbol", "")) for item in batch]
+        batch_frames: dict[str, pd.DataFrame] = {}
+        batch_exception: Exception | None = None
+        batch_symbol_errors: dict[str, Exception] = {}
+
+        for attempt in range(max(int(max_retries), 0) + 1):
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(data_loader_batch, symbols, light_start, light_end)
+                    batch_frames = dict(future.result(timeout=max(float(request_timeout_seconds), 1.0)) or {})
+                    batch_symbol_errors = dict(getattr(data_loader_batch, "_last_errors", {}) or {})
+                break
+            except FutureTimeoutError as exc:
+                batch_exception = TimeoutError(f"lightweight batch timeout after {request_timeout_seconds}s")
+                if attempt >= int(max_retries):
+                    break
+                retries += 1
+                timed_out_symbols.extend(symbols)
+                time.sleep((2 ** attempt) * 0.6 + random.uniform(0.0, 0.2))
+            except Exception as exc:
+                batch_exception = exc
+                if attempt >= int(max_retries):
+                    break
+                retries += 1
+                if _is_rate_limit_error(f"{type(exc).__name__}: {exc}"):
+                    rate_limit_retries += 1
+                    time.sleep((2 ** attempt) * 1.2 + random.uniform(0.0, 0.2))
+                else:
+                    time.sleep((2 ** attempt) * 0.5 + random.uniform(0.0, 0.2))
+
+        for item in batch:
+            symbol = normalize_symbol(item.get("symbol", ""))
+            symbol_started = time.perf_counter()
+            history = batch_frames.get(symbol)
+            if history is None or history.empty:
+                symbol_error = batch_symbol_errors.get(symbol)
+                if batch_exception is not None:
+                    scan_results.append(_build_error_result(item, f"lightweight data error: {type(batch_exception).__name__}: {batch_exception}"))
+                elif symbol_error is not None:
+                    scan_results.append(_build_error_result(item, f"lightweight data error: {type(symbol_error).__name__}: {symbol_error}"))
+                else:
+                    reasons = ["no market data returned"]
+                    _count_reasons(filtered_count_by_reason, reasons)
+                    scan_results.append(_build_rejected_result(item, reasons))
+            else:
+                lightweight_filter = validate_symbol_data(
+                    symbol,
+                    history,
+                    min_price=SCANNER_MIN_PRICE,
+                    min_avg_dollar_volume=SCANNER_MIN_AVG_DOLLAR_VOLUME,
+                    min_history_days=lightweight_history_min,
+                    max_missing_percent=SCANNER_MAX_MISSING_PERCENT,
+                    max_stale_business_days=SCANNER_MAX_STALE_BUSINESS_DAYS,
                 )
-                for item in batch
-            ]
-            for future, item in future_items:
-                if time.perf_counter() >= deadline:
-                    scan_results.append(_build_error_result(item, "scan timeout: lightweight stage exceeded SCANNER_MAX_SCAN_SECONDS"))
-                    completed += 1
-                    continue
-                try:
-                    light_history, retry_count, rl_retries = future.result(timeout=symbol_timeout_seconds)
-                    retries += int(retry_count)
-                    rate_limit_retries += int(rl_retries)
-                    lightweight_filter = validate_symbol_data(
-                        normalize_symbol(item.get("symbol", "")),
-                        light_history,
-                        min_price=SCANNER_MIN_PRICE,
-                        min_avg_dollar_volume=SCANNER_MIN_AVG_DOLLAR_VOLUME,
-                        min_history_days=lightweight_history_min,
-                        max_missing_percent=SCANNER_MAX_MISSING_PERCENT,
-                        max_stale_business_days=SCANNER_MAX_STALE_BUSINESS_DAYS,
-                    )
-                    if not lightweight_filter.get("passed"):
-                        reasons = list(lightweight_filter.get("reasons") or [])
+                if not lightweight_filter.get("passed"):
+                    reasons = list(lightweight_filter.get("reasons") or [])
+                    _count_reasons(filtered_count_by_reason, reasons)
+                    scan_results.append(_build_rejected_result(item, reasons))
+                else:
+                    coarse = _coarse_metrics(symbol, history, benchmark_light_history)
+                    if coarse is None:
+                        reasons = ["insufficient history for coarse ranking"]
                         _count_reasons(filtered_count_by_reason, reasons)
-                        result = _build_rejected_result(item, reasons)
-                        scan_results.append(result)
+                        scan_results.append(_build_rejected_result(item, reasons))
                     else:
                         lightweight_survivors.append(item)
-                except Exception as exc:
-                    result = _build_error_result(item, f"symbol timeout/error: {type(exc).__name__}: {exc}")
-                    scan_results.append(result)
-                completed += 1
-                if progress_callback:
-                    if completed % max(int(progress_every), 1) == 0 or completed == len(metadata_pass_records):
-                        progress_callback(
-                            {
-                                "event": "scan_progress",
-                                "stage": "lightweight",
-                                "completed": completed,
-                                "total": len(metadata_pass_records),
-                                "symbol": normalize_symbol(item.get("symbol", "")),
-                                "elapsed_seconds": round(max(time.perf_counter() - started, 0.0), 4),
-                            }
-                        )
-        if batch_start + max(batch_size, 1) < len(metadata_pass_records):
-            time.sleep(random.uniform(0.05, 0.25))
+                        lightweight_features[symbol] = coarse
+            symbol_elapsed_ms = (time.perf_counter() - symbol_started) * 1000.0
+            slow_symbols.append((symbol_elapsed_ms, symbol, "lightweight_filter"))
+            lightweight_processed += 1
+            if progress_callback and (
+                lightweight_processed % max(int(progress_every), 1) == 0
+                or lightweight_processed == len(metadata_pass_records)
+            ):
+                progress_callback(
+                    {
+                        "event": "scan_progress",
+                        "stage": "lightweight",
+                        "completed": int(lightweight_processed),
+                        "total": int(len(metadata_pass_records)),
+                        "symbol": symbol,
+                        "elapsed_seconds": round(max(time.perf_counter() - started, 0.0), 4),
+                    }
+                )
+    stage_timers["lightweight_pipeline_seconds"] = round(max(time.perf_counter() - stage_started, 0.0), 4)
+    stage_counts["lightweight"] = {
+        "entered": int(len(metadata_pass_records)),
+        "exited": int(len(lightweight_survivors)),
+    }
 
-    completed = 0
+    stage_started = time.perf_counter()
+    coarse_ranked = sorted(
+        lightweight_survivors,
+        key=lambda item: (
+            -float((lightweight_features.get(normalize_symbol(item.get("symbol", ""))) or {}).get("coarse_score") or 0.0),
+            normalize_symbol(item.get("symbol", "")),
+        ),
+    )
+    effective_deep_limit = int(deep_score_limit) if int(deep_score_limit) > 0 else len(coarse_ranked)
+    deep_candidates = coarse_ranked[:effective_deep_limit]
+    for item in coarse_ranked[effective_deep_limit:]:
+        scan_results.append(_build_rejected_result(item, ["coarse ranking below deep score limit"]))
+        _count_reasons(filtered_count_by_reason, ["coarse ranking below deep score limit"])
+    stage_timers["coarse_ranking_seconds"] = round(max(time.perf_counter() - stage_started, 0.0), 4)
+    stage_counts["coarse_ranking"] = {
+        "entered": int(len(lightweight_survivors)),
+        "exited": int(len(deep_candidates)),
+    }
+
     if progress_callback:
         progress_callback(
             {
                 "event": "full_score_stage_start",
-                "total": int(len(lightweight_survivors)),
+                "total": int(len(deep_candidates)),
                 "batch_size": int(max(batch_size, 1)),
             }
         )
 
-    for batch_start in range(0, len(lightweight_survivors), max(batch_size, 1)):
+    stage_started = time.perf_counter()
+    deep_scored_count = 0
+    for batch_start in range(0, len(deep_candidates), max(batch_size, 1)):
         if time.perf_counter() >= deadline:
-            for item in lightweight_survivors[batch_start:]:
+            deadline_hit = True
+            for item in deep_candidates[batch_start:]:
+                symbol = normalize_symbol(item.get("symbol", ""))
+                timed_out_symbols.append(symbol)
                 scan_results.append(_build_error_result(item, "scan timeout: full scoring stage exceeded SCANNER_MAX_SCAN_SECONDS"))
             break
-        batch = lightweight_survivors[batch_start : batch_start + max(batch_size, 1)]
-        with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
-            future_items = []
-            for item in batch:
-                symbol = normalize_symbol(item.get("symbol", ""))
-                future_items.append(
-                    (
-                        executor.submit(
-                            _download_with_retry,
-                            symbol=symbol,
-                            start_date=start_date,
-                            end_date=end_date,
-                            bucket="full",
-                            data_loader=data_loader,
-                            cache_ttl_seconds=_DEFAULT_CACHE_TTL_SECONDS,
-                            cache_stats=cache_stats,
-                            max_retries=max_retries,
-                        ),
-                        item,
-                    )
+
+        batch = deep_candidates[batch_start : batch_start + max(batch_size, 1)]
+        symbols = [normalize_symbol(item.get("symbol", "")) for item in batch]
+        batch_frames: dict[str, pd.DataFrame] = {}
+        batch_exception: Exception | None = None
+        batch_symbol_errors: dict[str, Exception] = {}
+        for attempt in range(max(int(max_retries), 0) + 1):
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(data_loader_batch, symbols, start_date, end_date)
+                    batch_frames = dict(future.result(timeout=max(float(request_timeout_seconds), 1.0)) or {})
+                    batch_symbol_errors = dict(getattr(data_loader_batch, "_last_errors", {}) or {})
+                break
+            except FutureTimeoutError:
+                batch_exception = TimeoutError(f"full scoring batch timeout after {request_timeout_seconds}s")
+                if attempt >= int(max_retries):
+                    break
+                retries += 1
+                timed_out_symbols.extend(symbols)
+                time.sleep((2 ** attempt) * 0.6 + random.uniform(0.0, 0.2))
+            except Exception as exc:
+                batch_exception = exc
+                if attempt >= int(max_retries):
+                    break
+                retries += 1
+                if _is_rate_limit_error(f"{type(exc).__name__}: {exc}"):
+                    rate_limit_retries += 1
+                    time.sleep((2 ** attempt) * 1.2 + random.uniform(0.0, 0.2))
+                else:
+                    time.sleep((2 ** attempt) * 0.5 + random.uniform(0.0, 0.2))
+
+        for item in batch:
+            symbol = normalize_symbol(item.get("symbol", ""))
+            symbol_started = time.perf_counter()
+            history = batch_frames.get(symbol)
+            if history is None or history.empty:
+                symbol_error = batch_symbol_errors.get(symbol)
+                if batch_exception is not None:
+                    result = _build_error_result(item, f"full scoring data error: {type(batch_exception).__name__}: {batch_exception}")
+                elif symbol_error is not None:
+                    result = _build_error_result(item, f"full scoring data error: {type(symbol_error).__name__}: {symbol_error}")
+                else:
+                    result = _build_error_result(item, "no full-history data returned")
+            else:
+                result, retry_count = _scan_with_retry(
+                    symbol_record=item,
+                    benchmark_history=benchmark_history,
+                    data_loader=data_loader,
+                    max_retries=max_retries,
+                    retry_jitter_seconds=0.2,
+                    history=history,
                 )
+                retries += int(retry_count)
+                feature = lightweight_features.get(symbol) or {}
+                if feature:
+                    result["coarse_metrics"] = feature
+            if result.get("status") == "rejected":
+                _count_reasons(filtered_count_by_reason, list(result.get("rejection_reasons") or []))
+            scan_results.append(result)
+            deep_scored_count += 1
+            symbol_elapsed_ms = (time.perf_counter() - symbol_started) * 1000.0
+            slow_symbols.append((symbol_elapsed_ms, symbol, "full_scoring"))
 
-            for future, item in future_items:
-                if time.perf_counter() >= deadline:
-                    result = _build_error_result(item, "scan timeout: full scoring stage exceeded SCANNER_MAX_SCAN_SECONDS")
-                    scan_results.append(result)
-                    completed += 1
-                    continue
-                try:
-                    full_history, retry_count, rl_retries = future.result(timeout=symbol_timeout_seconds)
-                    retries += int(retry_count)
-                    rate_limit_retries += int(rl_retries)
-                    result, retry_count = _scan_with_retry(
-                        symbol_record=item,
-                        benchmark_history=benchmark_history,
-                        data_loader=data_loader,
-                        max_retries=max_retries,
-                        retry_jitter_seconds=0.2,
-                        history=full_history,
-                    )
-                    retries += retry_count
-                except Exception as exc:
-                    result = _build_error_result(item, f"symbol timeout/error: {type(exc).__name__}: {exc}")
-                if result.get("status") == "rejected":
-                    _count_reasons(filtered_count_by_reason, list(result.get("rejection_reasons") or []))
-                scan_results.append(result)
-                completed += 1
-                if progress_callback:
-                    if completed % max(int(progress_every), 1) == 0 or completed == len(lightweight_survivors):
-                        progress_callback(
-                            {
-                                "event": "scan_progress",
-                                "stage": "full_scoring",
-                                "completed": completed,
-                                "total": len(lightweight_survivors),
-                                "symbol": normalize_symbol(item.get("symbol", "")),
-                                "elapsed_seconds": round(max(time.perf_counter() - started, 0.0), 4),
-                            }
-                        )
+            if progress_callback and (
+                deep_scored_count % max(int(progress_every), 1) == 0
+                or deep_scored_count == len(deep_candidates)
+            ):
+                progress_callback(
+                    {
+                        "event": "scan_progress",
+                        "stage": "full_scoring",
+                        "completed": int(deep_scored_count),
+                        "total": int(len(deep_candidates)),
+                        "symbol": symbol,
+                        "elapsed_seconds": round(max(time.perf_counter() - started, 0.0), 4),
+                    }
+                )
+    stage_timers["full_scoring_seconds"] = round(max(time.perf_counter() - stage_started, 0.0), 4)
+    stage_counts["full_scoring"] = {
+        "entered": int(len(deep_candidates)),
+        "exited": int(deep_scored_count),
+    }
 
-        if batch_start + max(batch_size, 1) < len(lightweight_survivors):
-            time.sleep(random.uniform(0.05, 0.20))
-
+    ranking_started = time.perf_counter()
     ranked = rank_scan_results(scan_results)
+    stage_timers["ranking_seconds"] = round(max(time.perf_counter() - ranking_started, 0.0), 4)
+
     summary = summarize_scan(
         scan_results,
         started_at=started,
@@ -787,34 +955,101 @@ def scan_universe(
         lightweight_pass_count=len(lightweight_survivors),
         filtered_count_by_reason=filtered_count_by_reason,
     )
+
+    current_mb, peak_mb = _memory_snapshot_mb()
     summary["benchmark_symbol"] = benchmark_symbol
     summary["benchmark_rows"] = int(len(benchmark_history))
     summary["benchmark_reused"] = True
     summary["rate_limit_retry_count"] = int(rate_limit_retries)
+    summary["timeout_count"] = int(len(timed_out_symbols))
+    summary["timed_out_symbols"] = list(dict.fromkeys(timed_out_symbols))[:200]
     summary["max_workers"] = int(max_workers)
     summary["batch_size"] = int(max(batch_size, 1))
+    summary["lightweight_batch_size"] = int(max(lightweight_batch_size, 1))
+    summary["deep_score_limit"] = int(effective_deep_limit)
     summary["max_scan_seconds"] = int(max_scan_seconds)
     summary["progress_every"] = int(max(progress_every, 1))
+    summary["stage_counts"] = dict(stage_counts)
+    summary["stage_timings_seconds"] = dict(stage_timers)
+    summary["memory_current_mb"] = float(current_mb)
+    summary["memory_peak_mb"] = float(peak_mb)
+    summary["slowest_20_symbols"] = [
+        {"symbol": symbol, "stage": stage, "elapsed_ms": round(ms, 3)}
+        for ms, symbol, stage in sorted(slow_symbols, key=lambda item: item[0], reverse=True)[:20]
+    ]
+
+    ranking_completed = True
+    infrastructure_failed = bool(universe_total_count <= 0 or (len(metadata_pass_records) > 0 and lightweight_processed == 0))
+    stage_b_survivors = len(lightweight_survivors)
+    stage_c_survivors = len(deep_candidates)
+    deep_threshold = max(1, int(max(stage_c_survivors, 1) * 0.50))
+    partial_success_acceptable = bool(ranking_completed and deep_scored_count >= deep_threshold)
+
+    if not ranking_completed or infrastructure_failed:
+        summary_status = "failed"
+    elif deadline_hit and not partial_success_acceptable:
+        summary_status = "timed_out"
+    elif deadline_hit and partial_success_acceptable:
+        summary_status = "partial_success"
+    elif int(summary.get("error_count") or 0) > 0 and partial_success_acceptable:
+        summary_status = "partial_success"
+    elif stage_b_survivors == 0 and universe_total_count > 0:
+        summary_status = "failed"
+    else:
+        summary_status = "success"
+
+    summary["status"] = summary_status
+    summary["partial_success_thresholds"] = {
+        "deep_scored_minimum": int(deep_threshold),
+        "partial_success_acceptable": bool(partial_success_acceptable),
+    }
+    summary["stage_a_total"] = int(universe_total_count)
+    summary["stage_b_survivors"] = int(stage_b_survivors)
+    summary["stage_c_survivors"] = int(stage_c_survivors)
+    summary["deep_scored_count"] = int(deep_scored_count)
+
+    top_ranked = []
+    for item in ranked[:10]:
+        strategy_scores = item.get("strategy_specific_scores") or {}
+        top_ranked.append(
+            {
+                "symbol": str(item.get("symbol") or ""),
+                "rank": int(item.get("rank") or 0),
+                "quantum_score": float((item.get("quantum_score") or {}).get("final_score") or item.get("overall_score") or 0.0),
+                "strategy_score": float(item.get("ranking_score") or 0.0),
+                "strategy_ids": sorted([str(key) for key in strategy_scores.keys()]),
+                "risk_reward": float((item.get("quantum_score") or {}).get("reward_risk_ratio") or 0.0),
+                "liquidity": float(item.get("liquidity_score") or 0.0),
+                "data_quality": str(((item.get("data_quality") or {}).get("quantum") or {}).get("status") or "unknown"),
+                "rejection_reasons": list(item.get("rejection_reasons") or []),
+            }
+        )
 
     if progress_callback:
-        top_ranked = []
-        for item in ranked[:10]:
-            strategy_scores = item.get("strategy_specific_scores") or {}
-            top_ranked.append(
-                {
-                    "symbol": str(item.get("symbol") or ""),
-                    "rank": int(item.get("rank") or 0),
-                    "overall_score": float(item.get("overall_score") or 0.0),
-                    "quantum_score": float((item.get("quantum_score") or {}).get("final_score") or item.get("overall_score") or 0.0),
-                    "strategy_ids": sorted([str(key) for key in strategy_scores.keys()]),
-                }
-            )
         progress_callback(
             {
                 "event": "ranking_complete",
                 "eligible_count": int(summary.get("eligible_count") or 0),
                 "failed_symbol_count": int(summary.get("failed_symbol_count") or 0),
                 "top_ranked_candidates": top_ranked,
+            }
+        )
+        progress_callback(
+            {
+                "event": "full_universe_scan_complete",
+                "total_universe": int(universe_total_count),
+                "stage_b_survivors": int(stage_b_survivors),
+                "stage_c_survivors": int(stage_c_survivors),
+                "deep_scored_count": int(deep_scored_count),
+                "eligible_candidates": int(summary.get("eligible_count") or 0),
+                "failed_symbols": int(summary.get("failed_symbol_count") or 0),
+                "timeout_count": int(summary.get("timeout_count") or 0),
+                "rate_limit_count": int(summary.get("rate_limit_retry_count") or 0),
+                "top_10_candidates": top_ranked,
+                "total_duration": float(summary.get("duration_seconds") or 0.0),
+                "orders_attempted": 0,
+                "orders_submitted": 0,
+                "exit_status": str(summary_status),
             }
         )
 

@@ -30,6 +30,13 @@ def _log_event(event: str, **fields: Any) -> None:
     encoded = json.dumps(payload, sort_keys=True, default=str)
     print(encoded, flush=True)
     logger.info(encoded)
+    jsonl_path = Path(str(os.getenv("SCANNER_JSONL_LOG_FILE", "full_universe_dry_scan.jsonl")).strip() or "full_universe_dry_scan.jsonl")
+    try:
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(jsonl_path, "a", encoding="utf-8") as handle:
+            handle.write(encoded + "\n")
+    except Exception:
+        pass
     try:
         sys.stdout.flush()
     except Exception:
@@ -297,6 +304,43 @@ def run_continuous_paper_runner(
                     _save_daily_state(resolved_state_path, state)
 
                 stats["scans_completed"] += 1
+                scan_payload = _result_value(result, "scan") or {}
+                scan_summary = ((_result_value(scan_payload, "scan_payload") or {}).get("summary") or {}) if isinstance(scan_payload, dict) else {}
+                ranked_candidates = ((_result_value(scan_payload, "scan_payload") or {}).get("ranked_candidates") or []) if isinstance(scan_payload, dict) else []
+                top_10 = []
+                for item in list(ranked_candidates)[:10]:
+                    top_10.append(
+                        {
+                            "symbol": str(item.get("symbol") or ""),
+                            "rank": int(item.get("rank") or 0),
+                            "quantum_score": float((item.get("quantum_score") or {}).get("final_score") or item.get("overall_score") or 0.0),
+                            "strategy_score": float(item.get("ranking_score") or 0.0),
+                            "strategy_ids": sorted([str(key) for key in (item.get("strategy_specific_scores") or {}).keys()]),
+                            "risk_reward": float((item.get("quantum_score") or {}).get("reward_risk_ratio") or 0.0),
+                            "liquidity": float(item.get("liquidity_score") or 0.0),
+                            "data_quality": str(((item.get("data_quality") or {}).get("quantum") or {}).get("status") or "unknown"),
+                            "rejection_reasons": list(item.get("rejection_reasons") or []),
+                        }
+                    )
+
+                _log_event(
+                    "full_universe_scan_complete",
+                    run_id=run_id,
+                    total_universe=int(scan_summary.get("universe_total_count") or 0),
+                    stage_b_survivors=int(scan_summary.get("stage_b_survivors") or 0),
+                    stage_c_survivors=int(scan_summary.get("stage_c_survivors") or 0),
+                    deep_scored_count=int(scan_summary.get("deep_scored_count") or 0),
+                    eligible_candidates=int(scan_summary.get("eligible_count") or 0),
+                    failed_symbols=int(scan_summary.get("failed_symbol_count") or 0),
+                    timeout_count=int(scan_summary.get("timeout_count") or 0),
+                    rate_limit_count=int(scan_summary.get("rate_limit_retry_count") or 0),
+                    top_10_candidates=top_10,
+                    total_duration=float(scan_summary.get("duration_seconds") or 0.0),
+                    orders_attempted=(1 if str(_result_value(result, "execution_status") or "") in {"completed", "no_trade", "risk_rejected", "duplicate_rejected"} else 0),
+                    orders_submitted=int(confirmed_order_count),
+                    exit_status=str(scan_summary.get("status") or _result_value(result, "execution_status") or "unknown"),
+                )
+
                 _log_event(
                     "continuous_runner_scan_completed",
                     run_id=run_id,

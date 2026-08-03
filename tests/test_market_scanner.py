@@ -108,17 +108,19 @@ def test_rank_scan_results_deterministic_tie_breakers():
 
 def test_scan_universe_timeout_handling(monkeypatch):
     def _slow_loader(symbol, start, end):
-        time.sleep(0.05)
+        time.sleep(0.2)
         return _frame()
 
     payload = market_scanner.scan_universe(
-        [{"symbol": "AAA"}],
+        [{"symbol": "AAA"}, {"symbol": "BBB"}, {"symbol": "CCC"}],
         benchmark_symbol="SPY",
         data_loader=_slow_loader,
-        symbol_timeout_seconds=0,
+        max_scan_seconds=1,
         max_workers=1,
+        batch_size=1,
     )
-    assert payload["summary"]["error_count"] == 1
+    assert payload["summary"]["error_count"] >= 1
+    assert payload["summary"]["status"] in {"timed_out", "partial_success"}
 
 
 def test_scan_universe_respects_batch_and_worker_summary(monkeypatch):
@@ -383,3 +385,185 @@ def test_scan_universe_max_scan_seconds_marks_remaining_symbols(monkeypatch):
     )
 
     assert payload["summary"]["error_count"] >= 1
+
+
+def test_stage_a_includes_large_universe_with_no_deep_overflow(monkeypatch):
+    monkeypatch.setattr(market_scanner, "generate_strategy_result", lambda **kwargs: {
+        "overall_score": 82.0,
+        "confidence": 70.0,
+        "signal": "BUY",
+        "regime": "weak_bull",
+        "component_scores": {"risk_quality": 60.0, "volatility": 60.0, "trend": 70.0},
+        "reasons": [],
+        "warnings": [],
+        "data_quality": {"history_sufficient": True},
+        "factors": {"trend": {"raw_values": {"distance_from_ema200_pct": 5.0}}},
+    })
+
+    symbols = [{"symbol": f"A{i:04d}", "status": "ACTIVE", "tradable": True} for i in range(13_060)]
+
+    shared_frame = _frame(rows=60, base=25.0, step=0.02, volume=3_000_000)
+
+    def _batch_loader(symbols, start, end):
+        return {symbol: shared_frame for symbol in symbols}
+
+    payload = market_scanner.scan_universe(
+        symbols,
+        benchmark_symbol="SPY",
+        data_loader=lambda *args, **kwargs: _frame(),
+        data_loader_batch=_batch_loader,
+        max_workers=1,
+        max_retries=0,
+        lightweight_batch_size=200,
+        deep_score_limit=300,
+    )
+
+    assert payload["summary"]["stage_a_total"] == 13_060
+    assert payload["summary"]["stage_c_survivors"] <= 300
+
+
+def test_deep_scoring_is_capped_and_deterministic(monkeypatch):
+    monkeypatch.setattr(market_scanner, "generate_strategy_result", lambda **kwargs: {
+        "overall_score": 80.0,
+        "confidence": 70.0,
+        "signal": "BUY",
+        "regime": "normal_bull",
+        "component_scores": {"risk_quality": 60.0, "volatility": 60.0, "trend": 70.0},
+        "reasons": [],
+        "warnings": [],
+        "data_quality": {"history_sufficient": True},
+        "factors": {"trend": {"raw_values": {"distance_from_ema200_pct": 2.0}}},
+    })
+
+    letters = [chr(ord("A") + i) for i in range(20)]
+    universe = [{"symbol": f"S{letter}", "status": "ACTIVE", "tradable": True} for letter in letters]
+    payload = market_scanner.scan_universe(
+        universe,
+        benchmark_symbol="SPY",
+        data_loader=lambda *args, **kwargs: _frame(),
+        deep_score_limit=5,
+        lightweight_batch_size=10,
+        max_workers=1,
+        max_retries=0,
+    )
+
+    summary = payload["summary"]
+    assert summary["stage_c_survivors"] == 5
+    rejected_reasons = [reason for row in payload["scan_results"] for reason in (row.get("rejection_reasons") or [])]
+    assert "coarse ranking below deep score limit" in rejected_reasons
+
+
+def test_lightweight_batch_size_is_respected(monkeypatch):
+    batch_sizes = []
+
+    def _batch_loader(symbols, start, end):
+        batch_sizes.append(len(symbols))
+        return {symbol: _frame() for symbol in symbols}
+
+    monkeypatch.setattr(market_scanner, "generate_strategy_result", lambda **kwargs: {
+        "overall_score": 80.0,
+        "confidence": 70.0,
+        "signal": "BUY",
+        "regime": "normal_bull",
+        "component_scores": {"risk_quality": 60.0, "volatility": 60.0, "trend": 70.0},
+        "reasons": [],
+        "warnings": [],
+        "data_quality": {"history_sufficient": True},
+        "factors": {"trend": {"raw_values": {"distance_from_ema200_pct": 2.0}}},
+    })
+
+    payload = market_scanner.scan_universe(
+        [{"symbol": f"B{i:02d}", "status": "ACTIVE", "tradable": True} for i in range(11)],
+        benchmark_symbol="SPY",
+        data_loader=lambda *args, **kwargs: _frame(),
+        data_loader_batch=_batch_loader,
+        lightweight_batch_size=4,
+        deep_score_limit=3,
+        max_workers=1,
+        max_retries=0,
+    )
+
+    assert batch_sizes[:3] == [4, 4, 3]
+    assert payload["summary"]["lightweight_batch_size"] == 4
+
+
+def test_scan_always_emits_final_completion_event(monkeypatch):
+    events = []
+    monkeypatch.setattr(market_scanner, "generate_strategy_result", lambda **kwargs: {
+        "overall_score": 82.0,
+        "confidence": 72.0,
+        "signal": "BUY",
+        "regime": "normal_bull",
+        "component_scores": {"risk_quality": 70.0, "volatility": 60.0, "trend": 75.0},
+        "reasons": [],
+        "warnings": [],
+        "data_quality": {"history_sufficient": True},
+        "factors": {"trend": {"raw_values": {"distance_from_ema200_pct": 4.0}}},
+    })
+
+    market_scanner.scan_universe(
+        [{"symbol": "AAA", "status": "ACTIVE", "tradable": True}],
+        benchmark_symbol="SPY",
+        data_loader=lambda *args, **kwargs: _frame(),
+        progress_callback=lambda payload: events.append(dict(payload)),
+        max_workers=1,
+        max_retries=0,
+    )
+
+    names = [event.get("event") for event in events]
+    assert "full_universe_scan_complete" in names
+
+
+def test_infrastructure_failure_cannot_report_success(monkeypatch):
+    monkeypatch.setattr(market_scanner, "generate_strategy_result", lambda **kwargs: {
+        "overall_score": 82.0,
+        "confidence": 72.0,
+        "signal": "BUY",
+        "regime": "normal_bull",
+        "component_scores": {"risk_quality": 70.0, "volatility": 60.0, "trend": 75.0},
+        "reasons": [],
+        "warnings": [],
+        "data_quality": {"history_sufficient": True},
+        "factors": {"trend": {"raw_values": {"distance_from_ema200_pct": 4.0}}},
+    })
+
+    def _broken_batch(symbols, start, end):
+        raise RuntimeError("upstream down")
+
+    payload = market_scanner.scan_universe(
+        [{"symbol": "AAA", "status": "ACTIVE", "tradable": True}],
+        benchmark_symbol="SPY",
+        data_loader=lambda *args, **kwargs: _frame(),
+        data_loader_batch=_broken_batch,
+        max_retries=0,
+        max_workers=1,
+    )
+
+    assert payload["summary"]["status"] in {"failed", "timed_out"}
+
+
+def test_partial_success_thresholds_are_reported(monkeypatch):
+    monkeypatch.setattr(market_scanner, "generate_strategy_result", lambda **kwargs: {
+        "overall_score": 82.0,
+        "confidence": 72.0,
+        "signal": "BUY",
+        "regime": "normal_bull",
+        "component_scores": {"risk_quality": 70.0, "volatility": 60.0, "trend": 75.0},
+        "reasons": [],
+        "warnings": [],
+        "data_quality": {"history_sufficient": True},
+        "factors": {"trend": {"raw_values": {"distance_from_ema200_pct": 4.0}}},
+    })
+
+    payload = market_scanner.scan_universe(
+        [{"symbol": f"P{i:03d}", "status": "ACTIVE", "tradable": True} for i in range(15)],
+        benchmark_symbol="SPY",
+        data_loader=lambda *args, **kwargs: _frame(),
+        max_workers=1,
+        max_retries=0,
+        deep_score_limit=10,
+    )
+
+    thresholds = payload["summary"]["partial_success_thresholds"]
+    assert thresholds["deep_scored_minimum"] >= 1
+    assert "partial_success_acceptable" in thresholds
