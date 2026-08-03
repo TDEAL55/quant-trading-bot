@@ -341,13 +341,14 @@ def run_continuous_scan_cycle(
         broker_equity = float(loaded_equity)
 
     def _scan_progress_telemetry(payload: dict[str, Any]) -> None:
-        event_name = str(payload.get("event") or "scan_progress")
+        payload_dict = dict(payload or {})
+        event_name = str(payload_dict.pop("event", "scan_progress") or "scan_progress")
         base = {
             "run_id": cycle_run_id,
             "dry_run": bool(dry_run),
             "trading_mode": str(config.trading_mode),
         }
-        base.update(payload)
+        base.update(payload_dict)
         _emit_telemetry(telemetry_callback, event_name, **base)
 
     scan_payload = _invoke_scan_runner(
