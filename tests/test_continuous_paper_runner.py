@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import json
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +46,8 @@ def _config(tmp_path, trading_mode="PAPER", scan_interval_minutes=5, max_daily_o
             "database_path": db_path,
             "scan_interval_minutes": scan_interval_minutes,
             "max_daily_orders": max_daily_orders,
+            "scan_only_during_market_hours": True,
+            "continuous_runner_dry_run": True,
         },
     )()
 
@@ -572,3 +575,144 @@ def test_scan_interval_path_continues_after_lock_busy_and_exception(tmp_path):
     assert stats["lock_skips"] == 1
     assert stats["scans_failed"] == 1
     assert sleeps == [300, 300]
+
+
+def test_build_full_universe_dry_run_command_uses_pipefail_and_python_exit_code():
+    command = continuous_paper_runner.build_full_universe_dry_run_command()
+    assert "set -o pipefail" in command
+    assert "PIPESTATUS[0]" in command
+    assert "PYTHON_EXIT_CODE" in command
+
+
+def test_startup_telemetry_emits_before_runner_work(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    events = []
+
+    monkeypatch.setattr(
+        continuous_paper_runner,
+        "_log_event",
+        lambda event, **fields: events.append((event, dict(fields))),
+    )
+
+    stats = run_continuous_paper_runner(
+        config_loader=lambda: cfg,
+        runner=lambda **kwargs: _failed_result(status="no_candidates"),
+        state_path=_state_path(tmp_path),
+        now_provider=_Clock([datetime(2026, 7, 22, 10, 0, tzinfo=EASTERN_TZ)]),
+        sleep_fn=lambda _seconds: None,
+        max_iterations=1,
+    )
+
+    names = [name for name, _ in events]
+    assert names.index("continuous_runner_starting") < names.index("run_lock_acquired")
+    assert "configuration_loaded" in names
+    assert "continuous_runner_exit" in names
+    assert stats["cycles"] == 1
+
+
+def test_run_lock_acquire_and_release_are_visible(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    events = []
+
+    monkeypatch.setattr(
+        continuous_paper_runner,
+        "_log_event",
+        lambda event, **fields: events.append((event, dict(fields))),
+    )
+
+    run_continuous_paper_runner(
+        config_loader=lambda: cfg,
+        runner=lambda **kwargs: _failed_result(status="no_candidates"),
+        state_path=_state_path(tmp_path),
+        now_provider=_Clock([datetime(2026, 7, 22, 10, 0, tzinfo=EASTERN_TZ)]),
+        sleep_fn=lambda _seconds: None,
+        max_iterations=1,
+    )
+
+    names = [name for name, _ in events]
+    assert "run_lock_acquired" in names
+    assert "run_lock_released" in names
+
+
+def test_market_hours_bypass_allows_one_cycle_diagnostics(tmp_path):
+    cfg = _config(tmp_path)
+    cfg.scan_only_during_market_hours = False
+    calls = {"runner": 0}
+
+    def _runner(**kwargs):
+        calls["runner"] += 1
+        return _failed_result(status="no_candidates")
+
+    stats = run_continuous_paper_runner(
+        config_loader=lambda: cfg,
+        runner=_runner,
+        state_path=_state_path(tmp_path),
+        now_provider=_Clock([datetime(2026, 7, 25, 12, 0, tzinfo=EASTERN_TZ)]),
+        sleep_fn=lambda _seconds: None,
+        max_iterations=1,
+        diagnostic_symbol_limit=25,
+    )
+
+    assert calls["runner"] == 1
+    assert stats["closed_market_sleeps"] == 0
+
+
+def test_scanner_exception_emits_failure_and_final_exit_event(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    events = []
+
+    monkeypatch.setattr(
+        continuous_paper_runner,
+        "_log_event",
+        lambda event, **fields: events.append((event, dict(fields))),
+    )
+
+    run_continuous_paper_runner(
+        config_loader=lambda: cfg,
+        runner=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+        state_path=_state_path(tmp_path),
+        now_provider=_Clock([datetime(2026, 7, 22, 10, 0, tzinfo=EASTERN_TZ)]),
+        sleep_fn=lambda _seconds: None,
+        max_iterations=1,
+    )
+
+    names = [name for name, _ in events]
+    assert "continuous_runner_scan_failed" in names
+    assert names[-1] == "continuous_runner_exit"
+
+
+def test_missing_max_universe_env_reports_default_unlimited(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    events = []
+    monkeypatch.delenv("SCANNER_MAX_UNIVERSE_SIZE", raising=False)
+    monkeypatch.setattr(
+        continuous_paper_runner,
+        "_log_event",
+        lambda event, **fields: events.append((event, dict(fields))),
+    )
+
+    run_continuous_paper_runner(
+        config_loader=lambda: cfg,
+        runner=lambda **kwargs: _failed_result(status="no_candidates"),
+        state_path=_state_path(tmp_path),
+        now_provider=_Clock([datetime(2026, 7, 22, 10, 0, tzinfo=EASTERN_TZ)]),
+        sleep_fn=lambda _seconds: None,
+        max_iterations=1,
+    )
+
+    config_events = [payload for name, payload in events if name == "configuration_loaded"]
+    assert config_events
+    assert config_events[0]["max_universe_source"] == "default"
+    assert config_events[0]["max_universe_mode"] == "unlimited"
+
+
+def test_log_event_prints_with_flush(monkeypatch):
+    captured = {"flush": False}
+
+    def _fake_print(*args, **kwargs):
+        del args
+        captured["flush"] = bool(kwargs.get("flush"))
+
+    monkeypatch.setattr(builtins, "print", _fake_print)
+    continuous_paper_runner._log_event("unit_test_event", sample=True)
+    assert captured["flush"] is True

@@ -4,7 +4,9 @@ import argparse
 import json
 import os
 import signal
+import sys
 import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -24,8 +26,38 @@ MARKET_CLOSE_MINUTE = 0
 
 
 def _log_event(event: str, **fields: Any) -> None:
-    payload = {"event": event, **fields}
-    logger.info(json.dumps(payload, sort_keys=True, default=str))
+    payload = {"event": event, "timestamp": datetime.now(EASTERN_TZ).isoformat(), **fields}
+    encoded = json.dumps(payload, sort_keys=True, default=str)
+    print(encoded, flush=True)
+    logger.info(encoded)
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def _telemetry_callback_factory(run_id: str, dry_run: bool, trading_mode: str) -> Callable[[str, dict[str, Any]], None]:
+    def _emit(event: str, payload: dict[str, Any]) -> None:
+        fields = dict(payload or {})
+        fields.setdefault("run_id", run_id)
+        fields.setdefault("dry_run", bool(dry_run))
+        fields.setdefault("trading_mode", str(trading_mode).upper())
+        _log_event(event, **fields)
+
+    return _emit
+
+
+def build_full_universe_dry_run_command(log_file: str = "full_universe_dry_scan.log") -> str:
+    return (
+        "set -o pipefail; "
+        "SCAN_ONLY_DURING_MARKET_HOURS=false "
+        "SCANNER_MAX_UNIVERSE_SIZE=0 "
+        "timeout 600 python -u continuous_paper_runner.py --dry-run --max-iterations 1 "
+        f"2>&1 | tee {log_file}; "
+        "exit_code=${PIPESTATUS[0]}; "
+        "echo PYTHON_EXIT_CODE=${exit_code}; "
+        "exit ${exit_code}"
+    )
 
 
 def _to_eastern(dt: datetime) -> datetime:
@@ -147,7 +179,10 @@ def run_continuous_paper_runner(
     stop_event: Any | None = None,
     max_cycles: int | None = None,
     dry_run_override: bool | None = None,
+    diagnostic_symbol_limit: int | None = None,
 ) -> dict[str, int]:
+    run_id = f"continuous-runner-{datetime.now(EASTERN_TZ).strftime('%Y%m%d%H%M%S%f')}-{uuid.uuid4().hex[:8]}"
+    _log_event("continuous_runner_starting", run_id=run_id)
     config = config_loader()
     if str(config.trading_mode).upper() != "PAPER":
         raise RuntimeError("continuous_paper_runner requires TRADING_MODE=PAPER")
@@ -167,6 +202,26 @@ def run_continuous_paper_runner(
     max_daily_orders = configured_max_daily_orders
     scan_only_during_market_hours = bool(getattr(config, "scan_only_during_market_hours", True))
     dry_run = bool(getattr(config, "continuous_runner_dry_run", False)) if dry_run_override is None else bool(dry_run_override)
+    telemetry_callback = _telemetry_callback_factory(run_id=run_id, dry_run=dry_run, trading_mode=str(config.trading_mode))
+
+    max_universe_raw = os.getenv("SCANNER_MAX_UNIVERSE_SIZE")
+    resolved_max_universe_size = int(str(max_universe_raw or "0").strip() or "0")
+    max_universe_source = "environment" if max_universe_raw is not None else "default"
+
+    _log_event(
+        "configuration_loaded",
+        run_id=run_id,
+        dry_run=bool(dry_run),
+        trading_mode=str(config.trading_mode).upper(),
+        scan_only_during_market_hours=bool(scan_only_during_market_hours),
+        scan_interval_minutes=int(config.scan_interval_minutes),
+        max_universe_size=int(resolved_max_universe_size),
+        max_universe_mode=("unlimited" if int(resolved_max_universe_size) <= 0 else "capped"),
+        max_universe_source=max_universe_source,
+        universe_source="alpaca_assets_api",
+        diagnostic_symbol_limit=(int(diagnostic_symbol_limit) if diagnostic_symbol_limit is not None else None),
+    )
+
     lock_path = Path(config.database_path).with_suffix(".continuous.lock")
     resolved_state_path = Path(state_path) if state_path is not None else Path(config.database_path).with_suffix(".continuous.state.json")
 
@@ -194,6 +249,7 @@ def run_continuous_paper_runner(
                 stats["closed_market_sleeps"] += 1
                 _log_event(
                     "continuous_runner_market_closed",
+                    run_id=run_id,
                     timestamp=now_eastern.isoformat(),
                     sleep_seconds=round(float(sleep_seconds), 3),
                 )
@@ -206,6 +262,7 @@ def run_continuous_paper_runner(
                 stats["quota_skips"] += 1
                 _log_event(
                     "continuous_runner_quota_reached",
+                    run_id=run_id,
                     timestamp=now_eastern.isoformat(),
                     market_date=market_date,
                     orders_submitted=state.get("orders_submitted"),
@@ -217,13 +274,22 @@ def run_continuous_paper_runner(
                 continue
 
             try:
-                with lock_factory(lock_path=lock_path, stale_after_seconds=7200, owner="continuous-paper-runner"):
-                    stats["scans_attempted"] += 1
-                    result = runner(
-                        database_url=database_url or config.database_url,
-                        persist=True,
-                        dry_run=dry_run,
-                    )
+                lock_acquired = False
+                try:
+                    with lock_factory(lock_path=lock_path, stale_after_seconds=7200, owner="continuous-paper-runner"):
+                        lock_acquired = True
+                        _log_event("run_lock_acquired", run_id=run_id, lock_path=str(lock_path))
+                        stats["scans_attempted"] += 1
+                        result = runner(
+                            database_url=database_url or config.database_url,
+                            persist=True,
+                            dry_run=dry_run,
+                            diagnostic_symbol_limit=diagnostic_symbol_limit,
+                            telemetry_callback=telemetry_callback,
+                        )
+                finally:
+                    if lock_acquired:
+                        _log_event("run_lock_released", run_id=run_id, lock_path=str(lock_path))
                 confirmed_order_count = _confirmed_submitted_order_count(result)
 
                 if confirmed_order_count > 0:
@@ -233,6 +299,7 @@ def run_continuous_paper_runner(
                 stats["scans_completed"] += 1
                 _log_event(
                     "continuous_runner_scan_completed",
+                    run_id=run_id,
                     timestamp=now_eastern.isoformat(),
                     market_date=market_date,
                     execution_status=_result_value(result, "execution_status"),
@@ -243,6 +310,7 @@ def run_continuous_paper_runner(
                 stats["lock_skips"] += 1
                 _log_event(
                     "continuous_runner_lock_busy",
+                    run_id=run_id,
                     timestamp=now_eastern.isoformat(),
                     market_date=market_date,
                     sleep_seconds=scan_interval_seconds,
@@ -251,6 +319,7 @@ def run_continuous_paper_runner(
                 stats["scans_failed"] += 1
                 _log_event(
                     "continuous_runner_scan_failed",
+                    run_id=run_id,
                     timestamp=now_eastern.isoformat(),
                     market_date=market_date,
                     error_type=type(exc).__name__,
@@ -260,7 +329,9 @@ def run_continuous_paper_runner(
             sleep_fn(scan_interval_seconds)
             stats["cycles"] += 1
     except KeyboardInterrupt:
-        _log_event("continuous_runner_shutdown", reason="keyboard_interrupt", cycles=stats["cycles"])
+        _log_event("continuous_runner_shutdown", run_id=run_id, reason="keyboard_interrupt", cycles=stats["cycles"])
+
+    _log_event("continuous_runner_exit", run_id=run_id, **stats)
 
     return stats
 
@@ -281,6 +352,7 @@ def main() -> int:
     parser.add_argument("--database-url", default=None)
     parser.add_argument("--max-iterations", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true", help="Force dry-run mode for continuous 5-minute scans")
+    parser.add_argument("--diagnostic-symbol-limit", type=int, default=None, help="Use real Alpaca universe but only fully evaluate a deterministic subset")
     args = parser.parse_args()
 
     stop_event = _SignalStopEvent()
@@ -297,6 +369,7 @@ def main() -> int:
         max_iterations=args.max_iterations,
         stop_event=stop_event,
         dry_run_override=True if args.dry_run else None,
+        diagnostic_symbol_limit=args.diagnostic_symbol_limit,
     )
     return 0
 

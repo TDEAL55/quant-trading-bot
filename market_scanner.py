@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import random
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any, Callable
@@ -15,6 +15,9 @@ from config import (
     SCANNER_ALLOWED_SIGNALS,
     SCANNER_BATCH_SIZE,
     SCANNER_BLOCKED_REGIMES,
+    SCANNER_DATA_REQUEST_TIMEOUT_SECONDS,
+    SCANNER_PROGRESS_EVERY,
+    SCANNER_MAX_SCAN_SECONDS,
     SCANNER_MAX_MISSING_PERCENT,
     SCANNER_MAX_RETRIES,
     SCANNER_MAX_STALE_BUSINESS_DAYS,
@@ -564,11 +567,15 @@ def scan_universe(
     data_loader: Callable[[str, str, str], pd.DataFrame] = download_price_data,
     max_workers: int = SCANNER_MAX_WORKERS,
     symbol_timeout_seconds: int = SCANNER_SYMBOL_TIMEOUT_SECONDS,
+    request_timeout_seconds: int = SCANNER_DATA_REQUEST_TIMEOUT_SECONDS,
     max_retries: int = SCANNER_MAX_RETRIES,
     batch_size: int = SCANNER_BATCH_SIZE,
+    progress_every: int = SCANNER_PROGRESS_EVERY,
+    max_scan_seconds: int = SCANNER_MAX_SCAN_SECONDS,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
+    deadline = started + float(max_scan_seconds if int(max_scan_seconds) > 0 else 365 * 24 * 3600)
     metadata_pass_records: list[dict[str, Any]] = []
     seen_symbols: set[str] = set()
     filtered_count_by_reason: dict[str, int] = {}
@@ -586,8 +593,24 @@ def scan_universe(
         seen_symbols.add(symbol)
         metadata_pass_records.append(normalized_record)
 
+    if progress_callback:
+        progress_callback(
+            {
+                "event": "metadata_filter_complete",
+                "universe_total_count": int(universe_total_count),
+                "metadata_pass_count": int(len(metadata_pass_records)),
+                "filtered_count_by_reason": dict(filtered_count_by_reason),
+            }
+        )
+
     start_date, end_date = _history_window(lookback_days=max(1000, int(SCANNER_MIN_HISTORY_DAYS) * 3))
-    benchmark_history = data_loader(benchmark_symbol, start_date, end_date)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            benchmark_history = executor.submit(data_loader, benchmark_symbol, start_date, end_date).result(
+                timeout=max(float(request_timeout_seconds), 1.0)
+            )
+    except FutureTimeoutError as exc:
+        raise TimeoutError(f"benchmark history timed out after {request_timeout_seconds}s") from exc
 
     retries = 0
     rate_limit_retries = 0
@@ -598,7 +621,20 @@ def scan_universe(
     light_start, light_end = _history_window(lookback_days=max(90, min(180, int(SCANNER_MIN_HISTORY_DAYS))))
     lightweight_history_min = max(40, min(120, int(SCANNER_MIN_HISTORY_DAYS)))
 
+    if progress_callback:
+        progress_callback(
+            {
+                "event": "lightweight_scan_start",
+                "total": int(len(metadata_pass_records)),
+                "batch_size": int(max(batch_size, 1)),
+            }
+        )
+
     for batch_start in range(0, len(metadata_pass_records), max(batch_size, 1)):
+        if time.perf_counter() >= deadline:
+            for item in metadata_pass_records[batch_start:]:
+                scan_results.append(_build_error_result(item, "scan timeout: lightweight stage exceeded SCANNER_MAX_SCAN_SECONDS"))
+            break
         batch = metadata_pass_records[batch_start : batch_start + max(batch_size, 1)]
         with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
             future_items = [
@@ -619,6 +655,10 @@ def scan_universe(
                 for item in batch
             ]
             for future, item in future_items:
+                if time.perf_counter() >= deadline:
+                    scan_results.append(_build_error_result(item, "scan timeout: lightweight stage exceeded SCANNER_MAX_SCAN_SECONDS"))
+                    completed += 1
+                    continue
                 try:
                     light_history, retry_count, rl_retries = future.result(timeout=symbol_timeout_seconds)
                     retries += int(retry_count)
@@ -644,19 +684,35 @@ def scan_universe(
                     scan_results.append(result)
                 completed += 1
                 if progress_callback:
-                    progress_callback(
-                        {
-                            "stage": "lightweight",
-                            "completed": completed,
-                            "total": len(metadata_pass_records),
-                            "symbol": normalize_symbol(item.get("symbol", "")),
-                        }
-                    )
+                    if completed % max(int(progress_every), 1) == 0 or completed == len(metadata_pass_records):
+                        progress_callback(
+                            {
+                                "event": "scan_progress",
+                                "stage": "lightweight",
+                                "completed": completed,
+                                "total": len(metadata_pass_records),
+                                "symbol": normalize_symbol(item.get("symbol", "")),
+                                "elapsed_seconds": round(max(time.perf_counter() - started, 0.0), 4),
+                            }
+                        )
         if batch_start + max(batch_size, 1) < len(metadata_pass_records):
             time.sleep(random.uniform(0.05, 0.25))
 
     completed = 0
+    if progress_callback:
+        progress_callback(
+            {
+                "event": "full_score_stage_start",
+                "total": int(len(lightweight_survivors)),
+                "batch_size": int(max(batch_size, 1)),
+            }
+        )
+
     for batch_start in range(0, len(lightweight_survivors), max(batch_size, 1)):
+        if time.perf_counter() >= deadline:
+            for item in lightweight_survivors[batch_start:]:
+                scan_results.append(_build_error_result(item, "scan timeout: full scoring stage exceeded SCANNER_MAX_SCAN_SECONDS"))
+            break
         batch = lightweight_survivors[batch_start : batch_start + max(batch_size, 1)]
         with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
             future_items = []
@@ -680,6 +736,11 @@ def scan_universe(
                 )
 
             for future, item in future_items:
+                if time.perf_counter() >= deadline:
+                    result = _build_error_result(item, "scan timeout: full scoring stage exceeded SCANNER_MAX_SCAN_SECONDS")
+                    scan_results.append(result)
+                    completed += 1
+                    continue
                 try:
                     full_history, retry_count, rl_retries = future.result(timeout=symbol_timeout_seconds)
                     retries += int(retry_count)
@@ -700,14 +761,17 @@ def scan_universe(
                 scan_results.append(result)
                 completed += 1
                 if progress_callback:
-                    progress_callback(
-                        {
-                            "stage": "full_scoring",
-                            "completed": completed,
-                            "total": len(lightweight_survivors),
-                            "symbol": normalize_symbol(item.get("symbol", "")),
-                        }
-                    )
+                    if completed % max(int(progress_every), 1) == 0 or completed == len(lightweight_survivors):
+                        progress_callback(
+                            {
+                                "event": "scan_progress",
+                                "stage": "full_scoring",
+                                "completed": completed,
+                                "total": len(lightweight_survivors),
+                                "symbol": normalize_symbol(item.get("symbol", "")),
+                                "elapsed_seconds": round(max(time.perf_counter() - started, 0.0), 4),
+                            }
+                        )
 
         if batch_start + max(batch_size, 1) < len(lightweight_survivors):
             time.sleep(random.uniform(0.05, 0.20))
@@ -729,6 +793,31 @@ def scan_universe(
     summary["rate_limit_retry_count"] = int(rate_limit_retries)
     summary["max_workers"] = int(max_workers)
     summary["batch_size"] = int(max(batch_size, 1))
+    summary["max_scan_seconds"] = int(max_scan_seconds)
+    summary["progress_every"] = int(max(progress_every, 1))
+
+    if progress_callback:
+        top_ranked = []
+        for item in ranked[:10]:
+            strategy_scores = item.get("strategy_specific_scores") or {}
+            top_ranked.append(
+                {
+                    "symbol": str(item.get("symbol") or ""),
+                    "rank": int(item.get("rank") or 0),
+                    "overall_score": float(item.get("overall_score") or 0.0),
+                    "quantum_score": float((item.get("quantum_score") or {}).get("final_score") or item.get("overall_score") or 0.0),
+                    "strategy_ids": sorted([str(key) for key in strategy_scores.keys()]),
+                }
+            )
+        progress_callback(
+            {
+                "event": "ranking_complete",
+                "eligible_count": int(summary.get("eligible_count") or 0),
+                "failed_symbol_count": int(summary.get("failed_symbol_count") or 0),
+                "top_ranked_candidates": top_ranked,
+            }
+        )
+
     return {
         "scan_results": scan_results,
         "ranked_candidates": ranked,

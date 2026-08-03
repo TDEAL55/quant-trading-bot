@@ -88,8 +88,8 @@ def _position_score_map(positions: list[dict[str, Any]]) -> dict[str, dict[str, 
     return scored
 
 
-def run_scan(symbol_records: list[dict[str, Any]]) -> dict[str, Any]:
-    return scan_universe(symbol_records=symbol_records, benchmark_symbol=BENCHMARK_SYMBOL)
+def run_scan(symbol_records: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
+    return scan_universe(symbol_records=symbol_records, benchmark_symbol=BENCHMARK_SYMBOL, **kwargs)
 
 
 def run_shortlist_only(scan_payload: dict[str, Any], positions: list[dict[str, Any]], cash: float, portfolio_value: float) -> dict[str, Any]:

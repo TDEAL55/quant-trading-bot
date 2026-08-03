@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+import inspect
 import os
 from typing import Any, Callable
 
@@ -58,6 +59,33 @@ def _as_dict(value: Any) -> dict[str, Any]:
     if hasattr(value, "items"):
         return dict(value)
     return {}
+
+
+def _emit_telemetry(telemetry_callback: Callable[[str, dict[str, Any]], None] | None, event: str, **fields: Any) -> None:
+    if telemetry_callback is None:
+        return
+    try:
+        telemetry_callback(event, dict(fields))
+    except Exception:
+        return
+
+
+def _invoke_scan_runner(
+    scan_runner: Callable[..., dict[str, Any]],
+    universe_records: list[dict[str, Any]],
+    **kwargs: Any,
+) -> dict[str, Any]:
+    signature = inspect.signature(scan_runner)
+    params = signature.parameters
+    accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values())
+    if accepts_kwargs:
+        return dict(scan_runner(universe_records, **kwargs) or {})
+
+    accepted: dict[str, Any] = {}
+    for key, value in kwargs.items():
+        if key in params:
+            accepted[key] = value
+    return dict(scan_runner(universe_records, **accepted) or {})
 
 
 def _positions_list(raw_positions: Any) -> list[dict[str, Any]]:
@@ -176,6 +204,8 @@ def run_continuous_scan_cycle(
     symbols: list[str] | None = None,
     persist: bool = True,
     dry_run: bool = False,
+    diagnostic_symbol_limit: int | None = None,
+    telemetry_callback: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> ContinuousScanCycleResult:
     config = config_loader()
     if str(config.trading_mode).upper() != "PAPER":
@@ -196,7 +226,7 @@ def run_continuous_scan_cycle(
         execution: dict[str, Any],
         persistence_payload: dict[str, Any],
     ) -> ContinuousScanCycleResult:
-        return ContinuousScanCycleResult(
+        result_payload = ContinuousScanCycleResult(
             run_id=cycle_run_id,
             started_at=started_at,
             completed_at=_utc_iso(),
@@ -209,22 +239,64 @@ def run_continuous_scan_cycle(
             persistence=persistence_payload,
             duration_seconds=max((_utc_now() - started_dt).total_seconds(), 0.0),
         )
+        _emit_telemetry(
+            telemetry_callback,
+            "scan_cycle_complete",
+            run_id=cycle_run_id,
+            status=status,
+            execution_status=execution_status,
+            confirmed_order_count=confirmed_order_count,
+            failed_symbol_count=int(((scan or {}).get("scan_payload") or {}).get("summary", {}).get("failed_symbol_count") or 0),
+            elapsed_seconds=round(float(result_payload.duration_seconds), 4),
+        )
+        return result_payload
+
+    _emit_telemetry(
+        telemetry_callback,
+        "paper_connection_check_start",
+        run_id=cycle_run_id,
+        dry_run=bool(dry_run),
+    )
 
     if symbols:
         universe_records = symbol_records_builder([str(symbol).upper() for symbol in symbols if str(symbol).strip()])
+        full_universe_count = len(universe_records)
     elif sample_symbols:
         universe_records = symbol_records_builder([str(symbol).upper() for symbol in sample_symbols if str(symbol).strip()])
+        full_universe_count = len(universe_records)
     else:
-        universe_records = list(universe_loader())
+        _emit_telemetry(
+            telemetry_callback,
+            "universe_fetch_start",
+            run_id=cycle_run_id,
+            source="alpaca_assets_api",
+        )
+        full_universe_records = list(universe_loader())
+        full_universe_count = len(full_universe_records)
+        if diagnostic_symbol_limit is not None and int(diagnostic_symbol_limit) > 0:
+            ordered = sorted(full_universe_records, key=lambda item: str(item.get("symbol") or ""))
+            universe_records = ordered[: int(diagnostic_symbol_limit)]
+        else:
+            universe_records = full_universe_records
+        _emit_telemetry(
+            telemetry_callback,
+            "universe_fetch_complete",
+            run_id=cycle_run_id,
+            source="alpaca_assets_api",
+            total_assets_retrieved=int(full_universe_count),
+            selected_for_scan=int(len(universe_records)),
+            diagnostic_symbol_limit=(int(diagnostic_symbol_limit) if diagnostic_symbol_limit is not None else None),
+        )
 
     broker = broker_factory(mode="PAPER")
-    scan_payload = dict(scan_runner(universe_records) or {})
+    scan_payload: dict[str, Any] = {}
 
     broker_positions = {}
     broker_open_orders: list[dict[str, Any]] = []
     broker_cash = 0.0
     broker_buying_power = 0.0
     broker_equity = 0.0
+    account: dict[str, Any] = {}
     try:
         broker_positions = _as_dict(broker.get_positions())
     except Exception:
@@ -246,6 +318,15 @@ def run_continuous_scan_cycle(
         broker_buying_power = float(getattr(broker, "get_buying_power", lambda: broker_cash)() or broker_cash)
         broker_equity = float(getattr(broker, "get_equity", lambda: broker_buying_power)() or broker_buying_power)
 
+    _emit_telemetry(
+        telemetry_callback,
+        "paper_connection_check_complete",
+        run_id=cycle_run_id,
+        account_status=str(account.get("status") or "UNKNOWN") if isinstance(account, dict) else "UNKNOWN",
+        account_blocked=bool(account.get("account_blocked", False)) if isinstance(account, dict) else False,
+        paper_endpoint=str(getattr(config, "alpaca_paper_base_url", "")),
+    )
+
     try:
         broker_open_orders = list(getattr(broker, "get_open_orders", lambda: [])() or [])
     except Exception:
@@ -258,6 +339,27 @@ def run_continuous_scan_cycle(
         broker_cash = float(loaded_cash)
         broker_buying_power = float(loaded_cash)
         broker_equity = float(loaded_equity)
+
+    def _scan_progress_telemetry(payload: dict[str, Any]) -> None:
+        event_name = str(payload.get("event") or "scan_progress")
+        base = {
+            "run_id": cycle_run_id,
+            "dry_run": bool(dry_run),
+            "trading_mode": str(config.trading_mode),
+        }
+        base.update(payload)
+        _emit_telemetry(telemetry_callback, event_name, **base)
+
+    scan_payload = _invoke_scan_runner(
+        scan_runner,
+        universe_records,
+        progress_callback=_scan_progress_telemetry,
+    )
+    summary = dict(scan_payload.get("summary") or {})
+    summary["full_universe_count"] = int(full_universe_count)
+    summary["diagnostic_symbol_limit"] = int(diagnostic_symbol_limit) if diagnostic_symbol_limit is not None else None
+    summary["diagnostic_mode"] = bool(diagnostic_symbol_limit is not None and int(diagnostic_symbol_limit) > 0)
+    scan_payload["summary"] = summary
 
     shortlist_positions = _positions_list(broker_positions)
     shortlist_payload = dict(shortlist_runner(scan_payload, shortlist_positions, broker_cash, broker_equity) or {})
@@ -277,6 +379,15 @@ def run_continuous_scan_cycle(
 
     scan_result = {"scan_payload": scan_payload, "scan_run": scan_run_payload}
     if not selected_candidate:
+        if dry_run:
+            _emit_telemetry(
+                telemetry_callback,
+                "dry_run_execution_skipped",
+                run_id=cycle_run_id,
+                reason="no_candidates",
+                orders_attempted=0,
+                orders_submitted=0,
+            )
         return _result(
             status="no_candidates",
             execution_status="no_candidates",
@@ -290,6 +401,15 @@ def run_continuous_scan_cycle(
     selected_symbol = str(selected_candidate.get("symbol") or "").upper()
     latest_price = _latest_price_for_symbol(scan_payload, selected_symbol)
     if latest_price <= 0:
+        if dry_run:
+            _emit_telemetry(
+                telemetry_callback,
+                "dry_run_execution_skipped",
+                run_id=cycle_run_id,
+                reason="no_latest_price",
+                orders_attempted=0,
+                orders_submitted=0,
+            )
         return _result(
             status="no_trade",
             execution_status="no_trade",
@@ -302,6 +422,15 @@ def run_continuous_scan_cycle(
 
     strategy_signals = evaluate_all_strategies({**selected_candidate, "latest_price": latest_price})
     if not strategy_signals:
+        if dry_run:
+            _emit_telemetry(
+                telemetry_callback,
+                "dry_run_execution_skipped",
+                run_id=cycle_run_id,
+                reason="no_strategy_signals",
+                orders_attempted=0,
+                orders_submitted=0,
+            )
         return _result(
             status="no_trade",
             execution_status="no_trade",
@@ -327,6 +456,15 @@ def run_continuous_scan_cycle(
 
         tradable_signals = [row for row in strategy_signals if str(row.get("signal") or "").upper() == "BUY" and not bool(row.get("paused"))]
         if not tradable_signals:
+            if dry_run:
+                _emit_telemetry(
+                    telemetry_callback,
+                    "dry_run_execution_skipped",
+                    run_id=cycle_run_id,
+                    reason="no_active_buy_signals",
+                    orders_attempted=0,
+                    orders_submitted=0,
+                )
             return _result(
                 status="no_trade",
                 execution_status="no_trade",
@@ -361,6 +499,15 @@ def run_continuous_scan_cycle(
         target_notional = min(max(suggested_notional, 0.0), notional_cap_by_equity, notional_cap_by_allocation if notional_cap_by_allocation > 0 else notional_cap_by_equity)
 
         if target_notional <= 0:
+            if dry_run:
+                _emit_telemetry(
+                    telemetry_callback,
+                    "dry_run_execution_skipped",
+                    run_id=cycle_run_id,
+                    reason="zero_target_notional",
+                    orders_attempted=0,
+                    orders_submitted=0,
+                )
             return _result(
                 status="no_trade",
                 execution_status="no_trade",
@@ -391,6 +538,15 @@ def run_continuous_scan_cycle(
         )
         planned_order = dict((planned_orders.get("orders") or [{}])[0]) if planned_orders.get("orders") else {}
         if not planned_order:
+            if dry_run:
+                _emit_telemetry(
+                    telemetry_callback,
+                    "dry_run_execution_skipped",
+                    run_id=cycle_run_id,
+                    reason="planner_rejected",
+                    orders_attempted=0,
+                    orders_submitted=0,
+                )
             return _result(
                 status="no_trade",
                 execution_status="no_trade",
@@ -435,6 +591,15 @@ def run_continuous_scan_cycle(
 
         if not risk.approve_trade(max(float(broker_equity), 1.0), trade_value, current_loss=0.0) or not all(risk_checks.values()):
             rejected_status = "duplicate_rejected" if existing is not None and risk_checks.get("duplicate_protection") is False else "risk_rejected"
+            if dry_run:
+                _emit_telemetry(
+                    telemetry_callback,
+                    "dry_run_execution_skipped",
+                    run_id=cycle_run_id,
+                    reason=rejected_status,
+                    orders_attempted=0,
+                    orders_submitted=0,
+                )
             return _result(
                 status=rejected_status,
                 execution_status=rejected_status,
@@ -463,6 +628,15 @@ def run_continuous_scan_cycle(
         broker_pre_cash = float(broker_cash)
 
         if dry_run:
+            _emit_telemetry(
+                telemetry_callback,
+                "dry_run_execution_skipped",
+                run_id=cycle_run_id,
+                reason="dry_run_mode",
+                symbol=selected_symbol,
+                orders_attempted=1,
+                orders_submitted=0,
+            )
             order_response = {
                 "order_id": f"dry-{cycle_run_id}",
                 "client_order_id": client_order_id,

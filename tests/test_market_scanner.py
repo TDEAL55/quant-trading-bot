@@ -317,3 +317,69 @@ def test_scan_summary_rejection_precedence_when_price_and_liquidity_both_fail(mo
     summary = payload["summary"]
     assert summary["filtered_count_by_reason"].get("price_below_configured_minimum", 0) >= 1
     assert summary["filtered_count_by_reason"].get("average_dollar_volume_below_configured_minimum", 0) >= 1
+
+
+def test_scan_universe_emits_major_lifecycle_events(monkeypatch):
+    monkeypatch.setattr(market_scanner, "generate_strategy_result", lambda **kwargs: {
+        "overall_score": 82.0,
+        "confidence": 70.0,
+        "signal": "BUY",
+        "regime": "weak_bull",
+        "component_scores": {"risk_quality": 60.0, "volatility": 60.0, "trend": 70.0},
+        "reasons": [],
+        "warnings": [],
+        "data_quality": {"history_sufficient": True},
+        "factors": {"trend": {"raw_values": {"distance_from_ema200_pct": 5.0}}},
+    })
+
+    events = []
+
+    payload = market_scanner.scan_universe(
+        [{"symbol": "AAA"}, {"symbol": "BBB"}],
+        benchmark_symbol="SPY",
+        data_loader=lambda *args, **kwargs: _frame(),
+        max_workers=1,
+        max_retries=0,
+        batch_size=1,
+        progress_every=1,
+        progress_callback=lambda event: events.append(dict(event)),
+    )
+
+    names = [item.get("event") for item in events]
+    assert "metadata_filter_complete" in names
+    assert "lightweight_scan_start" in names
+    assert "full_score_stage_start" in names
+    assert "scan_progress" in names
+    assert "ranking_complete" in names
+    assert payload["summary"]["symbol_count"] == 2
+
+
+def test_scan_universe_max_scan_seconds_marks_remaining_symbols(monkeypatch):
+    monkeypatch.setattr(market_scanner, "generate_strategy_result", lambda **kwargs: {
+        "overall_score": 82.0,
+        "confidence": 70.0,
+        "signal": "BUY",
+        "regime": "weak_bull",
+        "component_scores": {"risk_quality": 60.0, "volatility": 60.0, "trend": 70.0},
+        "reasons": [],
+        "warnings": [],
+        "data_quality": {"history_sufficient": True},
+        "factors": {"trend": {"raw_values": {"distance_from_ema200_pct": 5.0}}},
+    })
+
+    def _slow_loader(symbol, start, end):
+        del symbol, start, end
+        time.sleep(0.6)
+        return _frame()
+
+    payload = market_scanner.scan_universe(
+        [{"symbol": "AAA"}, {"symbol": "BBB"}, {"symbol": "CCC"}],
+        benchmark_symbol="SPY",
+        data_loader=_slow_loader,
+        max_workers=1,
+        max_retries=0,
+        batch_size=1,
+        max_scan_seconds=1,
+    )
+
+    assert payload["summary"]["error_count"] >= 1

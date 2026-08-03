@@ -375,3 +375,54 @@ def test_continuous_scan_cycle_blocks_live_mode():
         assert False, "expected RuntimeError"
     except RuntimeError as exc:
         assert "TRADING_MODE=PAPER" in str(exc)
+
+
+def test_continuous_scan_cycle_reports_full_universe_count_in_diagnostic_mode():
+    broker = _Broker()
+    repo = _Repo()
+    captured_universe = {"symbols": []}
+    telemetry = []
+
+    def _scan_runner(universe):
+        captured_universe["symbols"] = [str(item.get("symbol")) for item in universe]
+        return {
+            "scan_results": [],
+            "ranked_candidates": [],
+            "summary": {"symbol_count": len(universe), "eligible_count": 0},
+        }
+
+    def _telemetry(event, payload):
+        telemetry.append((event, dict(payload)))
+
+    result = run_continuous_scan_cycle(
+        database_url="sqlite:///unused.db",
+        config_loader=_config_loader,
+        now_provider=lambda: datetime(2026, 7, 22, 10, 10, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=_scan_runner,
+        shortlist_runner=lambda *args, **kwargs: {"selected": [], "rejected": [], "portfolio_warnings": [], "selection_summary": {"selected_count": 0}},
+        scan_persistor=lambda **kwargs: {"storage": "database", "run_id": kwargs["run_payload"]["run_id"]},
+        execution_repo_factory=lambda **kwargs: repo,
+        positions_loader=_positions_loader,
+        universe_loader=lambda: [
+            {"symbol": "ZZZ", "company_name": "ZZZ", "sector": "Unknown", "industry": "Unknown"},
+            {"symbol": "AAA", "company_name": "AAA", "sector": "Unknown", "industry": "Unknown"},
+            {"symbol": "MMM", "company_name": "MMM", "sector": "Unknown", "industry": "Unknown"},
+        ],
+        persist=False,
+        dry_run=True,
+        diagnostic_symbol_limit=2,
+        telemetry_callback=_telemetry,
+    )
+
+    assert captured_universe["symbols"] == ["AAA", "MMM"]
+    assert result.scan["scan_payload"]["summary"]["full_universe_count"] == 3
+    assert result.scan["scan_payload"]["summary"]["diagnostic_mode"] is True
+
+    names = [name for name, _ in telemetry]
+    assert "paper_connection_check_start" in names
+    assert "paper_connection_check_complete" in names
+    assert "universe_fetch_start" in names
+    assert "universe_fetch_complete" in names
+    assert "dry_run_execution_skipped" in names
+    assert "scan_cycle_complete" in names

@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import random
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 from typing import Any
 
 from alpaca_client import AlpacaClient
 from config import (
+    ALPACA_ASSET_REQUEST_TIMEOUT_SECONDS,
     SCANNER_ADDITIONAL_SYMBOLS,
     SCANNER_EXCLUDED_SYMBOLS,
     SCANNER_INCLUDE_ETFS,
     SCANNER_MAX_UNIVERSE_SIZE,
+    SCANNER_MAX_RETRIES,
+    SCANNER_UNIVERSE_CACHE_TTL_SECONDS,
 )
 
 
@@ -17,6 +23,7 @@ STOCK_UNIVERSE = []  # Legacy compatibility only. Runtime universe source is Alp
 
 _UNIVERSE_CACHE: dict[str, Any] = {
     "market_date": "",
+    "fetched_at": 0.0,
     "records": [],
     "stats": {},
 }
@@ -73,7 +80,29 @@ def _asset_to_record(asset: Any) -> dict[str, Any]:
 
 def _fetch_alpaca_assets() -> list[Any]:
     client = AlpacaClient(mode="PAPER")
-    return client.get_assets()
+    attempts = 0
+    max_retries = max(int(SCANNER_MAX_RETRIES), 0)
+    timeout_seconds = max(float(ALPACA_ASSET_REQUEST_TIMEOUT_SECONDS), 1.0)
+
+    while True:
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(client.get_assets)
+                rows = future.result(timeout=timeout_seconds)
+            return list(rows or [])
+        except FutureTimeoutError as exc:
+            if attempts >= max_retries:
+                raise TimeoutError(f"alpaca assets request timed out after {timeout_seconds:.1f}s") from exc
+            attempts += 1
+        except Exception as exc:
+            if attempts >= max_retries:
+                raise
+            attempts += 1
+            message = str(exc).lower()
+            if "429" in message or "rate limit" in message or "too many requests" in message:
+                time.sleep((2 ** (attempts - 1)) * 1.2 + random.uniform(0.0, 0.2))
+            else:
+                time.sleep((2 ** (attempts - 1)) * 0.4 + random.uniform(0.0, 0.2))
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -100,18 +129,37 @@ def load_stock_universe(
 ) -> list[dict[str, Any]]:
     del selected_universes  # Universe source is Alpaca assets, not static named lists.
     target_date = str(market_date or _utc_market_date())
-    if not refresh and _UNIVERSE_CACHE.get("market_date") == target_date and _UNIVERSE_CACHE.get("records"):
+    now_ts = time.time()
+    cache_ttl_seconds = max(float(SCANNER_UNIVERSE_CACHE_TTL_SECONDS), 0.0)
+    cache_age_seconds = now_ts - float(_UNIVERSE_CACHE.get("fetched_at") or 0.0)
+    cache_valid = cache_ttl_seconds <= 0 or cache_age_seconds <= cache_ttl_seconds
+
+    if (
+        not refresh
+        and _UNIVERSE_CACHE.get("market_date") == target_date
+        and _UNIVERSE_CACHE.get("records")
+        and cache_valid
+    ):
         return list(_UNIVERSE_CACHE.get("records") or [])
 
+    resolved_max_universe_size = SCANNER_MAX_UNIVERSE_SIZE if max_universe_size is None else max_universe_size
     rows = build_stock_universe(
         selected_universes=None,
         excluded_symbols=excluded_symbols,
         additional_symbols=additional_symbols,
-        max_universe_size=(SCANNER_MAX_UNIVERSE_SIZE if max_universe_size is None else max_universe_size),
+        max_universe_size=resolved_max_universe_size,
         include_etfs=(SCANNER_INCLUDE_ETFS if include_etfs is None else include_etfs),
     )
     _UNIVERSE_CACHE["market_date"] = target_date
+    _UNIVERSE_CACHE["fetched_at"] = now_ts
     _UNIVERSE_CACHE["records"] = list(rows)
+    stats = dict(_UNIVERSE_CACHE.get("stats") or {})
+    stats["cache_ttl_seconds"] = cache_ttl_seconds
+    stats["cache_age_seconds"] = 0.0
+    stats["max_universe_size"] = int(resolved_max_universe_size)
+    stats["max_universe_mode"] = "unlimited" if int(resolved_max_universe_size) <= 0 else "capped"
+    stats["universe_source"] = "alpaca_assets_api"
+    _UNIVERSE_CACHE["stats"] = stats
     return rows
 
 
@@ -145,6 +193,9 @@ def build_stock_universe(
         "excluded_duplicate_symbol": 0,
         "excluded_config": 0,
         "included_count": 0,
+        "max_universe_size": int(max_universe_size),
+        "max_universe_mode": "unlimited" if int(max_universe_size) <= 0 else "capped",
+        "universe_source": "alpaca_assets_api",
     }
 
     seen: set[str] = set()

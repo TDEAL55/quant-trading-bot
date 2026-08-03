@@ -1,5 +1,6 @@
 import stock_universe
 from stock_universe import build_stock_universe, load_stock_universe, normalize_symbol
+import time
 
 
 def _asset(symbol: str, *, asset_class: str = "US_EQUITY", status: str = "ACTIVE", tradable: bool = True, name: str | None = None):
@@ -125,3 +126,37 @@ def test_universe_metadata_fields_present():
         "is_etf",
         "benchmark_only",
     }.issubset(set(sample.keys()))
+
+
+def test_cache_ttl_expiry_forces_refresh(monkeypatch):
+    calls = {"n": 0}
+
+    def _fetch():
+        calls["n"] += 1
+        return [_asset("AAPL")]
+
+    monkeypatch.setattr(stock_universe, "_fetch_alpaca_assets", _fetch)
+    monkeypatch.setattr(stock_universe, "SCANNER_UNIVERSE_CACHE_TTL_SECONDS", 1)
+
+    stock_universe._UNIVERSE_CACHE["market_date"] = ""
+    stock_universe._UNIVERSE_CACHE["records"] = []
+    stock_universe._UNIVERSE_CACHE["fetched_at"] = 0.0
+
+    first = load_stock_universe(refresh=False, market_date="2026-08-01", max_universe_size=0)
+    second = load_stock_universe(refresh=False, market_date="2026-08-01", max_universe_size=0)
+    stock_universe._UNIVERSE_CACHE["fetched_at"] = time.time() - 2.0
+    third = load_stock_universe(refresh=False, market_date="2026-08-01", max_universe_size=0)
+
+    assert first and second and third
+    assert calls["n"] == 2
+
+
+def test_unlimited_universe_mode_is_reported_in_cache_stats():
+    stock_universe._fetch_alpaca_assets = lambda: [_asset(_alpha_symbol(i)) for i in range(3)]
+    stock_universe._UNIVERSE_CACHE["market_date"] = ""
+    stock_universe._UNIVERSE_CACHE["records"] = []
+    stock_universe._UNIVERSE_CACHE["fetched_at"] = 0.0
+    load_stock_universe(refresh=True, market_date="2026-08-01", max_universe_size=0)
+    stats = stock_universe.get_universe_cache_stats()
+    assert stats["max_universe_mode"] == "unlimited"
+    assert stats["max_universe_size"] == 0
