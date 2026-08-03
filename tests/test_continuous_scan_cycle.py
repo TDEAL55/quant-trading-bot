@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import pytest
 
 from continuous_scan_cycle import ContinuousScanCycleResult, run_continuous_scan_cycle
+from stock_universe import AlpacaAssetUniverseError
 
 
 class _Config:
@@ -426,3 +428,45 @@ def test_continuous_scan_cycle_reports_full_universe_count_in_diagnostic_mode():
     assert "universe_fetch_complete" in names
     assert "dry_run_execution_skipped" in names
     assert "scan_cycle_complete" in names
+
+
+def test_universe_api_failure_does_not_become_no_candidates():
+    telemetry = []
+
+    def _telemetry(event, payload):
+        telemetry.append((event, dict(payload)))
+
+    def _failing_universe_loader():
+        raise AlpacaAssetUniverseError(
+            "alpaca assets request failed",
+            telemetry={
+                "api_exception_type": "RuntimeError",
+                "unfiltered_asset_count": 0,
+                "filtered_api_asset_count": 0,
+                "client_filtered_asset_count": 0,
+                "fallback_used": False,
+                "api_request_elapsed_time": 0.0,
+            },
+        )
+
+    with pytest.raises(AlpacaAssetUniverseError):
+        run_continuous_scan_cycle(
+            database_url="sqlite:///unused.db",
+            config_loader=_config_loader,
+            now_provider=lambda: datetime(2026, 7, 22, 10, 10, tzinfo=timezone.utc),
+            broker_factory=lambda **kwargs: _Broker(mode="PAPER"),
+            scan_runner=lambda universe: _scan_payload(),
+            shortlist_runner=lambda *args, **kwargs: {"selected": []},
+            scan_persistor=lambda **kwargs: {"storage": "database"},
+            execution_repo_factory=lambda **kwargs: _Repo(),
+            positions_loader=_positions_loader,
+            universe_loader=_failing_universe_loader,
+            persist=False,
+            dry_run=True,
+            telemetry_callback=_telemetry,
+        )
+
+    names = [name for name, _ in telemetry]
+    assert "alpaca_asset_universe_fetch_failed" in names
+    assert "alpaca_asset_universe_empty" in names
+    assert "scan_cycle_complete" not in names

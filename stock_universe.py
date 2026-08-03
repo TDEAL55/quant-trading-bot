@@ -28,6 +28,14 @@ _UNIVERSE_CACHE: dict[str, Any] = {
     "stats": {},
 }
 
+_LAST_ALPACA_FETCH_TELEMETRY: dict[str, Any] = {}
+
+
+class AlpacaAssetUniverseError(RuntimeError):
+    def __init__(self, message: str, telemetry: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.telemetry = dict(telemetry or {})
+
 
 def _utc_market_date() -> str:
     return datetime.now(timezone.utc).date().isoformat()
@@ -71,32 +79,58 @@ def _asset_to_record(asset: Any) -> dict[str, Any]:
         "universe_groups": ["alpaca_assets", "etf" if is_etf else "equity"],
         "is_etf": bool(is_etf),
         "benchmark_only": False,
-        "asset_class": str(_asset_value(asset, "asset_class", "") or ""),
-        "status": str(_asset_value(asset, "status", "") or ""),
-        "tradable": bool(_as_bool(_asset_value(asset, "tradable", False))),
+        "asset_class": AlpacaClient.normalize_asset_class(_asset_value(asset, "asset_class", "")),
+        "status": AlpacaClient.normalize_status(_asset_value(asset, "status", "")),
+        "tradable": bool(AlpacaClient.normalize_tradable(_asset_value(asset, "tradable", False))),
         "fractionable": bool(_as_bool(_asset_value(asset, "fractionable", False))),
     }
 
 
 def _fetch_alpaca_assets() -> list[Any]:
+    global _LAST_ALPACA_FETCH_TELEMETRY
     client = AlpacaClient(mode="PAPER")
     attempts = 0
     max_retries = max(int(SCANNER_MAX_RETRIES), 0)
     timeout_seconds = max(float(ALPACA_ASSET_REQUEST_TIMEOUT_SECONDS), 1.0)
+    _LAST_ALPACA_FETCH_TELEMETRY = {}
 
     while True:
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(client.get_assets)
-                rows = future.result(timeout=timeout_seconds)
-            return list(rows or [])
+                future = executor.submit(client.get_assets_diagnostics)
+                payload = dict(future.result(timeout=timeout_seconds) or {})
+            _LAST_ALPACA_FETCH_TELEMETRY = payload
+            rows = list(payload.get("selected_assets") or [])
+            return rows
         except FutureTimeoutError as exc:
             if attempts >= max_retries:
-                raise TimeoutError(f"alpaca assets request timed out after {timeout_seconds:.1f}s") from exc
+                _LAST_ALPACA_FETCH_TELEMETRY = {
+                    "api_exception_type": "TimeoutError",
+                    "fallback_used": False,
+                    "unfiltered_asset_count": 0,
+                    "filtered_api_asset_count": 0,
+                    "client_filtered_asset_count": 0,
+                    "api_request_elapsed_time": float(timeout_seconds),
+                }
+                raise AlpacaAssetUniverseError(
+                    f"alpaca assets request timed out after {timeout_seconds:.1f}s",
+                    telemetry=dict(_LAST_ALPACA_FETCH_TELEMETRY),
+                ) from exc
             attempts += 1
         except Exception as exc:
             if attempts >= max_retries:
-                raise
+                _LAST_ALPACA_FETCH_TELEMETRY = {
+                    "api_exception_type": type(exc).__name__,
+                    "fallback_used": False,
+                    "unfiltered_asset_count": 0,
+                    "filtered_api_asset_count": 0,
+                    "client_filtered_asset_count": 0,
+                    "api_request_elapsed_time": 0.0,
+                }
+                raise AlpacaAssetUniverseError(
+                    f"alpaca assets request failed: {type(exc).__name__}: {exc}",
+                    telemetry=dict(_LAST_ALPACA_FETCH_TELEMETRY),
+                ) from exc
             attempts += 1
             message = str(exc).lower()
             if "429" in message or "rate limit" in message or "too many requests" in message:
@@ -170,6 +204,7 @@ def build_stock_universe(
     max_universe_size: int = 300,
     include_etfs: bool = True,
 ) -> list[dict[str, str | bool | list[str]]]:
+    global _LAST_ALPACA_FETCH_TELEMETRY
     del selected_universes
     excluded_set = {
         normalize_symbol(item)
@@ -182,9 +217,28 @@ def build_stock_universe(
         if str(item).strip()
     ]
 
+    _LAST_ALPACA_FETCH_TELEMETRY = {}
     assets = list(_fetch_alpaca_assets() or [])
+    fetch_telemetry = dict(_LAST_ALPACA_FETCH_TELEMETRY or {})
+    unfiltered_asset_count = int(fetch_telemetry.get("unfiltered_asset_count") or len(assets))
+    filtered_api_asset_count = int(fetch_telemetry.get("filtered_api_asset_count") or 0)
+    client_filtered_asset_count = int(fetch_telemetry.get("client_filtered_asset_count") or len(assets))
+
     stats = {
         "retrieved_assets": len(assets),
+        "unfiltered_asset_count": unfiltered_asset_count,
+        "filtered_api_asset_count": filtered_api_asset_count,
+        "client_filtered_asset_count": client_filtered_asset_count,
+        "active_count": int(fetch_telemetry.get("active_count") or 0),
+        "tradable_count": int(fetch_telemetry.get("tradable_count") or 0),
+        "us_equity_count": int(fetch_telemetry.get("us_equity_count") or 0),
+        "rejected_by_asset_class": int(fetch_telemetry.get("rejected_by_asset_class") or 0),
+        "rejected_by_status": int(fetch_telemetry.get("rejected_by_status") or 0),
+        "rejected_non_tradable": int(fetch_telemetry.get("rejected_non_tradable") or 0),
+        "rejected_missing_symbol": int(fetch_telemetry.get("rejected_missing_symbol") or 0),
+        "fallback_used": bool(fetch_telemetry.get("fallback_used", False)),
+        "api_exception_type": str(fetch_telemetry.get("api_exception_type") or ""),
+        "api_request_elapsed_time": float(fetch_telemetry.get("api_request_elapsed_time") or 0.0),
         "excluded_inactive": 0,
         "excluded_non_tradable": 0,
         "excluded_not_us_equity": 0,
@@ -198,12 +252,19 @@ def build_stock_universe(
         "universe_source": "alpaca_assets_api",
     }
 
+    if unfiltered_asset_count == 0:
+        _UNIVERSE_CACHE["stats"] = stats
+        raise AlpacaAssetUniverseError(
+            "alpaca assets API returned zero assets for PAPER account",
+            telemetry=dict(stats),
+        )
+
     seen: set[str] = set()
     rows: list[dict[str, Any]] = []
     for asset in assets:
-        status = str(_asset_value(asset, "status", "") or "").upper()
-        asset_class = str(_asset_value(asset, "asset_class", "") or "").upper()
-        tradable = bool(_as_bool(_asset_value(asset, "tradable", False)))
+        status = AlpacaClient.normalize_status(_asset_value(asset, "status", ""))
+        asset_class = AlpacaClient.normalize_asset_class(_asset_value(asset, "asset_class", ""))
+        tradable = bool(AlpacaClient.normalize_tradable(_asset_value(asset, "tradable", False)))
         symbol = normalize_symbol(_asset_value(asset, "symbol", ""))
 
         if asset_class != "US_EQUITY":
@@ -256,6 +317,12 @@ def build_stock_universe(
     rows = sorted(rows, key=lambda item: str(item.get("symbol") or ""))
     rows = _apply_max_size(rows, int(max_universe_size))
     stats["included_count"] = len(rows)
+    if not rows:
+        _UNIVERSE_CACHE["stats"] = stats
+        raise AlpacaAssetUniverseError(
+            "alpaca asset universe produced zero eligible symbols after filtering",
+            telemetry=dict(stats),
+        )
     _UNIVERSE_CACHE["stats"] = stats
     return rows
 

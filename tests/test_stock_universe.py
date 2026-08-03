@@ -1,6 +1,13 @@
 import stock_universe
 from stock_universe import build_stock_universe, load_stock_universe, normalize_symbol
 import time
+import pytest
+
+
+class _EnumLike:
+    def __init__(self, value: str, name: str | None = None):
+        self.value = value
+        self.name = name or value
 
 
 def _asset(symbol: str, *, asset_class: str = "US_EQUITY", status: str = "ACTIVE", tradable: bool = True, name: str | None = None):
@@ -89,6 +96,53 @@ def test_universe_is_filtered_from_alpaca_assets_api_rules():
     universe = build_stock_universe(max_universe_size=0, include_etfs=True)
     symbols = [item["symbol"] for item in universe]
     assert symbols == ["AAPL"]
+
+
+def test_universe_filters_accept_enum_values_and_plain_strings():
+    stock_universe._fetch_alpaca_assets = lambda: [
+        _asset("AAPL", asset_class=_EnumLike("us_equity", "US_EQUITY"), status=_EnumLike("active", "ACTIVE"), tradable="true"),
+        _asset("MSFT", asset_class="US_EQUITY", status="ACTIVE", tradable=True),
+    ]
+    universe = build_stock_universe(max_universe_size=0, include_etfs=True)
+    assert [item["symbol"] for item in universe] == ["AAPL", "MSFT"]
+
+
+def test_true_empty_alpaca_universe_raises_explicit_error(monkeypatch):
+    monkeypatch.setattr(stock_universe, "_fetch_alpaca_assets", lambda: [])
+    stock_universe._UNIVERSE_CACHE["stats"] = {}
+
+    with pytest.raises(stock_universe.AlpacaAssetUniverseError, match="returned zero assets"):
+        build_stock_universe(max_universe_size=0, include_etfs=True)
+
+
+def test_fallback_usage_is_reported_in_cache_stats(monkeypatch):
+    def _fetch_with_telemetry():
+        stock_universe._LAST_ALPACA_FETCH_TELEMETRY = {
+            "unfiltered_asset_count": 5,
+            "filtered_api_asset_count": 0,
+            "client_filtered_asset_count": 2,
+            "active_count": 4,
+            "tradable_count": 4,
+            "us_equity_count": 3,
+            "rejected_by_asset_class": 2,
+            "rejected_by_status": 1,
+            "rejected_non_tradable": 1,
+            "rejected_missing_symbol": 0,
+            "fallback_used": True,
+            "api_exception_type": "",
+            "api_request_elapsed_time": 0.12,
+        }
+        return [_asset("AAPL"), _asset("MSFT")]
+
+    monkeypatch.setattr(stock_universe, "_fetch_alpaca_assets", _fetch_with_telemetry)
+    universe = build_stock_universe(max_universe_size=0, include_etfs=True)
+    stats = stock_universe.get_universe_cache_stats()
+
+    assert [item["symbol"] for item in universe] == ["AAPL", "MSFT"]
+    assert stats["unfiltered_asset_count"] == 5
+    assert stats["filtered_api_asset_count"] == 0
+    assert stats["client_filtered_asset_count"] == 2
+    assert stats["fallback_used"] is True
 
 
 def test_cache_refresh_runs_once_per_market_date(monkeypatch):

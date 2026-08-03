@@ -34,7 +34,7 @@ from risk_manager import RiskManager
 from scanner_repository import save_scan_results
 from scanner_runner import SAMPLE_SYMBOLS, _load_paper_positions, _symbol_records_from_list, run_scan, run_shortlist_only
 from sprint_10_2_execution_validation import _execution_fingerprint
-from stock_universe import load_stock_universe
+from stock_universe import AlpacaAssetUniverseError, get_universe_cache_stats, load_stock_universe
 from strategy_profitability import allocate_equal_risk, build_strategy_leaderboard, paused_strategies_from_drawdown
 from strategies import evaluate_all_strategies
 
@@ -271,7 +271,68 @@ def run_continuous_scan_cycle(
             run_id=cycle_run_id,
             source="alpaca_assets_api",
         )
-        full_universe_records = list(universe_loader())
+        try:
+            full_universe_records = list(universe_loader())
+        except AlpacaAssetUniverseError as exc:
+            telemetry = dict(getattr(exc, "telemetry", {}) or {})
+            _emit_telemetry(
+                telemetry_callback,
+                "alpaca_asset_universe_fetch_failed",
+                run_id=cycle_run_id,
+                api_exception_type=str(telemetry.get("api_exception_type") or type(exc).__name__),
+                api_request_elapsed_time=float(telemetry.get("api_request_elapsed_time") or 0.0),
+                fallback_used=bool(telemetry.get("fallback_used", False)),
+                unfiltered_asset_count=int(telemetry.get("unfiltered_asset_count") or 0),
+                filtered_api_asset_count=int(telemetry.get("filtered_api_asset_count") or 0),
+                client_filtered_asset_count=int(telemetry.get("client_filtered_asset_count") or 0),
+                active_count=int(telemetry.get("active_count") or 0),
+                tradable_count=int(telemetry.get("tradable_count") or 0),
+                us_equity_count=int(telemetry.get("us_equity_count") or 0),
+                rejected_by_asset_class=int(telemetry.get("rejected_by_asset_class") or 0),
+                rejected_by_status=int(telemetry.get("rejected_by_status") or 0),
+                rejected_non_tradable=int(telemetry.get("rejected_non_tradable") or 0),
+                rejected_missing_symbol=int(telemetry.get("rejected_missing_symbol") or 0),
+                error_message=str(exc),
+            )
+            if int(telemetry.get("unfiltered_asset_count") or 0) == 0:
+                _emit_telemetry(
+                    telemetry_callback,
+                    "alpaca_asset_universe_empty",
+                    run_id=cycle_run_id,
+                    unfiltered_asset_count=0,
+                    filtered_api_asset_count=int(telemetry.get("filtered_api_asset_count") or 0),
+                    client_filtered_asset_count=int(telemetry.get("client_filtered_asset_count") or 0),
+                )
+            raise
+        telemetry_stats = dict(get_universe_cache_stats() or {})
+        if telemetry_stats:
+            _emit_telemetry(
+                telemetry_callback,
+                "alpaca_asset_universe_telemetry",
+                run_id=cycle_run_id,
+                unfiltered_asset_count=int(telemetry_stats.get("unfiltered_asset_count") or 0),
+                filtered_api_asset_count=int(telemetry_stats.get("filtered_api_asset_count") or 0),
+                client_filtered_asset_count=int(telemetry_stats.get("client_filtered_asset_count") or 0),
+                active_count=int(telemetry_stats.get("active_count") or 0),
+                tradable_count=int(telemetry_stats.get("tradable_count") or 0),
+                us_equity_count=int(telemetry_stats.get("us_equity_count") or 0),
+                rejected_by_asset_class=int(telemetry_stats.get("rejected_by_asset_class") or 0),
+                rejected_by_status=int(telemetry_stats.get("rejected_by_status") or 0),
+                rejected_non_tradable=int(telemetry_stats.get("rejected_non_tradable") or 0),
+                rejected_missing_symbol=int(telemetry_stats.get("rejected_missing_symbol") or 0),
+                fallback_used=bool(telemetry_stats.get("fallback_used", False)),
+                api_exception_type=str(telemetry_stats.get("api_exception_type") or ""),
+                api_request_elapsed_time=float(telemetry_stats.get("api_request_elapsed_time") or 0.0),
+            )
+            if bool(telemetry_stats.get("fallback_used", False)):
+                _emit_telemetry(
+                    telemetry_callback,
+                    "alpaca_asset_filter_fallback_used",
+                    run_id=cycle_run_id,
+                    unfiltered_asset_count=int(telemetry_stats.get("unfiltered_asset_count") or 0),
+                    filtered_api_asset_count=int(telemetry_stats.get("filtered_api_asset_count") or 0),
+                    client_filtered_asset_count=int(telemetry_stats.get("client_filtered_asset_count") or 0),
+                )
         full_universe_count = len(full_universe_records)
         if diagnostic_symbol_limit is not None and int(diagnostic_symbol_limit) > 0:
             ordered = sorted(full_universe_records, key=lambda item: str(item.get("symbol") or ""))
