@@ -70,6 +70,31 @@ def _emit_telemetry(telemetry_callback: Callable[[str, dict[str, Any]], None] | 
         return
 
 
+def _emit_notification(
+    notification_callback: Callable[..., Any] | None,
+    *,
+    event_type: str,
+    title: str,
+    message: str,
+    severity: str,
+    metadata: dict[str, Any] | None = None,
+    deduplication_key: str | None = None,
+) -> None:
+    if notification_callback is None:
+        return
+    try:
+        notification_callback(
+            event_type=event_type,
+            title=title,
+            message=message,
+            severity=severity,
+            metadata=dict(metadata or {}),
+            deduplication_key=deduplication_key,
+        )
+    except Exception:
+        return
+
+
 def _invoke_scan_runner(
     scan_runner: Callable[..., dict[str, Any]],
     universe_records: list[dict[str, Any]],
@@ -206,6 +231,7 @@ def run_continuous_scan_cycle(
     dry_run: bool = False,
     diagnostic_symbol_limit: int | None = None,
     telemetry_callback: Callable[[str, dict[str, Any]], None] | None = None,
+    notification_callback: Callable[..., Any] | None = None,
 ) -> ContinuousScanCycleResult:
     config = config_loader()
     if str(config.trading_mode).upper() != "PAPER":
@@ -215,6 +241,16 @@ def run_continuous_scan_cycle(
     started_at = started_dt.isoformat()
     run_stamp = started_dt.strftime("%Y%m%d%H%M%S%f")
     cycle_run_id = f"continuous-scan-{run_stamp}"
+
+    _emit_notification(
+        notification_callback,
+        event_type="scan_started",
+        title="Scan Started",
+        message="Starting scan cycle.",
+        severity="INFO",
+        metadata={"run_id": cycle_run_id, "dry_run": bool(dry_run), "status": "scan_started"},
+        deduplication_key=f"scan_started:{cycle_run_id}",
+    )
 
     def _result(
         *,
@@ -374,10 +410,25 @@ def run_continuous_scan_cycle(
             broker_cash = broker_buying_power
         if broker_equity <= 0:
             broker_equity = float(getattr(broker, "get_equity", lambda: broker_buying_power)() or broker_buying_power)
-    except Exception:
+    except Exception as exc:
         broker_cash = float(getattr(broker, "get_cash", lambda: 0.0)() or 0.0)
         broker_buying_power = float(getattr(broker, "get_buying_power", lambda: broker_cash)() or broker_cash)
         broker_equity = float(getattr(broker, "get_equity", lambda: broker_buying_power)() or broker_buying_power)
+        _emit_notification(
+            notification_callback,
+            event_type="broker_connection_failed",
+            title="Broker Connection Warning",
+            message="Broker account snapshot fallback was used.",
+            severity="ERROR",
+            metadata={
+                "run_id": cycle_run_id,
+                "dry_run": bool(dry_run),
+                "status": "fallback",
+                "error_type": type(exc).__name__,
+                "safe_error_message": str(exc),
+            },
+            deduplication_key=f"broker_connection_failed:{cycle_run_id}",
+        )
 
     _emit_telemetry(
         telemetry_callback,
@@ -461,6 +512,22 @@ def run_continuous_scan_cycle(
         )
 
     selected_symbol = str(selected_candidate.get("symbol") or "").upper()
+    _emit_notification(
+        notification_callback,
+        event_type="candidate_selected",
+        title="Candidate Selected",
+        message="Top candidate selected for execution planning.",
+        severity="SUCCESS",
+        metadata={
+            "run_id": cycle_run_id,
+            "dry_run": bool(dry_run),
+            "symbol": selected_symbol,
+            "quantum_score": float((selected_candidate.get("quantum_score") or {}).get("final_score") or selected_candidate.get("overall_score") or selected_candidate.get("score") or 0.0),
+            "strategy_id": str((selected_candidate.get("strategy_ids") or [""])[0] or ""),
+            "status": "candidate_selected",
+        },
+        deduplication_key=f"candidate_selected:{cycle_run_id}:{selected_symbol}",
+    )
     latest_price = _latest_price_for_symbol(scan_payload, selected_symbol)
     if latest_price <= 0:
         if dry_run:
@@ -471,6 +538,25 @@ def run_continuous_scan_cycle(
                 reason="no_latest_price",
                 orders_attempted=0,
                 orders_submitted=0,
+            )
+            _emit_notification(
+                notification_callback,
+                event_type="dry_run_trade_skipped",
+                title="Dry Run Skip",
+                message="No strategy signals available for selected candidate.",
+                severity="INFO",
+                metadata={
+                    "run_id": cycle_run_id,
+                    "dry_run": True,
+                    "symbol": selected_symbol,
+                    "quantum_score": float((selected_candidate.get("quantum_score") or {}).get("final_score") or selected_candidate.get("overall_score") or 0.0),
+                    "proposed_notional": float(selected_candidate.get("suggested_paper_notional") or 0.0),
+                    "reason": "no_strategy_signals",
+                    "orders_attempted": 0,
+                    "orders_submitted": 0,
+                    "status": "skipped",
+                },
+                deduplication_key=f"dry_run_trade_skipped:{cycle_run_id}:{selected_symbol}:no_strategy_signals",
             )
         return _result(
             status="no_trade",
@@ -527,6 +613,23 @@ def run_continuous_scan_cycle(
                     orders_attempted=0,
                     orders_submitted=0,
                 )
+                _emit_notification(
+                    notification_callback,
+                    event_type="dry_run_trade_skipped",
+                    title="Dry Run Skip",
+                    message="All buy signals are paused or unavailable.",
+                    severity="INFO",
+                    metadata={
+                        "run_id": cycle_run_id,
+                        "dry_run": True,
+                        "symbol": selected_symbol,
+                        "reason": "no_active_buy_signals",
+                        "orders_attempted": 0,
+                        "orders_submitted": 0,
+                        "status": "skipped",
+                    },
+                    deduplication_key=f"dry_run_trade_skipped:{cycle_run_id}:{selected_symbol}:no_active_buy_signals",
+                )
             return _result(
                 status="no_trade",
                 execution_status="no_trade",
@@ -570,6 +673,24 @@ def run_continuous_scan_cycle(
                     orders_attempted=0,
                     orders_submitted=0,
                 )
+                _emit_notification(
+                    notification_callback,
+                    event_type="dry_run_trade_skipped",
+                    title="Dry Run Skip",
+                    message="Trade notional resolved to zero.",
+                    severity="INFO",
+                    metadata={
+                        "run_id": cycle_run_id,
+                        "dry_run": True,
+                        "symbol": selected_symbol,
+                        "proposed_notional": float(target_notional),
+                        "reason": "zero_target_notional",
+                        "orders_attempted": 0,
+                        "orders_submitted": 0,
+                        "status": "skipped",
+                    },
+                    deduplication_key=f"dry_run_trade_skipped:{cycle_run_id}:{selected_symbol}:zero_target_notional",
+                )
             return _result(
                 status="no_trade",
                 execution_status="no_trade",
@@ -608,6 +729,23 @@ def run_continuous_scan_cycle(
                     reason="planner_rejected",
                     orders_attempted=0,
                     orders_submitted=0,
+                )
+                _emit_notification(
+                    notification_callback,
+                    event_type="dry_run_trade_skipped",
+                    title="Dry Run Skip",
+                    message="Order planner rejected the candidate.",
+                    severity="INFO",
+                    metadata={
+                        "run_id": cycle_run_id,
+                        "dry_run": True,
+                        "symbol": selected_symbol,
+                        "reason": "planner_rejected",
+                        "orders_attempted": 0,
+                        "orders_submitted": 0,
+                        "status": "skipped",
+                    },
+                    deduplication_key=f"dry_run_trade_skipped:{cycle_run_id}:{selected_symbol}:planner_rejected",
                 )
             return _result(
                 status="no_trade",
@@ -653,6 +791,23 @@ def run_continuous_scan_cycle(
 
         if not risk.approve_trade(max(float(broker_equity), 1.0), trade_value, current_loss=0.0) or not all(risk_checks.values()):
             rejected_status = "duplicate_rejected" if existing is not None and risk_checks.get("duplicate_protection") is False else "risk_rejected"
+            _emit_notification(
+                notification_callback,
+                event_type="risk_limit_triggered",
+                title="Risk Limit Triggered",
+                message="Trade was blocked by risk controls.",
+                severity="WARNING",
+                metadata={
+                    "run_id": cycle_run_id,
+                    "dry_run": bool(dry_run),
+                    "symbol": selected_symbol,
+                    "reason": rejected_status,
+                    "status": "risk_rejected",
+                    "orders_attempted": 0,
+                    "orders_submitted": 0,
+                },
+                deduplication_key=f"risk_limit_triggered:{cycle_run_id}:{selected_symbol}:{rejected_status}",
+            )
             if dry_run:
                 _emit_telemetry(
                     telemetry_callback,
@@ -698,6 +853,27 @@ def run_continuous_scan_cycle(
                 symbol=selected_symbol,
                 orders_attempted=1,
                 orders_submitted=0,
+            )
+            _emit_notification(
+                notification_callback,
+                event_type="dry_run_trade_skipped",
+                title="Dry Run Trade Skipped",
+                message="PAPER DRY RUN mode skipped order submission.",
+                severity="INFO",
+                metadata={
+                    "run_id": cycle_run_id,
+                    "dry_run": True,
+                    "symbol": selected_symbol,
+                    "quantum_score": float((selected_candidate.get("quantum_score") or {}).get("final_score") or selected_candidate.get("overall_score") or 0.0),
+                    "strategy_id": str(selected_strategy.get("strategy_id") or ""),
+                    "proposed_quantity": float(planned_order.get("quantity") or 0.0),
+                    "proposed_notional": float(planned_order.get("notional") or 0.0),
+                    "reason": "dry_run_mode",
+                    "orders_attempted": 1,
+                    "orders_submitted": 0,
+                    "status": "skipped",
+                },
+                deduplication_key=f"dry_run_trade_skipped:{cycle_run_id}:{selected_symbol}:dry_run_mode",
             )
             order_response = {
                 "order_id": f"dry-{cycle_run_id}",
@@ -748,6 +924,23 @@ def run_continuous_scan_cycle(
                     reference_price=float(latest_price),
                 )
             )
+            _emit_notification(
+                notification_callback,
+                event_type="paper_order_submitted",
+                title="Paper Order Submitted",
+                message="Paper order submitted to broker.",
+                severity="SUCCESS",
+                metadata={
+                    "run_id": cycle_run_id,
+                    "dry_run": False,
+                    "symbol": selected_symbol,
+                    "strategy_id": str(selected_strategy.get("strategy_id") or ""),
+                    "proposed_quantity": float(planned_order.get("quantity") or 0.0),
+                    "proposed_notional": float(planned_order.get("notional") or 0.0),
+                    "status": "submitted",
+                },
+                deduplication_key=f"paper_order_submitted:{cycle_run_id}:{selected_symbol}:{client_order_id}",
+            )
             lifecycle = track_order_lifecycle(broker=broker, initial_order=order_response, poll_seconds=1.0, max_wait_seconds=45.0)
             broker_post_positions = _as_dict(broker.get_positions())
             try:
@@ -760,6 +953,39 @@ def run_continuous_scan_cycle(
 
         final_order = dict(lifecycle.get("order") or order_response)
         final_status = str(lifecycle.get("final_status") or final_order.get("status") or "unknown").lower()
+        if final_status == "filled":
+            _emit_notification(
+                notification_callback,
+                event_type="paper_order_filled",
+                title="Paper Order Filled",
+                message="Paper order reached filled status.",
+                severity="SUCCESS",
+                metadata={
+                    "run_id": cycle_run_id,
+                    "dry_run": bool(dry_run),
+                    "symbol": selected_symbol,
+                    "strategy_id": str(selected_strategy.get("strategy_id") or ""),
+                    "status": "filled",
+                },
+                deduplication_key=f"paper_order_filled:{cycle_run_id}:{selected_symbol}:{client_order_id}",
+            )
+        if final_status in {"rejected", "failed", "canceled", "cancelled", "expired"}:
+            _emit_notification(
+                notification_callback,
+                event_type="paper_order_rejected",
+                title="Paper Order Rejected",
+                message="Paper order failed or was rejected by broker.",
+                severity="ERROR",
+                metadata={
+                    "run_id": cycle_run_id,
+                    "dry_run": bool(dry_run),
+                    "symbol": selected_symbol,
+                    "strategy_id": str(selected_strategy.get("strategy_id") or ""),
+                    "status": final_status,
+                    "reason": str(final_order.get("rejection_reason") or final_status),
+                },
+                deduplication_key=f"paper_order_rejected:{cycle_run_id}:{selected_symbol}:{client_order_id}:{final_status}",
+            )
         paper_order_id = str(final_order.get("order_id") or final_order.get("id") or f"{cycle_run_id}-1")
         requested_qty = float(final_order.get("requested_quantity") or planned_order.get("quantity") or 0.0)
         filled_qty = float(final_order.get("filled_quantity") or 0.0)
@@ -772,6 +998,22 @@ def run_continuous_scan_cycle(
                 "quantity": float((expected_positions.get(selected_symbol) or {}).get("quantity") or 0.0) + counted_filled_qty,
                 "avg_price": fill_price,
             }
+            if float((broker_pre_positions.get(selected_symbol) or {}).get("quantity") or 0.0) <= 0:
+                _emit_notification(
+                    notification_callback,
+                    event_type="position_opened",
+                    title="Position Opened",
+                    message="A new paper position was opened.",
+                    severity="SUCCESS",
+                    metadata={
+                        "run_id": cycle_run_id,
+                        "dry_run": bool(dry_run),
+                        "symbol": selected_symbol,
+                        "strategy_id": str(selected_strategy.get("strategy_id") or ""),
+                        "status": "position_opened",
+                    },
+                    deduplication_key=f"position_opened:{cycle_run_id}:{selected_symbol}:{client_order_id}",
+                )
 
         equity_for_weights = max(float(broker_equity), 1.0)
         planned_positions = {
@@ -973,6 +1215,41 @@ def run_continuous_scan_cycle(
                 replace_leaderboard(leaderboard_rows)
 
         confirmed = 1 if str(reconciliation.get("reconciliation_status") or "").lower() in {"matched", "matched_with_tolerance"} and int(reconciliation.get("position_mismatch_count") or 0) == 0 and final_status not in {"rejected", "failed", "canceled", "cancelled", "expired"} else 0
+
+        if str(planned_order.get("side") or "").upper() == "SELL" and final_status == "filled":
+            post_qty = float((broker_post_positions.get(selected_symbol) or {}).get("quantity") or 0.0)
+            if post_qty <= 0:
+                _emit_notification(
+                    notification_callback,
+                    event_type="position_closed",
+                    title="Position Closed",
+                    message="Paper position was closed.",
+                    severity="SUCCESS",
+                    metadata={
+                        "run_id": cycle_run_id,
+                        "dry_run": bool(dry_run),
+                        "symbol": selected_symbol,
+                        "strategy_id": str(selected_strategy.get("strategy_id") or ""),
+                        "status": "position_closed",
+                    },
+                    deduplication_key=f"position_closed:{cycle_run_id}:{selected_symbol}:{client_order_id}",
+                )
+
+        _emit_notification(
+            notification_callback,
+            event_type="scan_completed",
+            title="Scan Completed",
+            message="Scan cycle completed successfully.",
+            severity="SUCCESS",
+            metadata={
+                "run_id": cycle_run_id,
+                "dry_run": bool(dry_run),
+                "status": "completed",
+                "orders_attempted": 1,
+                "orders_submitted": (0 if dry_run else (1 if final_status not in {"rejected", "failed", "canceled", "cancelled", "expired"} else 0)),
+            },
+            deduplication_key=f"scan_completed:{cycle_run_id}",
+        )
 
         return _result(
             status="completed",

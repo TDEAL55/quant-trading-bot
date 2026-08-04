@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from continuous_scan_cycle import run_continuous_scan_cycle
 from deployment_config import load_deployment_config
 from logger_setup import logger
+from notification_service import NotificationService, format_daily_summary_message, format_weekly_summary_message
 from run_lock import DailyRunLock, RunLockBusyError
 
 
@@ -123,6 +124,21 @@ def _result_value(result: Any, key: str, default: Any = None) -> Any:
     return getattr(result, key, default)
 
 
+def _parse_summary_time_et(value: str | None) -> tuple[int, int]:
+    text = str(value or "16:15").strip()
+    parts = text.split(":")
+    if len(parts) != 2:
+        return 16, 15
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except Exception:
+        return 16, 15
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return 16, 15
+    return hour, minute
+
+
 def _new_order_count(execution: dict[str, Any]) -> int:
     paper_order = execution.get("paper_order") or {}
     order_id = str(paper_order.get("order_id") or "").strip()
@@ -203,6 +219,7 @@ def run_continuous_paper_runner(
     max_cycles: int | None = None,
     dry_run_override: bool | None = None,
     diagnostic_symbol_limit: int | None = None,
+    notifier_factory: Callable[..., NotificationService] | None = None,
 ) -> dict[str, int]:
     if _is_railway_environment() and not _railway_worker_allowed():
         raise RuntimeError(
@@ -231,6 +248,40 @@ def run_continuous_paper_runner(
     scan_only_during_market_hours = bool(getattr(config, "scan_only_during_market_hours", True))
     dry_run = bool(getattr(config, "continuous_runner_dry_run", False)) if dry_run_override is None else bool(dry_run_override)
     telemetry_callback = _telemetry_callback_factory(run_id=run_id, dry_run=dry_run, trading_mode=str(config.trading_mode))
+    notifier_builder = notifier_factory or NotificationService.from_env
+    notifier = notifier_builder(database_url=(database_url or config.database_url))
+
+    def _notify(
+        *,
+        event_type: str,
+        title: str,
+        message: str,
+        severity: str,
+        metadata: dict[str, Any] | None = None,
+        deduplication_key: str | None = None,
+        deduplication_window_seconds: int | None = None,
+    ) -> None:
+        try:
+            notifier.notify(
+                event_type=event_type,
+                title=title,
+                message=message,
+                severity=severity,
+                metadata=dict(metadata or {}),
+                deduplication_key=deduplication_key,
+                deduplication_window_seconds=deduplication_window_seconds,
+            )
+        except Exception:
+            return
+
+    _notify(
+        event_type="bot_started",
+        title="Runner Started",
+        message="Continuous paper runner started.",
+        severity="SUCCESS",
+        metadata={"run_id": run_id, "dry_run": bool(dry_run), "status": "starting"},
+        deduplication_key=f"bot_started:{run_id}",
+    )
 
     max_universe_raw = os.getenv("SCANNER_MAX_UNIVERSE_SIZE")
     resolved_max_universe_size = int(str(max_universe_raw or "0").strip() or "0")
@@ -262,6 +313,9 @@ def run_continuous_paper_runner(
         "quota_skips": 0,
         "closed_market_sleeps": 0,
     }
+    daily_summary_enabled = str(os.getenv("NOTIFICATION_DAILY_SUMMARY_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
+    weekly_summary_enabled = str(os.getenv("NOTIFICATION_WEEKLY_SUMMARY_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
+    daily_summary_hour, daily_summary_minute = _parse_summary_time_et(os.getenv("DAILY_SUMMARY_TIME_ET", "16:15"))
 
     try:
         while effective_max_iterations is None or stats["cycles"] < int(effective_max_iterations):
@@ -275,11 +329,73 @@ def run_continuous_paper_runner(
             if scan_only_during_market_hours and not _is_market_open(now_eastern):
                 sleep_seconds = _seconds_until_next_market_open(now_eastern)
                 stats["closed_market_sleeps"] += 1
+                if daily_summary_enabled and ((now_eastern.hour, now_eastern.minute) >= (daily_summary_hour, daily_summary_minute)):
+                    summary_message = format_daily_summary_message(
+                        {
+                            "date": market_date,
+                            "bot_status": "market_closed_wait",
+                            "scans_completed": stats["scans_completed"],
+                            "failed_scans": stats["scans_failed"],
+                            "orders_submitted": int((_normalize_daily_state(_load_daily_state(resolved_state_path), market_date)).get("orders_submitted") or 0),
+                        }
+                    )
+                    _notify(
+                        event_type="daily_summary",
+                        title="Daily Summary",
+                        message=summary_message,
+                        severity="INFO",
+                        metadata={"run_id": run_id, "dry_run": bool(dry_run), "status": "daily_summary", "date": market_date},
+                        deduplication_key=f"daily_summary:{market_date}",
+                        deduplication_window_seconds=60 * 60 * 30,
+                    )
+                if weekly_summary_enabled and now_eastern.weekday() == 4 and ((now_eastern.hour, now_eastern.minute) >= (daily_summary_hour, daily_summary_minute)):
+                    iso_year, iso_week, _ = now_eastern.isocalendar()
+                    weekly_message = format_weekly_summary_message(
+                        {
+                            "strategy_leaderboard": "N/A",
+                            "total_paper_pl": "N/A",
+                            "win_rate": "N/A",
+                            "profit_factor": "N/A",
+                            "maximum_drawdown": "N/A",
+                            "best_strategies": "N/A",
+                            "worst_strategies": "N/A",
+                            "best_sectors": "N/A",
+                            "worst_sectors": "N/A",
+                            "factor_effectiveness": "N/A",
+                            "recommendations": "N/A",
+                            "strategies_recommended_for_pause": "N/A",
+                            "proposed_weight_changes": "N/A",
+                        }
+                    )
+                    _notify(
+                        event_type="weekly_summary",
+                        title="Weekly Summary",
+                        message=weekly_message,
+                        severity="INFO",
+                        metadata={"run_id": run_id, "dry_run": bool(dry_run), "status": "weekly_summary", "week": f"{iso_year}-W{iso_week:02d}"},
+                        deduplication_key=f"weekly_summary:{iso_year}:W{iso_week:02d}",
+                        deduplication_window_seconds=60 * 60 * 24 * 8,
+                    )
                 _log_event(
                     "continuous_runner_market_closed",
                     run_id=run_id,
                     timestamp=now_eastern.isoformat(),
                     sleep_seconds=round(float(sleep_seconds), 3),
+                )
+                _notify(
+                    event_type="market_closed_wait",
+                    title="Market Closed",
+                    message="Runner is waiting for the next market open window.",
+                    severity="INFO",
+                    metadata={
+                        "run_id": run_id,
+                        "dry_run": bool(dry_run),
+                        "status": "market_closed_wait",
+                        "reason": "outside_market_hours",
+                        "market_date": market_date,
+                    },
+                    deduplication_key=f"market_closed_wait:{market_date}",
+                    deduplication_window_seconds=60 * 60 * 30,
                 )
                 sleep_fn(sleep_seconds)
                 stats["cycles"] += 1
@@ -308,12 +424,21 @@ def run_continuous_paper_runner(
                         lock_acquired = True
                         _log_event("run_lock_acquired", run_id=run_id, lock_path=str(lock_path))
                         stats["scans_attempted"] += 1
+                        _notify(
+                            event_type="scan_started",
+                            title="Scan Started",
+                            message="Universe scan cycle started.",
+                            severity="INFO",
+                            metadata={"run_id": run_id, "dry_run": bool(dry_run), "status": "scan_started"},
+                            deduplication_key=f"scan_started:{run_id}:{stats['scans_attempted']}",
+                        )
                         result = runner(
                             database_url=database_url or config.database_url,
                             persist=True,
                             dry_run=dry_run,
                             diagnostic_symbol_limit=diagnostic_symbol_limit,
                             telemetry_callback=telemetry_callback,
+                            notification_callback=_notify,
                         )
                 finally:
                     if lock_acquired:
@@ -371,6 +496,20 @@ def run_continuous_paper_runner(
                     confirmed_order_count=confirmed_order_count,
                     orders_submitted=state.get("orders_submitted"),
                 )
+                _notify(
+                    event_type="scan_completed",
+                    title="Scan Completed",
+                    message="Universe scan cycle completed.",
+                    severity="SUCCESS",
+                    metadata={
+                        "run_id": run_id,
+                        "dry_run": bool(dry_run),
+                        "status": str(_result_value(result, "execution_status") or "unknown"),
+                        "orders_attempted": (1 if str(_result_value(result, "execution_status") or "") in {"completed", "no_trade", "risk_rejected", "duplicate_rejected"} else 0),
+                        "orders_submitted": int(confirmed_order_count),
+                    },
+                    deduplication_key=f"scan_completed:{run_id}:{stats['scans_completed']}",
+                )
             except RunLockBusyError:
                 stats["lock_skips"] += 1
                 _log_event(
@@ -390,14 +529,63 @@ def run_continuous_paper_runner(
                     error_type=type(exc).__name__,
                     error_message=str(exc),
                 )
+                _notify(
+                    event_type="scan_failed",
+                    title="Scan Failed",
+                    message="Scan cycle failed before completion.",
+                    severity="ERROR",
+                    metadata={
+                        "run_id": run_id,
+                        "dry_run": bool(dry_run),
+                        "status": "failed",
+                        "error_type": type(exc).__name__,
+                        "safe_error_message": str(exc),
+                    },
+                    deduplication_key=f"scan_failed:{run_id}:{stats['scans_failed']}",
+                )
             stats["cycles"] += 1
             if effective_max_iterations is not None and stats["cycles"] >= int(effective_max_iterations):
                 break
             sleep_fn(scan_interval_seconds)
     except KeyboardInterrupt:
         _log_event("continuous_runner_shutdown", run_id=run_id, reason="keyboard_interrupt", cycles=stats["cycles"])
+        _notify(
+            event_type="bot_stopped",
+            title="Runner Stopped",
+            message="Runner stopped by keyboard interrupt.",
+            severity="WARNING",
+            metadata={"run_id": run_id, "dry_run": bool(dry_run), "status": "stopped"},
+            deduplication_key=f"bot_stopped:{run_id}:keyboard_interrupt",
+        )
+    except Exception as exc:
+        _notify(
+            event_type="bot_crashed",
+            title="Runner Failed",
+            message="Runner encountered a fatal error.",
+            severity="CRITICAL",
+            metadata={
+                "run_id": run_id,
+                "dry_run": bool(dry_run),
+                "status": "crashed",
+                "error_type": type(exc).__name__,
+                "safe_error_message": str(exc),
+                "orders_submitted": 0,
+            },
+            deduplication_key=f"bot_crashed:{run_id}",
+        )
+        notifier.close()
+        raise
 
     _log_event("continuous_runner_exit", run_id=run_id, **stats)
+    _notify(
+        event_type="bot_stopped",
+        title="Runner Stopped",
+        message="Runner exited normally.",
+        severity="INFO",
+        metadata={"run_id": run_id, "dry_run": bool(dry_run), "status": "stopped", **stats},
+        deduplication_key=f"bot_stopped:{run_id}:normal",
+    )
+    notifier.close()
 
     return stats
 
