@@ -55,7 +55,7 @@ python dashboard.py
 This software is for research and education only. It does not guarantee profits and should not be used as financial advice.
 
 ## Railway deployment
-This project can run as a Railway scheduled worker in paper-trading mode only.
+Railway is intended for dashboard/API hosting only. Autonomous PAPER trading workers should run on a single host (DigitalOcean systemd) to avoid duplicate execution against the same account/state.
 
 ### Safety defaults for cloud
 - PAPER mode only (`TRADING_MODE=PAPER`)
@@ -66,21 +66,21 @@ This project can run as a Railway scheduled worker in paper-trading mode only.
 - Daily summaries are still written to `daily_summaries/`
 - Final report is written to `TWO_WEEK_REPORT.md`
 
-### Files used by Railway
-- `Procfile` with worker entrypoint: `python railway_start.py`
-- `railway_start.py` runs exactly one safe market-day cycle by calling `run_two_week_paper_runner(days=1)`
-- `two_week_paper_runner.py` keeps JSON daily safety state at `PAPER_DAILY_STATE_PATH` (or default local/cloud path)
-- `monitoring_recorder.py` writes sanitized monitoring rows to PostgreSQL when `DATABASE_URL` is configured
-- `dashboard_app.py` is a read-only Streamlit dashboard that reads PostgreSQL only
+### Deployment split
+- DigitalOcean (`quant-bot-continuous.service`): autonomous PAPER worker (`continuous_paper_runner.py`).
+- Railway (`worker` service): dashboard/API process only (`streamlit run dashboard_app.py ...`).
+
+### Railway worker guard
+- `ALLOW_RAILWAY_TRADING_WORKER=false` is the safe default.
+- When Railway environment markers are detected, `continuous_paper_runner.py` fails closed unless `ALLOW_RAILWAY_TRADING_WORKER=true` is explicitly set.
+- This prevents accidental dual-worker execution across DigitalOcean and Railway.
 
 ### Required Railway environment variables
 Set these in Railway service variables (do not commit credentials):
 
-- `TRADING_MODE=PAPER`
-- `ALPACA_API_KEY=<your_paper_key>`
-- `ALPACA_API_SECRET=<your_paper_secret>`
 - `DATABASE_URL=<railway_postgres_url>`
 - `DASHBOARD_PASSWORD=<strong_password_for_dashboard_access>`
+- `ALLOW_RAILWAY_TRADING_WORKER=false`
 
 Optional:
 
@@ -88,11 +88,7 @@ Optional:
 - `BOT_RUN_ID=<optional_external_run_id_for_idempotency>`
 
 ### Scheduler setup in Railway
-Create a Railway cron/scheduled job that triggers once per market day. Recommended schedule:
-
-- Weekdays once per day before/around market open, e.g. `55 9 * * 1-5` (configure timezone in Railway)
-
-The runner performs a market-open check and skips safely when closed.
+Do not schedule autonomous trading worker jobs in Railway unless there is an explicit operational decision to move worker ownership away from DigitalOcean and `ALLOW_RAILWAY_TRADING_WORKER=true` is intentionally set.
 
 ## Read-only monitoring dashboard (v1)
 
@@ -121,16 +117,11 @@ Tables:
 
 Retention helper SQL is available in `MonitoringDatabase.retention_sql()` and is not auto-executed.
 
-### Local run (worker + dashboard)
+### Local run (dashboard only default)
 1. Set environment variables:
-	- `TRADING_MODE=PAPER`
-	- `ALPACA_API_KEY=...`
-	- `ALPACA_API_SECRET=...`
 	- `DATABASE_URL=...`
 	- `DASHBOARD_PASSWORD=...`
-2. Start worker once:
-	- `python railway_start.py`
-3. Start dashboard:
+2. Start dashboard:
 	- `streamlit run dashboard_app.py`
 
 The dashboard must not be connected to LIVE mode or any order-submission endpoint.

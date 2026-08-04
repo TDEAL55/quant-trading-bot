@@ -25,6 +25,22 @@ MARKET_CLOSE_HOUR = 16
 MARKET_CLOSE_MINUTE = 0
 
 
+def _is_railway_environment(environ: dict[str, str] | None = None) -> bool:
+    env = dict(environ or os.environ)
+    railway_markers = (
+        "RAILWAY_ENVIRONMENT",
+        "RAILWAY_PROJECT_ID",
+        "RAILWAY_SERVICE_ID",
+        "RAILWAY_DEPLOYMENT_ID",
+    )
+    return any(str(env.get(name) or "").strip() for name in railway_markers)
+
+
+def _railway_worker_allowed(environ: dict[str, str] | None = None) -> bool:
+    env = dict(environ or os.environ)
+    return str(env.get("ALLOW_RAILWAY_TRADING_WORKER", "false")).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _log_event(event: str, **fields: Any) -> None:
     payload = {"event": event, "timestamp": datetime.now(EASTERN_TZ).isoformat(), **fields}
     encoded = json.dumps(payload, sort_keys=True, default=str)
@@ -188,6 +204,11 @@ def run_continuous_paper_runner(
     dry_run_override: bool | None = None,
     diagnostic_symbol_limit: int | None = None,
 ) -> dict[str, int]:
+    if _is_railway_environment() and not _railway_worker_allowed():
+        raise RuntimeError(
+            "Refusing autonomous trading worker on Railway unless ALLOW_RAILWAY_TRADING_WORKER=true"
+        )
+
     run_id = f"continuous-runner-{datetime.now(EASTERN_TZ).strftime('%Y%m%d%H%M%S%f')}-{uuid.uuid4().hex[:8]}"
     _log_event("continuous_runner_starting", run_id=run_id)
     config = config_loader()
