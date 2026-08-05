@@ -1,43 +1,186 @@
 # Deployment Readiness
 
-This deployment profile is paper-only and keeps LIVE trading hard-blocked.
+This profile runs autonomous PAPER trading only. LIVE mode is hard-blocked.
 
-## Files
+For intraday autonomous mode, use the continuous service (`continuous_paper_runner.py`) so the process remains active and scans every `SCAN_INTERVAL_MINUTES` during market hours.
 
-- `quant-bot.service`: oneshot systemd service run as `quantbot`.
-- `quant-bot.timer`: daily timer in `America/New_York` with `Persistent=true`.
-- `install_server.sh`: installs the service and timer on Linux.
-- `deploy.example.env`: template environment file with no secrets.
+## Components reused
 
-## Required environment settings
+- `quant-bot.service`: existing oneshot systemd service.
+- `quant-bot.timer`: weekday once-daily cadence at 09:30 America/New_York.
+- `unattended_daily_runner.py`: single unattended entrypoint.
+- `daily_research_runner.py`: scanner, shortlist, risk, execution, and reconciliation orchestration.
+- Existing lock file behavior and `backup_daily_database.sh` post-run backup hook.
 
-- `APP_ENV`
-- `DATABASE_URL`
-- `TRADING_MODE=PAPER`
-- `AUTO_APPROVE_PAPER=true|false`
-- `MAX_DAILY_ORDERS=1`
-- `RUN_TIMEZONE=America/New_York`
-- `RUN_HOUR`
-- `RUN_MINUTE`
-- `NOTIFICATIONS_ENABLED`
-- `KILL_SWITCH`
+## Environment file
 
-## Security instructions
+Path: `/etc/quant-bot/quant-bot.env`
 
-- Never commit secrets.
-- Keep `/etc/quant-bot/quant-bot.env` mode `600` and owned by `root:quantbot`.
-- Run the service as the dedicated non-root `quantbot` user.
-- Do not expose the dashboard publicly.
+Minimum required values:
 
-## Database
+```bash
+APP_ENV=production
+DATABASE_URL=sqlite:////var/lib/quant-bot/quant-bot.db
+TRADING_MODE=PAPER
+PAPER_BROKER_BACKEND=ALPACA
+ALPACA_API_KEY=REPLACE_ME
+ALPACA_API_SECRET=REPLACE_ME
+ALPACA_PAPER_BASE_URL=https://paper-api.alpaca.markets
+ALPACA_ORDER_SUBMISSION_ENABLED=true
+AUTO_APPROVE_PAPER=true
+NOTIFICATIONS_ENABLED=false
+KILL_SWITCH=false
+RUN_TIMEZONE=America/New_York
+SCAN_INTERVAL_MINUTES=5
+SCAN_ONLY_DURING_MARKET_HOURS=true
+CONTINUOUS_RUNNER_DRY_RUN=false
+MAX_DAILY_ORDERS=5
+MAX_OPEN_POSITIONS=10
+MAX_POSITION_EQUITY_PERCENT=10
+SCAN_SYMBOLS=
 
-- Use SQLite at a persistent path such as `/var/lib/quant-bot/quant-bot.db`.
-- Keep WAL mode enabled through the application database layer.
-- Back up the database daily and retain 14 backups.
-- The service runs `deployment/backup_daily_database.sh` after each unattended run.
+PAPER_DAILY_CYCLE_ENABLED=true
+PAPER_DAILY_AUTO_ENTRY_EXECUTION=true
+PAPER_DAILY_MAX_NEW_POSITIONS=0
+PAPER_MAX_OPEN_POSITIONS=0
+PAPER_DAILY_REQUIRE_LEDGER_INTEGRITY_PASS=true
 
-## Operational notes
+DISCORD_WEBHOOK_URL=
+DISCORD_NO_TRADE_NOTIFICATION_MINUTES=60
+```
 
-- Missed timer runs may execute after recovery because the timer uses `Persistent=true`.
-- The runner still refuses stale market data.
-- `KILL_SWITCH=true` stops execution immediately.
+## Exact Ubuntu commands
+
+1. Pull latest code
+
+```bash
+cd /home/quantbot/quant-trading-bot
+git fetch --all --prune
+git checkout main
+git pull --ff-only
+```
+
+2. Activate virtual environment
+
+```bash
+cd /home/quantbot/quant-trading-bot
+source .venv/bin/activate
+```
+
+3. Install dependencies
+
+```bash
+cd /home/quantbot/quant-trading-bot
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+4. Create or update `.env` for app runtime
+
+```bash
+sudo install -d -m 0750 -o root -g quantbot /etc/quant-bot
+sudo cp /home/quantbot/quant-trading-bot/deployment/deploy.example.env /etc/quant-bot/quant-bot.env
+sudo chown root:quantbot /etc/quant-bot/quant-bot.env
+sudo chmod 0600 /etc/quant-bot/quant-bot.env
+sudo nano /etc/quant-bot/quant-bot.env
+```
+
+5. Read-only Alpaca paper connection check
+
+```bash
+cd /home/quantbot/quant-trading-bot
+source .venv/bin/activate
+python alpaca_paper_connection_check.py
+```
+
+6. Run one dry cycle (submission disabled)
+
+```bash
+cd /home/quantbot/quant-trading-bot
+source .venv/bin/activate
+python unattended_daily_runner.py
+```
+
+7. Enable submission only after checks pass
+
+```bash
+sudo sed -i 's/^ALPACA_ORDER_SUBMISSION_ENABLED=.*/ALPACA_ORDER_SUBMISSION_ENABLED=true/' /etc/quant-bot/quant-bot.env
+sudo systemctl daemon-reload
+```
+
+8. Run a controlled paper cycle
+
+```bash
+cd /home/quantbot/quant-trading-bot
+source .venv/bin/activate
+python unattended_daily_runner.py
+```
+
+9. Run a second same-session cycle to verify duplicate protection
+
+```bash
+cd /home/quantbot/quant-trading-bot
+source .venv/bin/activate
+python unattended_daily_runner.py
+```
+
+10. Install/refresh continuous intraday service
+
+```bash
+cd /home/quantbot/quant-trading-bot
+sudo cp deployment/quant-bot-continuous.service /etc/systemd/system/quant-bot-continuous.service
+sudo systemctl daemon-reload
+sudo systemctl enable quant-bot-continuous.service
+sudo systemctl restart quant-bot-continuous.service
+```
+
+11. (Optional) Keep existing daily oneshot service/timer for end-of-day summary/backup workflows
+
+```bash
+cd /home/quantbot/quant-trading-bot
+sudo cp deployment/quant-bot.service /etc/systemd/system/quant-bot.service
+sudo cp deployment/quant-bot.timer /etc/systemd/system/quant-bot.timer
+sudo systemctl daemon-reload
+sudo systemctl restart quant-bot.timer
+sudo systemctl start quant-bot.service
+```
+
+12. Verify continuous service status
+
+```bash
+systemctl status quant-bot-continuous.service --no-pager
+```
+
+13. Verify daily service status (optional)
+
+```bash
+systemctl status quant-bot.service --no-pager
+```
+
+14. Verify timer status and next run
+
+```bash
+systemctl status quant-bot.timer --no-pager
+systemctl list-timers quant-bot.timer --all
+```
+
+15. View live logs
+
+```bash
+journalctl -u quant-bot-continuous.service -f -n 200
+journalctl -u quant-bot.service -f -n 200
+```
+
+16. Confirm no live broker order path was called
+
+```bash
+journalctl -u quant-bot.service -n 500 --no-pager | grep -Ei "broker execution blocked|no broker orders were submitted|Trading mode must be exactly PAPER|LIVE trading is hard-blocked"
+```
+
+## Security notes
+
+- Never commit secrets; set `DISCORD_WEBHOOK_URL` only in server env.
+- Keep `/etc/quant-bot/quant-bot.env` mode `0600` owned by `root:quantbot`.
+- Service must run as non-root `quantbot`.
+- `TRADING_MODE=LIVE` is blocked by deployment config and runtime checks.

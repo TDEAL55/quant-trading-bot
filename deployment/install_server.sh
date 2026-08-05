@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_PATH="/opt/quant-bot"
+PROJECT_PATH="/home/quantbot/quant-trading-bot"
 APP_USER="quantbot"
 APP_GROUP="quantbot"
 ENV_PATH="/etc/quant-bot/quant-bot.env"
 SERVICE_PATH="/etc/systemd/system/quant-bot.service"
 TIMER_PATH="/etc/systemd/system/quant-bot.timer"
+CONTINUOUS_SERVICE_PATH="/etc/systemd/system/quant-bot-continuous.service"
 BACKUP_SCRIPT_PATH="/usr/local/bin/quant-bot-backup"
 
 install -d -o "${APP_USER}" -g "${APP_GROUP}" -m 0755 "${PROJECT_PATH}"
@@ -22,8 +23,11 @@ chmod 0600 "${ENV_PATH}"
 
 cp "${PROJECT_PATH}/deployment/quant-bot.service" "${SERVICE_PATH}"
 cp "${PROJECT_PATH}/deployment/quant-bot.timer" "${TIMER_PATH}"
+cp "${PROJECT_PATH}/deployment/quant-bot-continuous.service" "${CONTINUOUS_SERVICE_PATH}"
 install -o "${APP_USER}" -g "${APP_GROUP}" -m 0750 "${PROJECT_PATH}/deployment/backup_daily_database.sh" "${BACKUP_SCRIPT_PATH}"
 
 systemctl daemon-reload
 systemctl enable quant-bot.timer
 systemctl start quant-bot.timer
+systemctl enable quant-bot-continuous.service
+systemctl restart quant-bot-continuous.service

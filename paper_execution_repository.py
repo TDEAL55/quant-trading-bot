@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -240,10 +241,11 @@ class MonitoringPaperExecutionRepository:
                                 paper_order_id, run_id, symbol, side, quantity, notional,
                                 target_weight, current_weight, weight_delta, reference_price,
                                 proposed_at, risk_status, risk_reason, submission_status,
-                                broker_order_id, submitted_at, filled_quantity,
+                                broker_order_id, client_order_id, requested_quantity, broker_backend,
+                                order_type, time_in_force, broker_updated_at, rejection_reason, submitted_at, filled_quantity,
                                 average_fill_price, filled_at, canceled_at, failed_at,
                                 error_message, order_payload_json, created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """
                         ),
                         (
@@ -262,6 +264,13 @@ class MonitoringPaperExecutionRepository:
                             item.get("risk_reason"),
                             item.get("submission_status") or "not_submitted",
                             item.get("broker_order_id"),
+                            item.get("client_order_id"),
+                            item.get("requested_quantity"),
+                            item.get("broker_backend"),
+                            item.get("order_type"),
+                            item.get("time_in_force"),
+                            item.get("broker_updated_at"),
+                            item.get("rejection_reason"),
                             item.get("submitted_at"),
                             item.get("filled_quantity"),
                             item.get("average_fill_price"),
@@ -376,6 +385,183 @@ class MonitoringPaperExecutionRepository:
             item["positions"] = _json_load(row.get("positions_json"), {})
             item["concentration"] = _json_load(row.get("concentration_json"), {})
             item["warnings"] = _json_load(row.get("warnings_json"), [])
+            result.append(item)
+        return result
+
+    def save_order_status_transitions(self, run_id: str, symbol: str, paper_order_id: str, transitions: list[dict[str, Any]]) -> dict[str, Any]:
+        if not self.db.enabled:
+            return {"storage": "disabled", "count": 0}
+        self.db.ensure_schema()
+        now = _utc_iso()
+        conn = self.db.conn
+        with conn:
+            cursor = conn.cursor()
+            try:
+                for row in transitions or []:
+                    item = dict(row or {})
+                    cursor.execute(
+                        self._adapt_query(
+                            """
+                            INSERT INTO paper_order_status_transitions (
+                                transition_id, run_id, paper_order_id, broker_order_id, client_order_id,
+                                symbol, previous_status, status, requested_quantity, filled_quantity,
+                                average_fill_price, rejection_reason, event_time, execution_latency_seconds,
+                                created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """
+                        ),
+                        (
+                            str(item.get("transition_id") or uuid.uuid4().hex),
+                            str(run_id),
+                            str(paper_order_id or ""),
+                            item.get("broker_order_id"),
+                            item.get("client_order_id"),
+                            str(symbol or "").upper(),
+                            item.get("previous_status"),
+                            item.get("status"),
+                            item.get("requested_quantity"),
+                            item.get("filled_quantity"),
+                            item.get("average_fill_price"),
+                            item.get("rejection_reason"),
+                            item.get("event_time") or now,
+                            item.get("execution_latency_seconds"),
+                            now,
+                        ),
+                    )
+            finally:
+                cursor.close()
+        return {"storage": "database", "count": len(transitions or [])}
+
+    def fetch_order_status_transitions(self, run_id: str) -> list[dict[str, Any]]:
+        if not self.db.enabled:
+            return []
+        self.db.ensure_schema()
+        return self.db.query_all(
+            "SELECT * FROM paper_order_status_transitions WHERE run_id = ? ORDER BY event_time ASC",
+            (str(run_id),),
+        )
+
+    def save_closed_trade(self, trade: dict[str, Any]) -> dict[str, Any]:
+        if not self.db.enabled:
+            return {"storage": "disabled", "trade_id": str((trade or {}).get("trade_id") or "")}
+        self.db.ensure_schema()
+        item = dict(trade or {})
+        now = _utc_iso()
+        trade_id = str(item.get("trade_id") or uuid.uuid4().hex)
+        self.db.execute(
+            """
+            INSERT OR REPLACE INTO strategy_closed_trades (
+                trade_id, strategy_id, strategy_version, symbol,
+                entry_timestamp, exit_timestamp, entry_price, exit_price, quantity,
+                realized_gross_pnl, estimated_fees, estimated_slippage, net_pnl, percentage_return,
+                holding_duration_hours, max_adverse_excursion, max_favorable_excursion,
+                exit_reason, market_regime, close_type, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                trade_id,
+                item.get("strategy_id"),
+                item.get("strategy_version"),
+                item.get("symbol"),
+                item.get("entry_timestamp"),
+                item.get("exit_timestamp"),
+                item.get("entry_price"),
+                item.get("exit_price"),
+                item.get("quantity"),
+                item.get("realized_gross_pnl"),
+                item.get("estimated_fees"),
+                item.get("estimated_slippage"),
+                item.get("net_pnl"),
+                item.get("percentage_return"),
+                item.get("holding_duration_hours"),
+                item.get("max_adverse_excursion"),
+                item.get("max_favorable_excursion"),
+                item.get("exit_reason"),
+                item.get("market_regime"),
+                item.get("close_type"),
+                item.get("created_at") or now,
+            ),
+        )
+        return {"storage": "database", "trade_id": trade_id}
+
+    def list_closed_trades(self, strategy_id: str | None = None, limit: int = 5000) -> list[dict[str, Any]]:
+        if not self.db.enabled:
+            return []
+        self.db.ensure_schema()
+        if strategy_id:
+            return self.db.query_all(
+                "SELECT * FROM strategy_closed_trades WHERE strategy_id = ? ORDER BY exit_timestamp DESC LIMIT ?",
+                (str(strategy_id), int(limit)),
+            )
+        return self.db.query_all(
+            "SELECT * FROM strategy_closed_trades ORDER BY exit_timestamp DESC LIMIT ?",
+            (int(limit),),
+        )
+
+    def replace_strategy_leaderboard(self, leaderboard_rows: list[dict[str, Any]]) -> dict[str, Any]:
+        if not self.db.enabled:
+            return {"storage": "disabled", "count": 0}
+        self.db.ensure_schema()
+        captured_at = _utc_iso()
+        conn = self.db.conn
+        with conn:
+            cursor = conn.cursor()
+            try:
+                for row in leaderboard_rows or []:
+                    item = dict(row or {})
+                    snapshot_id = f"{captured_at}:{item.get('strategy_id')}:{item.get('strategy_version')}"
+                    cursor.execute(
+                        self._adapt_query(
+                            """
+                            INSERT INTO strategy_leaderboard_snapshots (
+                                snapshot_id, captured_at, strategy_id, strategy_version,
+                                completed_trade_count, net_profit, profit_factor, win_rate,
+                                average_winner, average_loser, expectancy, sharpe_ratio,
+                                maximum_drawdown, average_holding_time_hours, sample_status,
+                                performance_by_regime_json, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """
+                        ),
+                        (
+                            snapshot_id,
+                            captured_at,
+                            item.get("strategy_id"),
+                            item.get("strategy_version"),
+                            int(item.get("completed_trade_count") or 0),
+                            float(item.get("net_profit") or 0.0),
+                            float(item.get("profit_factor") or 0.0),
+                            float(item.get("win_rate") or 0.0),
+                            float(item.get("average_winner") or 0.0),
+                            float(item.get("average_loser") or 0.0),
+                            float(item.get("expectancy") or 0.0),
+                            float(item.get("sharpe_ratio") or 0.0),
+                            float(item.get("maximum_drawdown") or 0.0),
+                            float(item.get("average_holding_time_hours") or 0.0),
+                            str(item.get("sample_status") or "INSUFFICIENT_SAMPLE"),
+                            _stable_json(item.get("performance_by_regime") or {}),
+                            captured_at,
+                        ),
+                    )
+            finally:
+                cursor.close()
+        return {"storage": "database", "count": len(leaderboard_rows or []), "captured_at": captured_at}
+
+    def fetch_latest_strategy_leaderboard(self) -> list[dict[str, Any]]:
+        if not self.db.enabled:
+            return []
+        self.db.ensure_schema()
+        latest = self.db.query_one("SELECT captured_at FROM strategy_leaderboard_snapshots ORDER BY captured_at DESC LIMIT 1")
+        if not latest:
+            return []
+        captured_at = str(latest.get("captured_at") or "")
+        rows = self.db.query_all(
+            "SELECT * FROM strategy_leaderboard_snapshots WHERE captured_at = ? ORDER BY net_profit DESC",
+            (captured_at,),
+        )
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["performance_by_regime"] = _json_load(item.get("performance_by_regime_json"), {})
             result.append(item)
         return result
 
