@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import inspect
 import os
 from typing import Any, Callable
 
 from config import (
     BENCHMARK_SYMBOL,
+    CORRELATION_ALLOCATION_REDUCTION_FACTOR,
+    CORRELATION_LOOKBACK_DAYS,
+    CORRELATION_MIN_OVERLAP_DAYS,
     DAILY_LOSS_LIMIT,
     MAX_DAILY_ORDERS,
     MAX_OPEN_POSITIONS,
@@ -23,16 +26,32 @@ from config import (
     PAPER_VALIDATION_QUANTITY_PRECISION,
     PAPER_VALIDATION_REBALANCE_TOLERANCE,
     PAPER_VALIDATION_RECONCILIATION_TOLERANCE,
+    PORTFOLIO_ALLOCATION_MODE,
+    PORTFOLIO_MAX_CORRELATION,
+    PORTFOLIO_MAX_POSITION_PERCENT,
+    PORTFOLIO_MAX_POSITIONS,
+    PORTFOLIO_MAX_SECTOR_PERCENT,
+    PORTFOLIO_MAX_STRATEGY_PERCENT,
+    PORTFOLIO_MIN_CASH_RESERVE_PERCENT,
+    PORTFOLIO_MIN_QUANTUM_SCORE,
+    PORTFOLIO_MIN_RISK_REWARD,
+    PORTFOLIO_UNKNOWN_SECTOR_MAX_PERCENT,
 )
+from correlation_engine import CorrelationPolicy
+from market_data import download_price_data, download_price_data_batch
 from deployment_config import load_deployment_config
 from order_lifecycle import track_order_lifecycle
 from paper_broker import create_paper_broker
 from paper_execution_repository import MonitoringPaperExecutionRepository, PaperValidationRunPayload
 from paper_order_planner import OrderPlannerSettings, plan_paper_orders
 from paper_reconciliation import reconcile_paper_positions
+from portfolio_allocator import AllocationPolicy
+from portfolio_intelligence import run_portfolio_intelligence
 from risk_manager import RiskManager
 from scanner_repository import save_scan_results
 from scanner_runner import SAMPLE_SYMBOLS, _load_paper_positions, _symbol_records_from_list, run_scan, run_shortlist_only
+from sector_manager import SectorPolicy
+from self_improving_repository import SelfImprovingRepository
 from sprint_10_2_execution_validation import _execution_fingerprint
 from stock_universe import AlpacaAssetUniverseError, get_universe_cache_stats, load_stock_universe
 from strategy_profitability import allocate_equal_risk, build_strategy_leaderboard, paused_strategies_from_drawdown
@@ -178,6 +197,139 @@ def _effective_max_position_equity_percent(config: Any) -> float:
     return fallback if fallback > 0 else 10.0
 
 
+def _correlation_history_window(lookback_days: int) -> tuple[str, str]:
+    end_date = _utc_now().date()
+    bounded_lookback = max(int(lookback_days), 30)
+    start_date = end_date - timedelta(days=max(bounded_lookback * 2, 90))
+    return start_date.isoformat(), end_date.isoformat()
+
+
+def _normalize_history_rows(rows: Any, lookback_days: int) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    if isinstance(rows, dict):
+        for date_key, value in rows.items():
+            try:
+                close = float(value)
+            except (TypeError, ValueError):
+                continue
+            if close > 0:
+                normalized.append({"date": str(date_key), "close": close})
+    elif isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            date_key = row.get("date") or row.get("timestamp") or row.get("t")
+            try:
+                close = float(row.get("close") or row.get("price") or row.get("c"))
+            except (TypeError, ValueError):
+                continue
+            if date_key is None or close <= 0:
+                continue
+            normalized.append({"date": str(date_key), "close": close})
+    normalized = sorted(normalized, key=lambda item: str(item.get("date") or ""))
+    return normalized[-max(int(lookback_days), 2) :]
+
+
+def _extract_scan_history(scan_payload: dict[str, Any], lookback_days: int) -> dict[str, list[dict[str, Any]]]:
+    out: dict[str, list[dict[str, Any]]] = {}
+    source = dict(scan_payload.get("price_history_by_symbol") or {})
+    for symbol, rows in source.items():
+        normalized_symbol = str(symbol or "").strip().upper()
+        if not normalized_symbol:
+            continue
+        normalized_rows = _normalize_history_rows(rows, lookback_days)
+        if normalized_rows:
+            out[normalized_symbol] = normalized_rows
+
+    benchmark_rows = _normalize_history_rows(scan_payload.get("benchmark_price_history") or [], lookback_days)
+    if benchmark_rows:
+        out[str(BENCHMARK_SYMBOL).upper()] = benchmark_rows
+    return out
+
+
+def _frame_to_history_rows(frame: Any, lookback_days: int) -> list[dict[str, Any]]:
+    try:
+        close_series = frame.get("close")
+    except Exception:
+        close_series = None
+    if close_series is None:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    try:
+        series = close_series.dropna()
+    except Exception:
+        return []
+    if len(series) < 2:
+        return []
+
+    tail = series.tail(max(int(lookback_days), 2))
+    for idx, value in tail.items():
+        try:
+            close = float(value)
+        except (TypeError, ValueError):
+            continue
+        if close <= 0:
+            continue
+        try:
+            date_key = idx.date().isoformat()
+        except Exception:
+            date_key = str(idx)
+        rows.append({"date": str(date_key), "close": close})
+    return rows
+
+
+def _fetch_missing_history(
+    symbols: list[str],
+    *,
+    lookback_days: int,
+    batch_loader: Callable[[list[str], str, str], dict[str, Any]],
+    single_loader: Callable[[str, str, str], Any],
+) -> tuple[dict[str, list[dict[str, Any]]], list[str], list[str], bool]:
+    if not symbols:
+        return {}, [], [], False
+
+    start_date, end_date = _correlation_history_window(lookback_days)
+    unique_symbols = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
+    history: dict[str, list[dict[str, Any]]] = {}
+    missing: list[str] = []
+    used_batch_loader = False
+
+    frames: dict[str, Any] = {}
+    try:
+        frames = dict(batch_loader(unique_symbols, start_date, end_date) or {})
+        used_batch_loader = True
+    except Exception:
+        frames = {}
+
+    for symbol in unique_symbols:
+        frame = frames.get(symbol)
+        rows = _frame_to_history_rows(frame, lookback_days) if frame is not None else []
+        if rows:
+            history[symbol] = rows
+            continue
+
+        try:
+            fallback_frame = single_loader(symbol, start_date, end_date)
+            rows = _frame_to_history_rows(fallback_frame, lookback_days)
+        except Exception:
+            rows = []
+        if rows:
+            history[symbol] = rows
+        else:
+            missing.append(symbol)
+
+    return history, sorted(history.keys()), sorted(missing), used_batch_loader
+
+
+def _average_overlap_days(correlation_summary: dict[str, Any]) -> float | None:
+    details = list(correlation_summary.get("pair_details") or [])
+    overlaps = [int(item.get("overlap_days") or 0) for item in details if item.get("correlation") is not None]
+    if not overlaps:
+        return None
+    return round(sum(overlaps) / len(overlaps), 6)
+
+
 def _scan_run_payload(run_id: str, scan_payload: dict[str, Any], universe_count: int, completed_at: str) -> dict[str, Any]:
     summary = dict(scan_payload.get("summary") or {})
     return {
@@ -225,6 +377,8 @@ def run_continuous_scan_cycle(
     positions_loader: Callable[[], tuple[list[dict[str, Any]], float, float]] = _load_paper_positions,
     universe_loader: Callable[[], list[dict[str, Any]]] = load_stock_universe,
     symbol_records_builder: Callable[[list[str]], list[dict[str, Any]]] = _symbol_records_from_list,
+    history_batch_loader: Callable[[list[str], str, str], dict[str, Any]] = download_price_data_batch,
+    history_single_loader: Callable[[str, str, str], Any] = download_price_data,
     sample_symbols: list[str] | None = None,
     symbols: list[str] | None = None,
     persist: bool = True,
@@ -476,6 +630,204 @@ def run_continuous_scan_cycle(
 
     shortlist_positions = _positions_list(broker_positions)
     shortlist_payload = dict(shortlist_runner(scan_payload, shortlist_positions, broker_cash, broker_equity) or {})
+    portfolio_intelligence_payload: dict[str, Any] = {}
+    portfolio_started = _utc_now()
+    _emit_telemetry(
+        telemetry_callback,
+        "portfolio_intelligence_start",
+        run_id=cycle_run_id,
+        dry_run=bool(dry_run),
+        candidate_count=int(len(scan_payload.get("ranked_candidates") or [])),
+    )
+    try:
+        strategy_board: list[dict[str, Any]] = []
+        intelligence_repo = SelfImprovingRepository(database_url=database_url or getattr(config, "database_url", None))
+        try:
+            intelligence_payload = intelligence_repo.fetch_dashboard_payload()
+            strategy_board = list(intelligence_payload.get("strategy_leaderboard") or [])
+        finally:
+            intelligence_repo.close()
+
+        history_symbols_requested = sorted(
+            {
+                str(item.get("symbol") or "").strip().upper()
+                for item in list(scan_payload.get("ranked_candidates") or []) + list(shortlist_positions or [])
+                if str(item.get("symbol") or "").strip()
+            }
+        )
+        scan_history = _extract_scan_history(scan_payload, int(CORRELATION_LOOKBACK_DAYS))
+        missing_symbols = [symbol for symbol in history_symbols_requested if symbol not in scan_history]
+
+        fetched_history: dict[str, list[dict[str, Any]]] = {}
+        fetched_usable: list[str] = []
+        fetched_missing: list[str] = []
+        used_batch_loader = False
+        try:
+            fetched_history, fetched_usable, fetched_missing, used_batch_loader = _fetch_missing_history(
+                missing_symbols,
+                lookback_days=int(CORRELATION_LOOKBACK_DAYS),
+                batch_loader=history_batch_loader,
+                single_loader=history_single_loader,
+            )
+        except Exception:
+            fetched_history = {}
+            fetched_usable = []
+            fetched_missing = sorted(missing_symbols)
+            used_batch_loader = False
+
+        correlation_history_by_symbol = dict(scan_history)
+        correlation_history_by_symbol.update(fetched_history)
+
+        history_symbols_usable = sorted(correlation_history_by_symbol.keys())
+        history_symbols_missing = sorted({*fetched_missing, *[sym for sym in history_symbols_requested if sym not in correlation_history_by_symbol]})
+
+        allocation_policy = AllocationPolicy(
+            max_positions=int(PORTFOLIO_MAX_POSITIONS),
+            max_position_percent=float(PORTFOLIO_MAX_POSITION_PERCENT),
+            max_sector_percent=float(PORTFOLIO_MAX_SECTOR_PERCENT),
+            min_cash_reserve_percent=float(PORTFOLIO_MIN_CASH_RESERVE_PERCENT),
+            max_correlation=float(PORTFOLIO_MAX_CORRELATION),
+            max_strategy_percent=float(PORTFOLIO_MAX_STRATEGY_PERCENT),
+            min_quantum_score=float(PORTFOLIO_MIN_QUANTUM_SCORE),
+            min_risk_reward=float(PORTFOLIO_MIN_RISK_REWARD),
+            allocation_mode=str(PORTFOLIO_ALLOCATION_MODE),
+            unknown_sector_max_percent=float(PORTFOLIO_UNKNOWN_SECTOR_MAX_PERCENT),
+            allow_fractional_quantity=bool(PAPER_VALIDATION_ALLOW_FRACTIONAL),
+        )
+        corr_policy = CorrelationPolicy(
+            lookback_days=int(CORRELATION_LOOKBACK_DAYS),
+            min_overlap_days=int(CORRELATION_MIN_OVERLAP_DAYS),
+            max_correlation=float(PORTFOLIO_MAX_CORRELATION),
+            allocation_reduction_factor=float(CORRELATION_ALLOCATION_REDUCTION_FACTOR),
+        )
+        sec_policy = SectorPolicy(
+            max_sector_percent=float(PORTFOLIO_MAX_SECTOR_PERCENT),
+            unknown_sector_max_percent=float(PORTFOLIO_UNKNOWN_SECTOR_MAX_PERCENT),
+        )
+
+        portfolio_intelligence = run_portfolio_intelligence(
+            ranked_candidates=list(scan_payload.get("ranked_candidates") or []),
+            current_positions=shortlist_positions,
+            account_equity=float(broker_equity),
+            available_cash=float(broker_cash),
+            price_history_by_symbol=correlation_history_by_symbol,
+            strategy_leaderboard=strategy_board,
+            allocation_policy=allocation_policy,
+            correlation_policy=corr_policy,
+            sector_policy=sec_policy,
+        )
+        portfolio_intelligence_payload = portfolio_intelligence.to_dict()
+        portfolio_intelligence_payload["correlation_history_metadata"] = {
+            "symbols_requested": history_symbols_requested,
+            "symbols_with_usable_history": history_symbols_usable,
+            "symbols_missing_history": history_symbols_missing,
+            "used_batch_loader_for_missing": bool(used_batch_loader),
+        }
+        shortlist_payload["portfolio_intelligence"] = portfolio_intelligence_payload
+
+        overlap_days_average = _average_overlap_days(dict(portfolio_intelligence_payload.get("correlation_summary") or {}))
+        _emit_telemetry(
+            telemetry_callback,
+            "correlation_analysis_complete",
+            run_id=cycle_run_id,
+            average_correlation=portfolio_intelligence_payload.get("correlation_summary", {}).get("average_correlation"),
+            maximum_correlation=portfolio_intelligence_payload.get("correlation_summary", {}).get("maximum_correlation"),
+            status=portfolio_intelligence_payload.get("correlation_summary", {}).get("status"),
+            symbols_requested=int(len(history_symbols_requested)),
+            symbols_with_usable_history=int(len(history_symbols_usable)),
+            symbols_missing_history=int(len(history_symbols_missing)),
+            symbols_missing_list=history_symbols_missing,
+            average_overlap_days=overlap_days_average,
+            elapsed_time=round(max((_utc_now() - portfolio_started).total_seconds(), 0.0), 4),
+        )
+        _emit_telemetry(
+            telemetry_callback,
+            "sector_analysis_complete",
+            run_id=cycle_run_id,
+            sector_summary=portfolio_intelligence_payload.get("sector_exposures"),
+            elapsed_time=round(max((_utc_now() - portfolio_started).total_seconds(), 0.0), 4),
+        )
+        _emit_telemetry(
+            telemetry_callback,
+            "strategy_allocation_analysis_complete",
+            run_id=cycle_run_id,
+            strategy_summary=portfolio_intelligence_payload.get("strategy_exposures"),
+            elapsed_time=round(max((_utc_now() - portfolio_started).total_seconds(), 0.0), 4),
+        )
+        _emit_telemetry(
+            telemetry_callback,
+            "portfolio_allocation_complete",
+            run_id=cycle_run_id,
+            selected_count=int(portfolio_intelligence_payload.get("selected_count") or 0),
+            rejected_count=int(portfolio_intelligence_payload.get("rejected_count") or 0),
+            cash_reserve=float(portfolio_intelligence_payload.get("cash_reserve") or 0.0),
+            exposure=float(portfolio_intelligence_payload.get("total_proposed_exposure") or 0.0),
+            warnings=list(portfolio_intelligence_payload.get("top_warnings") or []),
+            elapsed_time=round(max((_utc_now() - portfolio_started).total_seconds(), 0.0), 4),
+        )
+
+        if persist:
+            persistence_repo = SelfImprovingRepository(database_url=database_url or getattr(config, "database_url", None))
+            try:
+                persistence_repo.save_portfolio_intelligence_result(
+                    allocation_run_id=f"portfolio-intel:{cycle_run_id}",
+                    source_scan_run_id=cycle_run_id,
+                    account_equity=float(broker_equity),
+                    available_cash=float(broker_cash),
+                    investable_capital=max(float(broker_cash) - (float(broker_equity) * float(PORTFOLIO_MIN_CASH_RESERVE_PERCENT) / 100.0), 0.0),
+                    result=portfolio_intelligence_payload,
+                    configuration={
+                        "policy_version": "portfolio_intelligence_v1",
+                        "allocation_mode": str(PORTFOLIO_ALLOCATION_MODE),
+                        "review_only": True,
+                    },
+                )
+            finally:
+                persistence_repo.close()
+
+        if dry_run:
+            _emit_telemetry(
+                telemetry_callback,
+                "portfolio_recommendation_generated",
+                run_id=cycle_run_id,
+                selected_count=int(portfolio_intelligence_payload.get("selected_count") or 0),
+                rejected_count=int(portfolio_intelligence_payload.get("rejected_count") or 0),
+                cash_reserve=float(portfolio_intelligence_payload.get("cash_reserve") or 0.0),
+                exposure=float(portfolio_intelligence_payload.get("total_proposed_exposure") or 0.0),
+                sector_summary=portfolio_intelligence_payload.get("sector_exposures"),
+                strategy_summary=portfolio_intelligence_payload.get("strategy_exposures"),
+                correlation_summary=portfolio_intelligence_payload.get("correlation_summary"),
+                warnings=list(portfolio_intelligence_payload.get("top_warnings") or []),
+                orders_submitted=0,
+                elapsed_time=round(max((_utc_now() - portfolio_started).total_seconds(), 0.0), 4),
+            )
+            _emit_notification(
+                notification_callback,
+                event_type="portfolio_recommendation_generated",
+                title="Portfolio Recommendation Generated",
+                message="Final portfolio recommendation is ready for human review.",
+                severity="INFO",
+                metadata={
+                    "run_id": cycle_run_id,
+                    "dry_run": True,
+                    "status": "portfolio_recommendation_generated",
+                    "orders_attempted": 0,
+                    "orders_submitted": 0,
+                    "proposed_notional": float(portfolio_intelligence_payload.get("total_proposed_exposure") or 0.0),
+                },
+                deduplication_key=f"portfolio_recommendation_generated:{cycle_run_id}",
+            )
+
+    except Exception as exc:
+        _emit_telemetry(
+            telemetry_callback,
+            "portfolio_intelligence_failed",
+            run_id=cycle_run_id,
+            error_type=type(exc).__name__,
+            safe_error_message=str(exc),
+            elapsed_time=round(max((_utc_now() - portfolio_started).total_seconds(), 0.0), 4),
+        )
+
     selected_candidates = list(shortlist_payload.get("selected") or [])
     selected_candidate = dict(selected_candidates[0]) if selected_candidates else {}
     completed_at = _utc_iso()
@@ -491,6 +843,8 @@ def run_continuous_scan_cycle(
         )
 
     scan_result = {"scan_payload": scan_payload, "scan_run": scan_run_payload}
+    if portfolio_intelligence_payload:
+        scan_result["portfolio_intelligence"] = portfolio_intelligence_payload
     if not selected_candidate:
         if dry_run:
             _emit_telemetry(

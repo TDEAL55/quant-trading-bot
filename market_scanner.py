@@ -110,6 +110,25 @@ def _coarse_metrics(symbol: str, history: pd.DataFrame, benchmark_history: pd.Da
     }
 
 
+def _frame_to_close_rows(history: pd.DataFrame, *, max_points: int = 260) -> list[dict[str, Any]]:
+    if history is None or history.empty:
+        return []
+
+    close_series = pd.to_numeric(history.get("close", pd.Series(dtype=float)), errors="coerce").dropna()
+    if close_series.empty:
+        return []
+
+    trimmed = close_series.tail(max(int(max_points), 2))
+    rows: list[dict[str, Any]] = []
+    for idx, value in trimmed.items():
+        try:
+            date_key = pd.Timestamp(idx).date().isoformat()
+        except Exception:
+            date_key = str(idx)
+        rows.append({"date": date_key, "close": float(value)})
+    return rows
+
+
 def _build_error_result(symbol_record: dict[str, Any], message: str) -> dict[str, Any]:
     symbol = normalize_symbol(symbol_record.get("symbol", ""))
     return {
@@ -652,6 +671,7 @@ def scan_universe(
     stage_counts: dict[str, dict[str, int]] = {}
     filtered_count_by_reason: dict[str, int] = {}
     scan_results: list[dict[str, Any]] = []
+    price_history_by_symbol: dict[str, list[dict[str, Any]]] = {}
     timed_out_symbols: list[str] = []
     slow_symbols: list[tuple[float, str, str]] = []
     retries = 0
@@ -775,6 +795,10 @@ def scan_universe(
                     _count_reasons(filtered_count_by_reason, reasons)
                     scan_results.append(_build_rejected_result(item, reasons))
             else:
+                if symbol not in price_history_by_symbol:
+                    rows = _frame_to_close_rows(history)
+                    if rows:
+                        price_history_by_symbol[symbol] = rows
                 lightweight_filter = validate_symbol_data(
                     symbol,
                     history,
@@ -902,6 +926,9 @@ def scan_universe(
                 else:
                     result = _build_error_result(item, "no full-history data returned")
             else:
+                rows = _frame_to_close_rows(history)
+                if rows:
+                    price_history_by_symbol[symbol] = rows
                 result, retry_count = _scan_with_retry(
                     symbol_record=item,
                     benchmark_history=benchmark_history,
@@ -1053,8 +1080,12 @@ def scan_universe(
             }
         )
 
+    benchmark_price_history = _frame_to_close_rows(benchmark_history)
+
     return {
         "scan_results": scan_results,
         "ranked_candidates": ranked,
         "summary": summary,
+        "price_history_by_symbol": price_history_by_symbol,
+        "benchmark_price_history": benchmark_price_history,
     }

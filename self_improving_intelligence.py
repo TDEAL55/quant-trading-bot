@@ -763,6 +763,79 @@ def recommend_position_size(
     }
 
 
+def recommend_strategy_allocation_actions(
+    leaderboard: list[dict[str, Any]],
+    *,
+    min_samples: int = 30,
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    for row in sorted(list(leaderboard or []), key=lambda item: str(item.get("strategy_id") or "")):
+        strategy_id = str(row.get("strategy_id") or "unknown")
+        strategy_version = str(row.get("strategy_version") or "unknown")
+        sample = _safe_int(row.get("completed_trade_count"), 0)
+        win_rate = _safe_float(row.get("win_rate"), 0.0)
+        expectancy = _safe_float(row.get("expectancy"), 0.0)
+        profit_factor = _safe_float(row.get("profit_factor"), 0.0)
+        sharpe = _safe_float(row.get("sharpe_ratio"), 0.0)
+        sortino = _safe_float(row.get("sortino_ratio"), 0.0)
+        drawdown = _safe_float(row.get("maximum_drawdown"), 0.0)
+        recent20 = dict(row.get("recent_20") or {})
+        recent60 = dict(row.get("recent_60") or {})
+        recent20_expectancy = _safe_float(recent20.get("expectancy"), expectancy)
+        recent60_expectancy = _safe_float(recent60.get("expectancy"), expectancy)
+
+        action = "MAINTAIN"
+        reasons: list[str] = []
+        multiplier = 1.0
+
+        if sample < int(min_samples):
+            action = "INSUFFICIENT_SAMPLE"
+            reasons.append("fewer_than_minimum_completed_trades")
+            multiplier = 1.0
+        elif drawdown >= 0.30:
+            action = "PAUSE_RECOMMENDED"
+            reasons.append("severe_drawdown")
+            multiplier = 0.0
+        elif recent20_expectancy < 0 or recent60_expectancy < 0 or profit_factor < 1.0:
+            action = "REDUCE_RECOMMENDED"
+            reasons.append("weak_recent_performance")
+            multiplier = 0.75
+        elif expectancy > 0 and win_rate >= 0.55 and profit_factor >= 1.2 and sharpe > 0.6 and sortino > 0.4:
+            action = "PROMOTE_RECOMMENDED"
+            reasons.append("strong_historical_and_recent_evidence")
+            multiplier = 1.20
+        else:
+            action = "MAINTAIN"
+            reasons.append("mixed_or_neutral_evidence")
+            multiplier = 1.0
+
+        if sample < int(min_samples) and multiplier > 1.0:
+            multiplier = 1.0
+
+        actions.append(
+            {
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+                "completed_trade_count": sample,
+                "win_rate": win_rate,
+                "expectancy": expectancy,
+                "profit_factor": profit_factor,
+                "sharpe_ratio": sharpe,
+                "sortino_ratio": sortino,
+                "maximum_drawdown": drawdown,
+                "recent20_expectancy": recent20_expectancy,
+                "recent60_expectancy": recent60_expectancy,
+                "action": action,
+                "allocation_multiplier": multiplier,
+                "review_required": True,
+                "automation_allowed": False,
+                "reasons": reasons,
+            }
+        )
+
+    return actions
+
+
 def build_daily_report(
     *,
     market_date: str,
@@ -825,6 +898,21 @@ def build_weekly_report(
     walk_forward_results: dict[str, Any],
     recommended_changes: list[str],
     unresolved_data_quality_issues: list[str],
+    account_return: Any = "N/A",
+    portfolio_return: Any = "N/A",
+    benchmark_return: Any = "N/A",
+    proposed_vs_actual_allocations: Any = "N/A",
+    sector_exposure: Any = "N/A",
+    strategy_exposure: Any = "N/A",
+    average_correlation: Any = "N/A",
+    maximum_correlation: Any = "N/A",
+    cash_reserve: Any = "N/A",
+    concentration_warnings: Any = "N/A",
+    strongest_strategy: Any = "N/A",
+    weakest_strategy: Any = "N/A",
+    highest_risk_position: Any = "N/A",
+    diversification_score: Any = "N/A",
+    portfolio_risk_score: Any = "N/A",
 ) -> dict[str, Any]:
     return {
         "report_type": "weekly",
@@ -839,6 +927,22 @@ def build_weekly_report(
         "walk_forward_validation": dict(walk_forward_results),
         "changes_recommended_for_review": list(recommended_changes),
         "unresolved_data_quality_issues": list(unresolved_data_quality_issues),
+        "account_return": account_return,
+        "portfolio_return": portfolio_return,
+        "benchmark_return": benchmark_return,
+        "proposed_vs_actual_allocations": proposed_vs_actual_allocations,
+        "sector_exposure": sector_exposure,
+        "strategy_exposure": strategy_exposure,
+        "average_correlation": average_correlation,
+        "maximum_correlation": maximum_correlation,
+        "cash_reserve": cash_reserve,
+        "concentration_warnings": concentration_warnings,
+        "strongest_strategy": strongest_strategy,
+        "weakest_strategy": weakest_strategy,
+        "highest_risk_position": highest_risk_position,
+        "diversification_score": diversification_score,
+        "portfolio_risk_score": portfolio_risk_score,
+        "recommendation_only": True,
         "created_at": _utc_iso(),
     }
 

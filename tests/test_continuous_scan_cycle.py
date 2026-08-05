@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import pandas as pd
 import pytest
 
 from continuous_scan_cycle import ContinuousScanCycleResult, run_continuous_scan_cycle
@@ -470,3 +471,202 @@ def test_universe_api_failure_does_not_become_no_candidates():
     assert "alpaca_asset_universe_fetch_failed" in names
     assert "alpaca_asset_universe_empty" in names
     assert "scan_cycle_complete" not in names
+
+
+def test_portfolio_intelligence_integration_is_review_only_and_dry_run_safe(tmp_path):
+    broker = _Broker()
+    repo = _Repo()
+    events = []
+
+    def _telemetry(event, payload):
+        events.append((event, dict(payload)))
+
+    result = run_continuous_scan_cycle(
+        database_url=f"sqlite:///{tmp_path / 'scan.db'}",
+        config_loader=_config_loader,
+        now_provider=lambda: datetime(2026, 7, 22, 10, 15, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=lambda _u: _scan_payload(),
+        shortlist_runner=lambda *_args, **_kwargs: {
+            "selected": [
+                {
+                    "rank": 1,
+                    "symbol": "AAA",
+                    "score": 82.0,
+                    "confidence": 76.0,
+                    "suggested_paper_notional": 1000.0,
+                }
+            ],
+            "rejected": [],
+            "portfolio_warnings": [],
+            "selection_summary": {"selected_count": 1},
+        },
+        scan_persistor=lambda **kwargs: {"storage": "database", "run_id": kwargs["run_payload"]["run_id"]},
+        execution_repo_factory=lambda **kwargs: repo,
+        positions_loader=_positions_loader,
+        universe_loader=_universe_loader,
+        persist=True,
+        dry_run=True,
+        telemetry_callback=_telemetry,
+    )
+
+    assert result.execution_status == "completed"
+    assert broker.submissions == []
+    assert "portfolio_intelligence" in result.scan
+    assert "portfolio_intelligence" in result.selection
+    assert result.selection["portfolio_intelligence"]["review_required"] is True
+
+    names = [name for name, _ in events]
+    assert "portfolio_intelligence_start" in names
+    assert "correlation_analysis_complete" in names
+    assert "sector_analysis_complete" in names
+    assert "strategy_allocation_analysis_complete" in names
+    assert "portfolio_allocation_complete" in names
+    assert "portfolio_recommendation_generated" in names
+
+
+def _history_rows(base_close: float = 100.0, days: int = 80):
+    index = pd.date_range("2026-01-01", periods=days, freq="D")
+    rows = []
+    for offset, ts in enumerate(index):
+        rows.append({"date": ts.date().isoformat(), "close": float(base_close + offset)})
+    return rows
+
+
+def _history_frame(base_close: float = 100.0, days: int = 80):
+    index = pd.date_range("2026-01-01", periods=days, freq="D")
+    values = [float(base_close + offset) for offset in range(days)]
+    return pd.DataFrame({"close": values}, index=index)
+
+
+def test_portfolio_intelligence_reuses_scan_history_without_duplicate_fetch(tmp_path):
+    broker = _Broker()
+    batch_calls = []
+
+    def _batch_loader(symbols, start_date, end_date):
+        batch_calls.append((list(symbols), start_date, end_date))
+        raise AssertionError("history batch loader should not be called when scan history is complete")
+
+    result = run_continuous_scan_cycle(
+        database_url=f"sqlite:///{tmp_path / 'scan-cache.db'}",
+        config_loader=_config_loader,
+        now_provider=lambda: datetime(2026, 7, 22, 10, 20, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=lambda _u: {
+            **_scan_payload(),
+            "price_history_by_symbol": {"AAA": _history_rows(100.0)},
+            "benchmark_price_history": _history_rows(420.0),
+        },
+        shortlist_runner=lambda *_args, **_kwargs: {"selected": [{"rank": 1, "symbol": "AAA", "score": 82.0}], "rejected": [], "portfolio_warnings": [], "selection_summary": {"selected_count": 1}},
+        scan_persistor=lambda **kwargs: {"storage": "database", "run_id": kwargs["run_payload"]["run_id"]},
+        execution_repo_factory=lambda **kwargs: _Repo(),
+        positions_loader=_positions_loader,
+        universe_loader=_universe_loader,
+        history_batch_loader=_batch_loader,
+        history_single_loader=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("single loader should not be called")),
+        persist=True,
+        dry_run=True,
+    )
+
+    assert result.execution_status == "completed"
+    assert batch_calls == []
+    history_meta = result.selection["portfolio_intelligence"]["correlation_history_metadata"]
+    assert history_meta["symbols_requested"] == ["AAA"]
+    assert history_meta["symbols_missing_history"] == []
+
+
+def test_portfolio_intelligence_fetches_missing_history_for_current_positions(tmp_path):
+    broker = _Broker()
+    broker._positions = {"BBB": {"quantity": 3.0, "avg_price": 98.0}}
+    batch_requests = []
+
+    def _batch_loader(symbols, start_date, end_date):
+        batch_requests.append((sorted(symbols), start_date, end_date))
+        return {"BBB": _history_frame(90.0)}
+
+    result = run_continuous_scan_cycle(
+        database_url=f"sqlite:///{tmp_path / 'scan-missing.db'}",
+        config_loader=_config_loader,
+        now_provider=lambda: datetime(2026, 7, 22, 10, 25, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=lambda _u: {**_scan_payload(), "price_history_by_symbol": {"AAA": _history_rows(100.0)}},
+        shortlist_runner=lambda *_args, **_kwargs: {"selected": [{"rank": 1, "symbol": "AAA", "score": 82.0}], "rejected": [], "portfolio_warnings": [], "selection_summary": {"selected_count": 1}},
+        scan_persistor=lambda **kwargs: {"storage": "database", "run_id": kwargs["run_payload"]["run_id"]},
+        execution_repo_factory=lambda **kwargs: _Repo(),
+        positions_loader=_positions_loader,
+        universe_loader=_universe_loader,
+        history_batch_loader=_batch_loader,
+        history_single_loader=lambda *_args, **_kwargs: pd.DataFrame(),
+        persist=True,
+        dry_run=True,
+    )
+
+    assert result.execution_status == "completed"
+    assert batch_requests
+    assert "BBB" in batch_requests[0][0]
+    history_meta = result.selection["portfolio_intelligence"]["correlation_history_metadata"]
+    assert sorted(history_meta["symbols_requested"]) == ["AAA", "BBB"]
+    assert "BBB" in history_meta["symbols_with_usable_history"]
+
+
+def test_portfolio_intelligence_missing_history_stays_safe_and_reports_insufficient_data(tmp_path):
+    events = []
+
+    def _telemetry(event, payload):
+        events.append((event, dict(payload)))
+
+    result = run_continuous_scan_cycle(
+        database_url=f"sqlite:///{tmp_path / 'scan-insufficient.db'}",
+        config_loader=_config_loader,
+        now_provider=lambda: datetime(2026, 7, 22, 10, 30, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: _Broker(),
+        scan_runner=lambda _u: _scan_payload(),
+        shortlist_runner=lambda *_args, **_kwargs: {"selected": [{"rank": 1, "symbol": "AAA", "score": 82.0}], "rejected": [], "portfolio_warnings": [], "selection_summary": {"selected_count": 1}},
+        scan_persistor=lambda **kwargs: {"storage": "database", "run_id": kwargs["run_payload"]["run_id"]},
+        execution_repo_factory=lambda **kwargs: _Repo(),
+        positions_loader=_positions_loader,
+        universe_loader=_universe_loader,
+        history_batch_loader=lambda *_args, **_kwargs: {},
+        history_single_loader=lambda *_args, **_kwargs: pd.DataFrame(),
+        persist=True,
+        dry_run=True,
+        telemetry_callback=_telemetry,
+    )
+
+    assert result.execution_status == "completed"
+    corr_status = result.selection["portfolio_intelligence"]["correlation_summary"]["status"]
+    assert corr_status == "INSUFFICIENT_DATA"
+    corr_event = [payload for name, payload in events if name == "correlation_analysis_complete"]
+    assert corr_event
+    assert corr_event[-1]["status"] == "INSUFFICIENT_DATA"
+    assert int(corr_event[-1]["symbols_missing_history"]) >= 1
+
+
+def test_portfolio_intelligence_history_fetch_errors_do_not_crash_scan_cycle(tmp_path):
+    events = []
+
+    def _telemetry(event, payload):
+        events.append((event, dict(payload)))
+
+    result = run_continuous_scan_cycle(
+        database_url=f"sqlite:///{tmp_path / 'scan-history-error.db'}",
+        config_loader=_config_loader,
+        now_provider=lambda: datetime(2026, 7, 22, 10, 35, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: _Broker(),
+        scan_runner=lambda _u: _scan_payload(),
+        shortlist_runner=lambda *_args, **_kwargs: {"selected": [{"rank": 1, "symbol": "AAA", "score": 82.0}], "rejected": [], "portfolio_warnings": [], "selection_summary": {"selected_count": 1}},
+        scan_persistor=lambda **kwargs: {"storage": "database", "run_id": kwargs["run_payload"]["run_id"]},
+        execution_repo_factory=lambda **kwargs: _Repo(),
+        positions_loader=_positions_loader,
+        universe_loader=_universe_loader,
+        history_batch_loader=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("batch unavailable")),
+        history_single_loader=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("single unavailable")),
+        persist=True,
+        dry_run=True,
+        telemetry_callback=_telemetry,
+    )
+
+    assert result.execution_status == "completed"
+    names = [name for name, _ in events]
+    assert "correlation_analysis_complete" in names
+    assert "portfolio_intelligence_failed" not in names

@@ -504,6 +504,199 @@ class SelfImprovingRepository:
         )
         return report_id
 
+    def save_portfolio_intelligence_result(
+        self,
+        *,
+        allocation_run_id: str,
+        source_scan_run_id: str,
+        account_equity: float,
+        available_cash: float,
+        investable_capital: float,
+        result: dict[str, Any],
+        configuration: dict[str, Any] | None = None,
+    ) -> str:
+        if not self.db.enabled:
+            return ""
+        self.db.ensure_schema()
+
+        run_id = str(allocation_run_id or f"portfolio-allocation:{_utc_iso()}")
+        generated_at = str(result.get("generated_at") or _utc_iso())
+        selected_count = int(result.get("selected_count") or len((result.get("allocation") or {}).get("proposed_allocations") or []))
+        rejected_count = int(result.get("rejected_count") or len((result.get("allocation") or {}).get("rejected_allocations") or []))
+        review_required = 1 if bool(result.get("review_required", True)) else 0
+
+        self.db.execute(
+            """
+            INSERT INTO portfolio_allocation_runs (
+                allocation_run_id, source_scan_run_id, generated_at,
+                account_equity, available_cash, investable_capital,
+                proposed_exposure, cash_reserve, selected_count, rejected_count,
+                portfolio_risk_score, diversification_score, policy_version,
+                review_required, configuration_json, summary_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(allocation_run_id) DO UPDATE SET
+                source_scan_run_id = excluded.source_scan_run_id,
+                generated_at = excluded.generated_at,
+                account_equity = excluded.account_equity,
+                available_cash = excluded.available_cash,
+                investable_capital = excluded.investable_capital,
+                proposed_exposure = excluded.proposed_exposure,
+                cash_reserve = excluded.cash_reserve,
+                selected_count = excluded.selected_count,
+                rejected_count = excluded.rejected_count,
+                portfolio_risk_score = excluded.portfolio_risk_score,
+                diversification_score = excluded.diversification_score,
+                policy_version = excluded.policy_version,
+                review_required = excluded.review_required,
+                configuration_json = excluded.configuration_json,
+                summary_json = excluded.summary_json
+            """,
+            (
+                run_id,
+                str(source_scan_run_id or ""),
+                generated_at,
+                float(account_equity),
+                float(available_cash),
+                float(investable_capital),
+                float(result.get("total_proposed_exposure") or 0.0),
+                float(result.get("cash_reserve") or 0.0),
+                selected_count,
+                rejected_count,
+                float(result.get("portfolio_risk_score") or 0.0),
+                float(result.get("diversification_score") or 0.0),
+                str((configuration or {}).get("policy_version") or "portfolio_intelligence_v1"),
+                review_required,
+                _stable_json(configuration or {}),
+                _stable_json(result),
+            ),
+        )
+
+        self.db.execute("DELETE FROM portfolio_allocation_recommendations WHERE allocation_run_id = ?", (run_id,))
+        self.db.execute("DELETE FROM portfolio_exposure_snapshots WHERE allocation_run_id = ?", (run_id,))
+
+        allocation = dict(result.get("allocation") or {})
+        all_rows = list(allocation.get("proposed_allocations") or []) + list(allocation.get("rejected_allocations") or [])
+        for idx, row in enumerate(all_rows, start=1):
+            rec_id = f"{run_id}:rec:{idx:04d}:{str(row.get('symbol') or 'UNKNOWN')}"
+            self.db.execute(
+                """
+                INSERT INTO portfolio_allocation_recommendations (
+                    recommendation_id, allocation_run_id, symbol, rank,
+                    strategy_id, strategy_version, quantum_score, strategy_score,
+                    target_allocation_pct, target_notional, proposed_quantity,
+                    sector, confidence_tier, average_correlation, maximum_correlation,
+                    risk_reward_ratio, selected, rejection_reasons_json,
+                    warnings_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    rec_id,
+                    run_id,
+                    str(row.get("symbol") or ""),
+                    int(row.get("rank") or 0),
+                    str(row.get("strategy_id") or ""),
+                    str(row.get("strategy_version") or ""),
+                    row.get("quantum_score"),
+                    row.get("strategy_score"),
+                    float(row.get("target_allocation_percent") or 0.0),
+                    float(row.get("target_notional") or 0.0),
+                    float(row.get("proposed_quantity") or 0.0),
+                    str(row.get("sector") or "Unknown"),
+                    str(row.get("confidence_tier") or "UNKNOWN"),
+                    row.get("average_correlation"),
+                    row.get("maximum_correlation"),
+                    row.get("risk_reward_ratio"),
+                    1 if bool(row.get("selected")) else 0,
+                    _stable_json(row.get("rejection_reasons") or []),
+                    _stable_json(row.get("warnings") or []),
+                    generated_at,
+                ),
+            )
+
+        exposure_rows = list(result.get("sector_exposures") or []) + list(result.get("strategy_exposures") or [])
+        for idx, row in enumerate(exposure_rows, start=1):
+            exposure_type = "sector" if "sector" in row else "strategy"
+            key = row.get("sector") if exposure_type == "sector" else row.get("strategy_id")
+            self.db.execute(
+                """
+                INSERT INTO portfolio_exposure_snapshots (
+                    snapshot_id, allocation_run_id, exposure_type, exposure_key,
+                    current_exposure_pct, proposed_exposure_pct,
+                    maximum_allowed_pct, policy_passed, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"{run_id}:exp:{idx:04d}",
+                    run_id,
+                    exposure_type,
+                    str(key or "unknown"),
+                    float(row.get("current_exposure_pct") or 0.0),
+                    float(row.get("proposed_exposure_pct") or 0.0),
+                    float(row.get("maximum_allowed_pct") or 0.0),
+                    1 if bool(row.get("policy_passed", True)) else 0,
+                    generated_at,
+                ),
+            )
+
+        self.db.execute(
+            """
+            INSERT INTO portfolio_intelligence_reports (
+                report_id, allocation_run_id, report_type, payload_json,
+                review_required, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(report_id) DO UPDATE SET
+                allocation_run_id = excluded.allocation_run_id,
+                report_type = excluded.report_type,
+                payload_json = excluded.payload_json,
+                review_required = excluded.review_required,
+                created_at = excluded.created_at
+            """,
+            (
+                f"{run_id}:summary",
+                run_id,
+                "portfolio_intelligence_summary",
+                _stable_json(result),
+                review_required,
+                generated_at,
+            ),
+        )
+        return run_id
+
+    def fetch_latest_portfolio_intelligence(self) -> dict[str, Any]:
+        if not self.db.enabled:
+            return {"run": {}, "recommendations": [], "exposures": [], "reports": []}
+        self.db.ensure_schema()
+        run = self.db.query_one("SELECT * FROM portfolio_allocation_runs ORDER BY generated_at DESC LIMIT 1") or {}
+        if not run:
+            return {"run": {}, "recommendations": [], "exposures": [], "reports": []}
+
+        run_id = str(run.get("allocation_run_id") or "")
+        recommendations = self.db.query_all(
+            "SELECT * FROM portfolio_allocation_recommendations WHERE allocation_run_id = ? ORDER BY selected DESC, rank ASC, symbol ASC",
+            (run_id,),
+        )
+        for row in recommendations:
+            row["rejection_reasons"] = _json_load(row.get("rejection_reasons_json"), [])
+            row["warnings"] = _json_load(row.get("warnings_json"), [])
+
+        exposures = self.db.query_all(
+            "SELECT * FROM portfolio_exposure_snapshots WHERE allocation_run_id = ? ORDER BY exposure_type ASC, proposed_exposure_pct DESC",
+            (run_id,),
+        )
+        reports = self.db.query_all(
+            "SELECT * FROM portfolio_intelligence_reports WHERE allocation_run_id = ? ORDER BY created_at DESC",
+            (run_id,),
+        )
+        for row in reports:
+            row["payload"] = _json_load(row.get("payload_json"), {})
+
+        return {
+            "run": run,
+            "recommendations": recommendations,
+            "exposures": exposures,
+            "reports": reports,
+        }
+
     def save_model_version(self, payload: dict[str, Any]) -> str:
         if not self.db.enabled:
             return ""
@@ -542,6 +735,12 @@ class SelfImprovingRepository:
                 "weight_change_recommendations": [],
                 "daily_report": {},
                 "weekly_report": {},
+                "portfolio_intelligence": {
+                    "run": {},
+                    "recommendations": [],
+                    "exposures": [],
+                    "reports": [],
+                },
             }
 
         self.db.ensure_schema()
@@ -612,6 +811,8 @@ class SelfImprovingRepository:
             if not weekly_report and str(row.get("report_type") or "") == "weekly":
                 weekly_report = payload
 
+        portfolio_payload = self.fetch_latest_portfolio_intelligence()
+
         return {
             "db_connected": True,
             "trade_memory": trade_memory,
@@ -625,6 +826,7 @@ class SelfImprovingRepository:
             "weight_change_recommendations": weight_rows,
             "daily_report": daily_report,
             "weekly_report": weekly_report,
+            "portfolio_intelligence": portfolio_payload,
         }
 
     def close(self) -> None:

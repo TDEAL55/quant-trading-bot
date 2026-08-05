@@ -3342,6 +3342,7 @@ def render_factor_intelligence_page():
 
 def render_self_improving_page():
     st.markdown("### SELF-IMPROVING INTELLIGENCE — REVIEW ONLY")
+    st.warning("PAPER DRY RUN — REVIEW ONLY. No orders are submitted from this dashboard.")
     payload = st.session_state.get("dashboard_research_payload") or {}
     intel = payload.get("self_improving") or {
         "db_connected": False,
@@ -3355,6 +3356,12 @@ def render_self_improving_page():
         "weight_change_recommendations": [],
         "daily_report": {},
         "weekly_report": {},
+        "portfolio_intelligence": {
+            "run": {},
+            "recommendations": [],
+            "exposures": [],
+            "reports": [],
+        },
     }
 
     top = st.columns(6)
@@ -3366,6 +3373,103 @@ def render_self_improving_page():
     _metric_card(top[5], "Allocation Recos", len(intel.get("allocation_recommendations") or []), "healthy")
 
     st.info("Recommendation-only mode. No automatic strategy-state, weight, or allocation changes are executed from this view.")
+
+    portfolio_payload = dict(intel.get("portfolio_intelligence") or {})
+    allocation_run = dict(portfolio_payload.get("run") or {})
+    portfolio_recommendations = list(portfolio_payload.get("recommendations") or [])
+    portfolio_exposures = list(portfolio_payload.get("exposures") or [])
+    portfolio_reports = list(portfolio_payload.get("reports") or [])
+    summary_payload = {}
+    if portfolio_reports:
+        summary_payload = dict(portfolio_reports[0].get("payload") or {})
+
+    selected_rows = [row for row in portfolio_recommendations if bool(row.get("selected"))]
+    rejected_rows = [row for row in portfolio_recommendations if not bool(row.get("selected"))]
+    sector_rows = [row for row in portfolio_exposures if str(row.get("exposure_type") or "") == "sector"]
+    strategy_rows = [row for row in portfolio_exposures if str(row.get("exposure_type") or "") == "strategy"]
+
+    st.markdown("#### Proposed Portfolio")
+    if selected_rows:
+        st.dataframe(selected_rows)
+    else:
+        st.info("No proposed allocations available yet.")
+
+    st.markdown("#### Current vs Proposed Allocation")
+    if selected_rows or rejected_rows:
+        compare_rows = []
+        for row in selected_rows + rejected_rows:
+            compare_rows.append(
+                {
+                    "symbol": row.get("symbol"),
+                    "selected": bool(row.get("selected")),
+                    "target_allocation_pct": row.get("target_allocation_pct"),
+                    "target_notional": row.get("target_notional"),
+                    "proposed_quantity": row.get("proposed_quantity"),
+                    "confidence_tier": row.get("confidence_tier"),
+                    "rejection_reasons": row.get("rejection_reasons"),
+                }
+            )
+        st.dataframe(compare_rows)
+    else:
+        st.info("No allocation comparison data available.")
+
+    st.markdown("#### Cash Reserve")
+    _metric_card(
+        st.columns(1)[0],
+        "Cash Reserve",
+        format_currency(allocation_run.get("cash_reserve") if allocation_run else summary_payload.get("cash_reserve")),
+        "neutral",
+    )
+
+    st.markdown("#### Sector Exposure")
+    if sector_rows:
+        st.dataframe(sector_rows)
+    else:
+        st.info("No sector exposure snapshot available.")
+
+    st.markdown("#### Strategy Exposure")
+    if strategy_rows:
+        st.dataframe(strategy_rows)
+    else:
+        st.info("No strategy exposure snapshot available.")
+
+    st.markdown("#### Correlation Matrix")
+    correlation_summary = dict(summary_payload.get("correlation_summary") or {})
+    pair_details = list(correlation_summary.get("pair_details") or [])
+    if pair_details:
+        st.dataframe(pair_details)
+    else:
+        st.info("Correlation matrix unavailable or insufficient historical overlap.")
+
+    st.markdown("#### Diversification Score")
+    _metric_card(
+        st.columns(1)[0],
+        "Diversification",
+        f"{_as_float(allocation_run.get('diversification_score') if allocation_run else summary_payload.get('diversification_score'), 0.0):.2f}",
+        "healthy",
+    )
+
+    st.markdown("#### Portfolio Risk Score")
+    _metric_card(
+        st.columns(1)[0],
+        "Portfolio Risk",
+        f"{_as_float(allocation_run.get('portfolio_risk_score') if allocation_run else summary_payload.get('portfolio_risk_score'), 0.0):.2f}",
+        "warning",
+    )
+
+    st.markdown("#### Allocation Warnings")
+    warnings = list(summary_payload.get("top_warnings") or [])
+    if warnings:
+        st.dataframe([{"warning": item} for item in warnings])
+    else:
+        st.info("No allocation warnings recorded.")
+
+    st.markdown("#### Review-Only Recommendations")
+    recos = list(summary_payload.get("recommendations") or [])
+    if recos:
+        st.dataframe([{"recommendation": item} for item in recos])
+    else:
+        st.info("No review recommendations available.")
 
     st.markdown("#### Strategy Leaderboard")
     st.dataframe(intel.get("strategy_leaderboard") or [])

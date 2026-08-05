@@ -7,6 +7,7 @@ from self_improving_intelligence import (
     build_factor_effectiveness,
     build_strategy_leaderboard,
     build_trade_memory_record,
+    recommend_strategy_allocation_actions,
     classify_market_regime,
     recommend_position_size,
     recommend_strategy_states,
@@ -203,3 +204,66 @@ def test_recommendation_policy_is_review_only():
     assert policy["live_blocked"] is True
     assert policy["recommendation_review_only_default"] is True
     assert policy["no_auto_weight_change"] is True
+
+
+def test_strategy_allocation_actions_cover_key_paths():
+    rows = [
+        {
+            "strategy_id": "few",
+            "strategy_version": "1",
+            "completed_trade_count": 12,
+            "win_rate": 0.8,
+            "expectancy": 1.2,
+            "profit_factor": 1.5,
+            "sharpe_ratio": 1.0,
+            "sortino_ratio": 1.0,
+            "maximum_drawdown": 0.1,
+            "recent_20": {"expectancy": 1.0},
+            "recent_60": {"expectancy": 1.0},
+        },
+        {
+            "strategy_id": "strong",
+            "strategy_version": "1",
+            "completed_trade_count": 60,
+            "win_rate": 0.6,
+            "expectancy": 1.4,
+            "profit_factor": 1.6,
+            "sharpe_ratio": 0.9,
+            "sortino_ratio": 0.8,
+            "maximum_drawdown": 0.1,
+            "recent_20": {"expectancy": 1.3},
+            "recent_60": {"expectancy": 1.2},
+        },
+        {
+            "strategy_id": "weak",
+            "strategy_version": "1",
+            "completed_trade_count": 60,
+            "win_rate": 0.4,
+            "expectancy": -0.2,
+            "profit_factor": 0.9,
+            "sharpe_ratio": -0.2,
+            "sortino_ratio": -0.1,
+            "maximum_drawdown": 0.15,
+            "recent_20": {"expectancy": -0.3},
+            "recent_60": {"expectancy": -0.1},
+        },
+        {
+            "strategy_id": "drawdown",
+            "strategy_version": "1",
+            "completed_trade_count": 60,
+            "win_rate": 0.5,
+            "expectancy": 0.2,
+            "profit_factor": 1.1,
+            "sharpe_ratio": 0.3,
+            "sortino_ratio": 0.2,
+            "maximum_drawdown": 0.4,
+            "recent_20": {"expectancy": 0.1},
+            "recent_60": {"expectancy": 0.1},
+        },
+    ]
+    actions = {f"{row['strategy_id']}:{row['strategy_version']}": row for row in recommend_strategy_allocation_actions(rows, min_samples=30)}
+    assert actions["few:1"]["action"] == "INSUFFICIENT_SAMPLE"
+    assert actions["strong:1"]["action"] == "PROMOTE_RECOMMENDED"
+    assert actions["weak:1"]["action"] == "REDUCE_RECOMMENDED"
+    assert actions["drawdown:1"]["action"] == "PAUSE_RECOMMENDED"
+    assert all(item["review_required"] is True for item in actions.values())

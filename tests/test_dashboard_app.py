@@ -26,6 +26,14 @@ def test_dashboard_code_has_no_write_capability():
     assert dashboard_app.has_write_capability(module_text) is False
 
 
+def test_portfolio_intelligence_panel_markers_exist():
+    module_text = (REPO_ROOT / "dashboard_app.py").read_text(encoding="utf-8")
+    assert "Proposed Portfolio" in module_text
+    assert "Current vs Proposed Allocation" in module_text
+    assert "Correlation Matrix" in module_text
+    assert "PAPER DRY RUN" in module_text
+
+
 def test_dashboard_allows_empty_database_reads(tmp_path):
     db_url = f"sqlite:///{tmp_path / 'monitoring.db'}"
     db = dashboard_app.MonitoringDatabase(database_url=db_url)

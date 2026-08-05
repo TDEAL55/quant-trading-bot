@@ -364,3 +364,42 @@ def test_notification_history_persisted_without_secrets(tmp_path):
     assert "REDACTED" in metadata_json
     parsed = json.loads(metadata_json)
     assert parsed.get("run_id") == "r9"
+
+
+def test_portfolio_recommendation_notification_is_concise_and_deduplicated(tmp_path):
+    poster = _Poster()
+    service = _service(tmp_path, poster=poster, enabled=True)
+
+    first = service.notify(
+        event_type="portfolio_recommendation_generated",
+        title="Portfolio Recommendation Generated",
+        message="Final portfolio recommendation is ready for human review.",
+        severity="INFO",
+        metadata={
+            "run_id": "r10",
+            "dry_run": True,
+            "orders_attempted": 0,
+            "orders_submitted": 0,
+        },
+        deduplication_key="portfolio_recommendation_generated:r10",
+    )
+    second = service.notify(
+        event_type="portfolio_recommendation_generated",
+        title="Portfolio Recommendation Generated",
+        message="Final portfolio recommendation is ready for human review.",
+        severity="INFO",
+        metadata={
+            "run_id": "r10",
+            "dry_run": True,
+            "orders_attempted": 0,
+            "orders_submitted": 0,
+        },
+        deduplication_key="portfolio_recommendation_generated:r10",
+    )
+
+    assert first.status == "sent"
+    assert second.status == "deduplicated"
+    assert len(poster.calls) == 1
+    content = poster.calls[0]["body"]["content"]
+    assert "PAPER DRY RUN" in content
+    assert "Orders Submitted: 0" in content

@@ -183,6 +183,12 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
                 "weight_change_recommendations": [],
                 "daily_report": {},
                 "weekly_report": {},
+                "portfolio_intelligence": {
+                    "run": {},
+                    "recommendations": [],
+                    "exposures": [],
+                    "reports": [],
+                },
             },
             "daily_runs": {
                 "db_connected": False,
