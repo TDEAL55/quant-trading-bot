@@ -17,6 +17,8 @@ from config import (
     MAX_POSITION_EQUITY_PERCENT,
     MAX_DAILY_LOSS,
     MAX_POSITION_SIZE,
+    MAX_VALIDATION_ORDERS,
+    MAX_VALIDATION_ORDER_NOTIONAL,
     PAPER_VALIDATION_ALLOW_FRACTIONAL,
     PAPER_VALIDATION_CASH_BUFFER,
     PAPER_VALIDATION_DUPLICATE_RUN_PROTECTION,
@@ -26,6 +28,7 @@ from config import (
     PAPER_VALIDATION_QUANTITY_PRECISION,
     PAPER_VALIDATION_REBALANCE_TOLERANCE,
     PAPER_VALIDATION_RECONCILIATION_TOLERANCE,
+    PAPER_EXECUTION_ENABLED,
     PORTFOLIO_ALLOCATION_MODE,
     PORTFOLIO_MAX_CORRELATION,
     PORTFOLIO_MAX_POSITION_PERCENT,
@@ -36,6 +39,7 @@ from config import (
     PORTFOLIO_MIN_QUANTUM_SCORE,
     PORTFOLIO_MIN_RISK_REWARD,
     PORTFOLIO_UNKNOWN_SECTOR_MAX_PERCENT,
+    CONTROLLED_PAPER_VALIDATION,
 )
 from correlation_engine import CorrelationPolicy
 from market_data import download_price_data, download_price_data_batch
@@ -391,6 +395,10 @@ def run_continuous_scan_cycle(
     if str(config.trading_mode).upper() != "PAPER":
         raise RuntimeError("continuous scan cycle requires TRADING_MODE=PAPER")
 
+    validation_order_limit = max(int(MAX_VALIDATION_ORDERS or 0), 0)
+    controlled_execution_enabled = bool(PAPER_EXECUTION_ENABLED) and bool(CONTROLLED_PAPER_VALIDATION) and validation_order_limit >= 1
+    validation_notional_cap = max(float(MAX_VALIDATION_ORDER_NOTIONAL or 0.0), 0.0)
+
     started_dt = _coerce_utc(now_provider())
     started_at = started_dt.isoformat()
     run_stamp = started_dt.strftime("%Y%m%d%H%M%S%f")
@@ -416,6 +424,24 @@ def run_continuous_scan_cycle(
         execution: dict[str, Any],
         persistence_payload: dict[str, Any],
     ) -> ContinuousScanCycleResult:
+        execution_payload = dict(execution or {})
+        counters = {
+            "orders_recommended": 0,
+            "orders_submission_requested": 0,
+            "orders_submitted": 0,
+            "orders_filled": 0,
+            "orders_rejected": 0,
+        }
+        raw_counters = dict(execution_payload.get("execution_counters") or {})
+        if "orders_submission_requested" not in raw_counters and "orders_attempted" in raw_counters:
+            # Backward compatibility for historical payloads that only emitted orders_attempted.
+            raw_counters["orders_submission_requested"] = int(raw_counters.get("orders_attempted") or 0)
+        for key in counters:
+            counters[key] = int(raw_counters.get(key) or 0)
+        # Deprecated compatibility alias for older downstream consumers.
+        counters["orders_attempted"] = int(counters["orders_submission_requested"])
+        execution_payload["execution_counters"] = counters
+
         result_payload = ContinuousScanCycleResult(
             run_id=cycle_run_id,
             started_at=started_at,
@@ -425,7 +451,7 @@ def run_continuous_scan_cycle(
             confirmed_order_count=confirmed_order_count,
             scan=scan,
             selection=selection,
-            execution=execution,
+            execution=execution_payload,
             persistence=persistence_payload,
             duration_seconds=max((_utc_now() - started_dt).total_seconds(), 0.0),
         )
@@ -436,6 +462,11 @@ def run_continuous_scan_cycle(
             status=status,
             execution_status=execution_status,
             confirmed_order_count=confirmed_order_count,
+            orders_recommended=int(counters["orders_recommended"]),
+            orders_submission_requested=int(counters["orders_submission_requested"]),
+            orders_submitted=int(counters["orders_submitted"]),
+            orders_filled=int(counters["orders_filled"]),
+            orders_rejected=int(counters["orders_rejected"]),
             failed_symbol_count=int(((scan or {}).get("scan_payload") or {}).get("summary", {}).get("failed_symbol_count") or 0),
             elapsed_seconds=round(float(result_payload.duration_seconds), 4),
         )
@@ -811,8 +842,12 @@ def run_continuous_scan_cycle(
                     "run_id": cycle_run_id,
                     "dry_run": True,
                     "status": "portfolio_recommendation_generated",
+                    "orders_recommended": 0,
+                    "orders_submission_requested": 0,
                     "orders_attempted": 0,
                     "orders_submitted": 0,
+                    "orders_filled": 0,
+                    "orders_rejected": 0,
                     "proposed_notional": float(portfolio_intelligence_payload.get("total_proposed_exposure") or 0.0),
                 },
                 deduplication_key=f"portfolio_recommendation_generated:{cycle_run_id}",
@@ -852,8 +887,12 @@ def run_continuous_scan_cycle(
                 "dry_run_execution_skipped",
                 run_id=cycle_run_id,
                 reason="no_candidates",
+                orders_recommended=0,
+                orders_submission_requested=0,
                 orders_attempted=0,
                 orders_submitted=0,
+                orders_filled=0,
+                orders_rejected=0,
             )
         return _result(
             status="no_candidates",
@@ -890,8 +929,12 @@ def run_continuous_scan_cycle(
                 "dry_run_execution_skipped",
                 run_id=cycle_run_id,
                 reason="no_latest_price",
+                orders_recommended=0,
+                orders_submission_requested=0,
                 orders_attempted=0,
                 orders_submitted=0,
+                orders_filled=0,
+                orders_rejected=0,
             )
             _emit_notification(
                 notification_callback,
@@ -906,8 +949,12 @@ def run_continuous_scan_cycle(
                     "quantum_score": float((selected_candidate.get("quantum_score") or {}).get("final_score") or selected_candidate.get("overall_score") or 0.0),
                     "proposed_notional": float(selected_candidate.get("suggested_paper_notional") or 0.0),
                     "reason": "no_strategy_signals",
+                    "orders_recommended": 0,
+                    "orders_submission_requested": 0,
                     "orders_attempted": 0,
                     "orders_submitted": 0,
+                    "orders_filled": 0,
+                    "orders_rejected": 0,
                     "status": "skipped",
                 },
                 deduplication_key=f"dry_run_trade_skipped:{cycle_run_id}:{selected_symbol}:no_strategy_signals",
@@ -930,8 +977,12 @@ def run_continuous_scan_cycle(
                 "dry_run_execution_skipped",
                 run_id=cycle_run_id,
                 reason="no_strategy_signals",
+                orders_recommended=0,
+                orders_submission_requested=0,
                 orders_attempted=0,
                 orders_submitted=0,
+                orders_filled=0,
+                orders_rejected=0,
             )
         return _result(
             status="no_trade",
@@ -964,8 +1015,12 @@ def run_continuous_scan_cycle(
                     "dry_run_execution_skipped",
                     run_id=cycle_run_id,
                     reason="no_active_buy_signals",
+                    orders_recommended=0,
+                    orders_submission_requested=0,
                     orders_attempted=0,
                     orders_submitted=0,
+                    orders_filled=0,
+                    orders_rejected=0,
                 )
                 _emit_notification(
                     notification_callback,
@@ -978,8 +1033,12 @@ def run_continuous_scan_cycle(
                         "dry_run": True,
                         "symbol": selected_symbol,
                         "reason": "no_active_buy_signals",
+                        "orders_recommended": 0,
+                        "orders_submission_requested": 0,
                         "orders_attempted": 0,
                         "orders_submitted": 0,
+                        "orders_filled": 0,
+                        "orders_rejected": 0,
                         "status": "skipped",
                     },
                     deduplication_key=f"dry_run_trade_skipped:{cycle_run_id}:{selected_symbol}:no_active_buy_signals",
@@ -1016,6 +1075,8 @@ def run_continuous_scan_cycle(
         notional_cap_by_allocation = notional_cap_by_equity * max(min(per_strategy_allocation, 1.0), 0.0)
         suggested_notional = float(selected_candidate.get("suggested_paper_notional") or notional_cap_by_allocation)
         target_notional = min(max(suggested_notional, 0.0), notional_cap_by_equity, notional_cap_by_allocation if notional_cap_by_allocation > 0 else notional_cap_by_equity)
+        if validation_notional_cap > 0:
+            target_notional = min(float(target_notional), float(validation_notional_cap))
 
         if target_notional <= 0:
             if dry_run:
@@ -1024,8 +1085,12 @@ def run_continuous_scan_cycle(
                     "dry_run_execution_skipped",
                     run_id=cycle_run_id,
                     reason="zero_target_notional",
+                    orders_recommended=0,
+                    orders_submission_requested=0,
                     orders_attempted=0,
                     orders_submitted=0,
+                    orders_filled=0,
+                    orders_rejected=0,
                 )
                 _emit_notification(
                     notification_callback,
@@ -1039,8 +1104,12 @@ def run_continuous_scan_cycle(
                         "symbol": selected_symbol,
                         "proposed_notional": float(target_notional),
                         "reason": "zero_target_notional",
+                        "orders_recommended": 0,
+                        "orders_submission_requested": 0,
                         "orders_attempted": 0,
                         "orders_submitted": 0,
+                        "orders_filled": 0,
+                        "orders_rejected": 0,
                         "status": "skipped",
                     },
                     deduplication_key=f"dry_run_trade_skipped:{cycle_run_id}:{selected_symbol}:zero_target_notional",
@@ -1057,11 +1126,14 @@ def run_continuous_scan_cycle(
 
         planner_settings = OrderPlannerSettings(
             minimum_order_notional=float(PAPER_VALIDATION_MIN_ORDER_NOTIONAL),
-            maximum_order_notional=float(PAPER_VALIDATION_MAX_ORDER_NOTIONAL),
+            maximum_order_notional=min(
+                float(PAPER_VALIDATION_MAX_ORDER_NOTIONAL),
+                float(validation_notional_cap if validation_notional_cap > 0 else PAPER_VALIDATION_MAX_ORDER_NOTIONAL),
+            ),
             allow_fractional=bool(PAPER_VALIDATION_ALLOW_FRACTIONAL),
             quantity_precision=int(PAPER_VALIDATION_QUANTITY_PRECISION),
             rebalance_tolerance=float(PAPER_VALIDATION_REBALANCE_TOLERANCE),
-            maximum_orders=1,
+            maximum_orders=max(1, min(int(PAPER_VALIDATION_MAX_ORDERS), int(validation_order_limit or 1))),
             cash_buffer=float(PAPER_VALIDATION_CASH_BUFFER),
         )
         target_weight = min(target_notional / max(float(broker_equity), 1.0), 1.0)
@@ -1081,8 +1153,12 @@ def run_continuous_scan_cycle(
                     "dry_run_execution_skipped",
                     run_id=cycle_run_id,
                     reason="planner_rejected",
+                    orders_recommended=0,
+                    orders_submission_requested=0,
                     orders_attempted=0,
                     orders_submitted=0,
+                    orders_filled=0,
+                    orders_rejected=0,
                 )
                 _emit_notification(
                     notification_callback,
@@ -1095,8 +1171,12 @@ def run_continuous_scan_cycle(
                         "dry_run": True,
                         "symbol": selected_symbol,
                         "reason": "planner_rejected",
+                        "orders_recommended": 0,
+                        "orders_submission_requested": 0,
                         "orders_attempted": 0,
                         "orders_submitted": 0,
+                        "orders_filled": 0,
+                        "orders_rejected": 0,
                         "status": "skipped",
                     },
                     deduplication_key=f"dry_run_trade_skipped:{cycle_run_id}:{selected_symbol}:planner_rejected",
@@ -1110,6 +1190,29 @@ def run_continuous_scan_cycle(
                 execution={"selected": selected_candidate, "strategy_signals": strategy_signals, "paper_order": {}, "risk_result": {"approved": False, "reason": "planner_rejected"}, "reconciliation": {}},
                 persistence_payload={"scan": {"status": "saved" if persist else "skipped"}, "execution": {"status": "skipped"}},
             )
+
+        _emit_notification(
+            notification_callback,
+            event_type="trade_recommended",
+            title="Trade Recommended",
+            message="Recommendation only. No paper order has been submitted.",
+            severity="INFO",
+            metadata={
+                "run_id": cycle_run_id,
+                "dry_run": bool(dry_run),
+                "symbol": selected_symbol,
+                "strategy_id": str(selected_strategy.get("strategy_id") or ""),
+                "proposed_quantity": float(planned_order.get("quantity") or 0.0),
+                "proposed_notional": float(planned_order.get("notional") or 0.0),
+                "orders_recommended": 1,
+                "orders_submission_requested": 0,
+                "orders_submitted": 0,
+                "orders_filled": 0,
+                "orders_rejected": 0,
+                "status": "recommendation_only",
+            },
+            deduplication_key=f"trade_recommended:{cycle_run_id}:{selected_symbol}:{selected_strategy.get('strategy_id')}",
+        )
 
         risk = RiskManager(max_position_size=float(MAX_POSITION_SIZE), max_daily_loss=float(MAX_DAILY_LOSS), daily_loss_limit=float(DAILY_LOSS_LIMIT))
         trade_value = float(planned_order.get("notional") or 0.0)
@@ -1131,6 +1234,7 @@ def run_continuous_scan_cycle(
             "stale_data": bool(stale_data_ok),
             "liquidity": bool(liquidity_ok),
             "reward_risk": bool(reward_risk_ok),
+            "validation_order_limit": bool(validation_order_limit >= 1),
             "duplicate_protection": True,
         }
 
@@ -1157,8 +1261,11 @@ def run_continuous_scan_cycle(
                     "symbol": selected_symbol,
                     "reason": rejected_status,
                     "status": "risk_rejected",
-                    "orders_attempted": 0,
+                    "orders_recommended": 1,
+                    "orders_submission_requested": 0,
                     "orders_submitted": 0,
+                    "orders_filled": 0,
+                    "orders_rejected": 0,
                 },
                 deduplication_key=f"risk_limit_triggered:{cycle_run_id}:{selected_symbol}:{rejected_status}",
             )
@@ -1168,8 +1275,11 @@ def run_continuous_scan_cycle(
                     "dry_run_execution_skipped",
                     run_id=cycle_run_id,
                     reason=rejected_status,
-                    orders_attempted=0,
+                    orders_recommended=1,
+                    orders_submission_requested=0,
                     orders_submitted=0,
+                    orders_filled=0,
+                    orders_rejected=0,
                 )
             return _result(
                 status=rejected_status,
@@ -1182,6 +1292,13 @@ def run_continuous_scan_cycle(
                     "strategy_signals": strategy_signals,
                     "selected_strategy": selected_strategy,
                     "paper_order": {"symbol": selected_symbol, "side": "BUY", "quantity": planned_order.get("quantity"), "notional": trade_value, "submission_status": "rejected"},
+                    "execution_counters": {
+                        "orders_recommended": 1,
+                        "orders_submission_requested": 0,
+                        "orders_submitted": 0,
+                        "orders_filled": 0,
+                        "orders_rejected": 0,
+                    },
                     "risk_result": {"approved": False, "checks": risk_checks, "duplicate_run": existing},
                     "reconciliation": {},
                 },
@@ -1197,37 +1314,45 @@ def run_continuous_scan_cycle(
 
         broker_pre_positions = dict(broker_positions)
         broker_pre_cash = float(broker_cash)
+        submission_requested = (not bool(dry_run)) and bool(controlled_execution_enabled)
 
-        if dry_run:
+        if not submission_requested:
+            skip_reason = "dry_run_mode" if bool(dry_run) else "paper_execution_disabled"
             _emit_telemetry(
                 telemetry_callback,
                 "dry_run_execution_skipped",
                 run_id=cycle_run_id,
-                reason="dry_run_mode",
+                reason=skip_reason,
                 symbol=selected_symbol,
-                orders_attempted=1,
+                orders_recommended=1,
+                orders_submission_requested=0,
                 orders_submitted=0,
+                orders_filled=0,
+                orders_rejected=0,
             )
             _emit_notification(
                 notification_callback,
                 event_type="dry_run_trade_skipped",
-                title="Dry Run Trade Skipped",
-                message="PAPER DRY RUN mode skipped order submission.",
+                title="Execution Skipped",
+                message=("PAPER DRY RUN mode skipped order submission." if bool(dry_run) else "Controlled paper execution is disabled by configuration."),
                 severity="INFO",
                 metadata={
                     "run_id": cycle_run_id,
-                    "dry_run": True,
+                    "dry_run": bool(dry_run),
                     "symbol": selected_symbol,
                     "quantum_score": float((selected_candidate.get("quantum_score") or {}).get("final_score") or selected_candidate.get("overall_score") or 0.0),
                     "strategy_id": str(selected_strategy.get("strategy_id") or ""),
                     "proposed_quantity": float(planned_order.get("quantity") or 0.0),
                     "proposed_notional": float(planned_order.get("notional") or 0.0),
-                    "reason": "dry_run_mode",
-                    "orders_attempted": 1,
+                    "reason": skip_reason,
+                    "orders_recommended": 1,
+                    "orders_submission_requested": 0,
                     "orders_submitted": 0,
+                    "orders_filled": 0,
+                    "orders_rejected": 0,
                     "status": "skipped",
                 },
-                deduplication_key=f"dry_run_trade_skipped:{cycle_run_id}:{selected_symbol}:dry_run_mode",
+                deduplication_key=f"dry_run_trade_skipped:{cycle_run_id}:{selected_symbol}:{skip_reason}",
             )
             order_response = {
                 "order_id": f"dry-{cycle_run_id}",
@@ -1265,6 +1390,28 @@ def run_continuous_scan_cycle(
             broker_post_positions = broker_pre_positions
             broker_post_cash = broker_pre_cash
         else:
+            _emit_notification(
+                notification_callback,
+                event_type="paper_order_submission_requested",
+                title="Paper Order Submission Requested",
+                message="Execution gate passed; requesting paper order submission.",
+                severity="INFO",
+                metadata={
+                    "run_id": cycle_run_id,
+                    "dry_run": False,
+                    "symbol": selected_symbol,
+                    "strategy_id": str(selected_strategy.get("strategy_id") or ""),
+                    "proposed_quantity": float(planned_order.get("quantity") or 0.0),
+                    "proposed_notional": float(planned_order.get("notional") or 0.0),
+                    "orders_recommended": 1,
+                    "orders_submission_requested": 1,
+                    "orders_submitted": 0,
+                    "orders_filled": 0,
+                    "orders_rejected": 0,
+                    "status": "submission_requested",
+                },
+                deduplication_key=f"paper_order_submission_requested:{cycle_run_id}:{selected_symbol}:{client_order_id}",
+            )
             order_response = _as_dict(
                 broker.submit_order(
                     side=str(planned_order.get("side") or "buy").lower(),
@@ -1278,23 +1425,32 @@ def run_continuous_scan_cycle(
                     reference_price=float(latest_price),
                 )
             )
-            _emit_notification(
-                notification_callback,
-                event_type="paper_order_submitted",
-                title="Paper Order Submitted",
-                message="Paper order submitted to broker.",
-                severity="SUCCESS",
-                metadata={
-                    "run_id": cycle_run_id,
-                    "dry_run": False,
-                    "symbol": selected_symbol,
-                    "strategy_id": str(selected_strategy.get("strategy_id") or ""),
-                    "proposed_quantity": float(planned_order.get("quantity") or 0.0),
-                    "proposed_notional": float(planned_order.get("notional") or 0.0),
-                    "status": "submitted",
-                },
-                deduplication_key=f"paper_order_submitted:{cycle_run_id}:{selected_symbol}:{client_order_id}",
-            )
+            response_status = str(order_response.get("status") or "").lower()
+            accepted_submission_statuses = {"new", "accepted", "pending", "pending_new", "partially_filled", "filled"}
+            accepted_by_broker = response_status in accepted_submission_statuses
+            if accepted_by_broker:
+                _emit_notification(
+                    notification_callback,
+                    event_type="paper_order_submitted",
+                    title="Paper Order Submitted",
+                    message="Accepted by Alpaca PAPER.",
+                    severity="SUCCESS",
+                    metadata={
+                        "run_id": cycle_run_id,
+                        "dry_run": False,
+                        "symbol": selected_symbol,
+                        "strategy_id": str(selected_strategy.get("strategy_id") or ""),
+                        "proposed_quantity": float(planned_order.get("quantity") or 0.0),
+                        "proposed_notional": float(planned_order.get("notional") or 0.0),
+                        "orders_recommended": 1,
+                        "orders_submission_requested": 1,
+                        "orders_submitted": 1,
+                        "orders_filled": 0,
+                        "orders_rejected": 0,
+                        "status": "submitted",
+                    },
+                    deduplication_key=f"paper_order_submitted:{cycle_run_id}:{selected_symbol}:{client_order_id}",
+                )
             lifecycle = track_order_lifecycle(broker=broker, initial_order=order_response, poll_seconds=1.0, max_wait_seconds=45.0)
             broker_post_positions = _as_dict(broker.get_positions())
             try:
@@ -1306,7 +1462,12 @@ def run_continuous_scan_cycle(
                 broker_post_buying_power = broker_post_cash
 
         final_order = dict(lifecycle.get("order") or order_response)
+        initial_submission_status = str(order_response.get("status") or "").lower()
+        accepted_submission_statuses = {"new", "accepted", "pending", "pending_new", "partially_filled", "filled"}
+        accepted_by_broker = bool(submission_requested and initial_submission_status in accepted_submission_statuses)
         final_status = str(lifecycle.get("final_status") or final_order.get("status") or "unknown").lower()
+        rejected_statuses = {"rejected", "failed", "expired", "submission_blocked_by_config"}
+        cancelled_statuses = {"canceled", "cancelled"}
         if final_status == "filled":
             _emit_notification(
                 notification_callback,
@@ -1319,11 +1480,46 @@ def run_continuous_scan_cycle(
                     "dry_run": bool(dry_run),
                     "symbol": selected_symbol,
                     "strategy_id": str(selected_strategy.get("strategy_id") or ""),
+                    "filled_quantity": float(final_order.get("filled_quantity") or 0.0),
+                    "average_fill_price": float(final_order.get("average_fill_price") or latest_price or 0.0),
                     "status": "filled",
                 },
                 deduplication_key=f"paper_order_filled:{cycle_run_id}:{selected_symbol}:{client_order_id}",
             )
-        if final_status in {"rejected", "failed", "canceled", "cancelled", "expired"}:
+        if final_status == "partially_filled":
+            _emit_notification(
+                notification_callback,
+                event_type="paper_order_partially_filled",
+                title="Paper Order Partially Filled",
+                message="Paper order received a partial fill.",
+                severity="WARNING",
+                metadata={
+                    "run_id": cycle_run_id,
+                    "dry_run": bool(dry_run),
+                    "symbol": selected_symbol,
+                    "strategy_id": str(selected_strategy.get("strategy_id") or ""),
+                    "status": "partially_filled",
+                },
+                deduplication_key=f"paper_order_partially_filled:{cycle_run_id}:{selected_symbol}:{client_order_id}",
+            )
+        if final_status in cancelled_statuses:
+            _emit_notification(
+                notification_callback,
+                event_type="paper_order_cancelled",
+                title="Paper Order Cancelled",
+                message="Paper order was cancelled before full fill.",
+                severity="WARNING",
+                metadata={
+                    "run_id": cycle_run_id,
+                    "dry_run": bool(dry_run),
+                    "symbol": selected_symbol,
+                    "strategy_id": str(selected_strategy.get("strategy_id") or ""),
+                    "status": final_status,
+                    "reason": str(final_order.get("rejection_reason") or final_status),
+                },
+                deduplication_key=f"paper_order_cancelled:{cycle_run_id}:{selected_symbol}:{client_order_id}:{final_status}",
+            )
+        if final_status in rejected_statuses:
             _emit_notification(
                 notification_callback,
                 event_type="paper_order_rejected",
@@ -1341,10 +1537,14 @@ def run_continuous_scan_cycle(
                 deduplication_key=f"paper_order_rejected:{cycle_run_id}:{selected_symbol}:{client_order_id}:{final_status}",
             )
         paper_order_id = str(final_order.get("order_id") or final_order.get("id") or f"{cycle_run_id}-1")
+        submission_blocked = str(final_order.get("status") or "").lower() == "submission_blocked_by_config"
+        submitted_to_broker = bool(accepted_by_broker and not submission_blocked)
+        orders_rejected_count = 1 if final_status in rejected_statuses else 0
+        orders_filled_count = 1 if final_status == "filled" else 0
         requested_qty = float(final_order.get("requested_quantity") or planned_order.get("quantity") or 0.0)
         filled_qty = float(final_order.get("filled_quantity") or 0.0)
         fill_price = float(final_order.get("average_fill_price") or latest_price or 0.0)
-        counted_filled_qty = filled_qty if final_status == "filled" else 0.0
+        counted_filled_qty = filled_qty if final_status in {"filled", "partially_filled"} else 0.0
 
         expected_positions = dict(broker_pre_positions)
         if final_status == "filled" and counted_filled_qty > 0:
@@ -1406,6 +1606,7 @@ def run_continuous_scan_cycle(
         )
 
         validation_run_id = f"continuous-scan-{run_stamp}-exec"
+        persisted_submission_status = final_status if submitted_to_broker else "not_submitted"
         if persist:
             execution_repo.save_validation_run(
                 PaperValidationRunPayload(
@@ -1427,9 +1628,9 @@ def run_continuous_scan_cycle(
                         "proposed_order_count": 1,
                         "approved_order_count": 1,
                         "rejected_order_count": 0,
-                        "submitted_order_count": 0 if dry_run else (1 if final_status in {"new", "accepted", "partially_filled", "filled", "pending"} else 0),
-                        "filled_order_count": 1 if counted_filled_qty > 0 else 0,
-                        "failed_order_count": 1 if final_status in {"rejected", "failed", "canceled", "cancelled", "expired"} else 0,
+                        "submitted_order_count": 1 if submitted_to_broker else 0,
+                        "filled_order_count": int(orders_filled_count),
+                        "failed_order_count": 1 if final_status in {"rejected", "failed", "canceled", "cancelled", "expired", "submission_blocked_by_config"} else 0,
                         "configuration": {
                             "portfolio": {"maximum_orders": 1, "max_open_positions": max_open_positions},
                             "risk": {
@@ -1465,7 +1666,7 @@ def run_continuous_scan_cycle(
                             "proposed_at": started_at,
                             "risk_status": "approved",
                             "risk_reason": "approved",
-                            "submission_status": final_status,
+                            "submission_status": persisted_submission_status,
                             "broker_order_id": paper_order_id,
                             "client_order_id": client_order_id,
                             "requested_quantity": requested_qty,
@@ -1568,7 +1769,7 @@ def run_continuous_scan_cycle(
                 leaderboard_rows = build_strategy_leaderboard(list_closed(limit=5000))
                 replace_leaderboard(leaderboard_rows)
 
-        confirmed = 1 if str(reconciliation.get("reconciliation_status") or "").lower() in {"matched", "matched_with_tolerance"} and int(reconciliation.get("position_mismatch_count") or 0) == 0 and final_status not in {"rejected", "failed", "canceled", "cancelled", "expired"} else 0
+        confirmed = 1 if submitted_to_broker and str(reconciliation.get("reconciliation_status") or "").lower() in {"matched", "matched_with_tolerance"} and int(reconciliation.get("position_mismatch_count") or 0) == 0 and final_status not in {"rejected", "failed", "canceled", "cancelled", "expired"} else 0
 
         if str(planned_order.get("side") or "").upper() == "SELL" and final_status == "filled":
             post_qty = float((broker_post_positions.get(selected_symbol) or {}).get("quantity") or 0.0)
@@ -1599,8 +1800,12 @@ def run_continuous_scan_cycle(
                 "run_id": cycle_run_id,
                 "dry_run": bool(dry_run),
                 "status": "completed",
-                "orders_attempted": 1,
-                "orders_submitted": (0 if dry_run else (1 if final_status not in {"rejected", "failed", "canceled", "cancelled", "expired"} else 0)),
+                "orders_recommended": 1,
+                "orders_submission_requested": (1 if submission_requested else 0),
+                "orders_submitted": (1 if submitted_to_broker else 0),
+                "orders_filled": int(orders_filled_count),
+                "orders_rejected": int(orders_rejected_count),
+                "orders_attempted": (1 if submission_requested else 0),
             },
             deduplication_key=f"scan_completed:{cycle_run_id}",
         )
@@ -1630,6 +1835,13 @@ def run_continuous_scan_cycle(
                     "fill_time": lifecycle.get("fill_time"),
                     "rejection_reason": final_order.get("rejection_reason") or "",
                     "dry_run": bool(dry_run),
+                },
+                "execution_counters": {
+                    "orders_recommended": 1,
+                    "orders_submission_requested": (1 if submission_requested else 0),
+                    "orders_submitted": (1 if submitted_to_broker else 0),
+                    "orders_filled": int(orders_filled_count),
+                    "orders_rejected": int(orders_rejected_count),
                 },
                 "risk_result": {"approved": True, "checks": risk_checks, "strategy_allocations": allocations},
                 "reconciliation": reconciliation,

@@ -92,7 +92,12 @@ def _scan_payload(symbol="AAA", price=100.0):
     }
 
 
-def test_continuous_scan_cycle_completes_with_one_order():
+def test_continuous_scan_cycle_completes_with_one_order(monkeypatch):
+    monkeypatch.setattr("continuous_scan_cycle.PAPER_EXECUTION_ENABLED", True)
+    monkeypatch.setattr("continuous_scan_cycle.CONTROLLED_PAPER_VALIDATION", True)
+    monkeypatch.setattr("continuous_scan_cycle.MAX_VALIDATION_ORDERS", 1)
+    monkeypatch.setattr("continuous_scan_cycle.MAX_VALIDATION_ORDER_NOTIONAL", 5000.0)
+
     broker = _Broker()
     repo = _Repo()
     scan_calls = []

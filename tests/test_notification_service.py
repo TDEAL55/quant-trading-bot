@@ -403,3 +403,199 @@ def test_portfolio_recommendation_notification_is_concise_and_deduplicated(tmp_p
     content = poster.calls[0]["body"]["content"]
     assert "PAPER DRY RUN" in content
     assert "Orders Submitted: 0" in content
+
+
+def test_new_paper_execution_event_types_are_deliverable(tmp_path):
+    poster = _Poster()
+    service = _service(tmp_path, poster=poster, enabled=True)
+
+    for event_type in (
+        "trade_recommended",
+        "paper_order_submission_requested",
+        "paper_order_partially_filled",
+        "paper_order_cancelled",
+    ):
+        result = service.notify(
+            event_type=event_type,
+            title="Lifecycle Update",
+            message="event delivered",
+            severity="INFO",
+            metadata={"run_id": "r11", "dry_run": False, "symbol": "AAPL"},
+            deduplication_key=f"{event_type}:r11",
+        )
+        assert result.status == "sent"
+
+    assert len(poster.calls) == 4
+
+
+def test_recommendation_only_wording_is_unambiguous(tmp_path):
+    poster = _Poster()
+    service = _service(tmp_path, poster=poster, enabled=True)
+
+    result = service.notify(
+        event_type="trade_recommended",
+        title="Trade Recommended",
+        message="Recommendation only. No paper order has been submitted.",
+        severity="INFO",
+        metadata={"run_id": "r12", "dry_run": False, "symbol": "AAPL"},
+        deduplication_key="trade_recommended:r12:AAPL",
+    )
+
+    assert result.status == "sent"
+    content = poster.calls[0]["body"]["content"]
+    assert "Trade Recommended" in content
+    assert "Recommendation only" in content
+    assert "Order submitted" not in content
+    assert "Order filled" not in content
+    assert "Accepted by Alpaca" not in content
+
+
+def test_submission_requested_wording_never_claims_acceptance(tmp_path):
+    poster = _Poster()
+    service = _service(tmp_path, poster=poster, enabled=True)
+
+    result = service.notify(
+        event_type="paper_order_submission_requested",
+        title="Paper Order Submission Requested",
+        message="Execution gate passed; requesting paper order submission.",
+        severity="INFO",
+        metadata={"run_id": "r13", "dry_run": False, "symbol": "AAPL"},
+        deduplication_key="paper_order_submission_requested:r13:AAPL",
+    )
+
+    assert result.status == "sent"
+    content = poster.calls[0]["body"]["content"]
+    assert "Paper Order Submission Requested" in content
+    assert "Accepted by Alpaca PAPER" not in content
+
+
+def test_submitted_wording_requires_broker_acceptance_phrase(tmp_path):
+    poster = _Poster()
+    service = _service(tmp_path, poster=poster, enabled=True)
+
+    result = service.notify(
+        event_type="paper_order_submitted",
+        title="Paper Order Submitted",
+        message="Accepted by Alpaca PAPER.",
+        severity="SUCCESS",
+        metadata={"run_id": "r14", "dry_run": False, "symbol": "AAPL", "order_id": "ord-1"},
+        deduplication_key="paper_order_submitted:r14:ord-1",
+    )
+
+    assert result.status == "sent"
+    content = poster.calls[0]["body"]["content"]
+    assert "Paper Order Submitted" in content
+    assert "Accepted by Alpaca PAPER" in content
+
+
+def test_filled_wording_includes_quantity_and_price(tmp_path):
+    poster = _Poster()
+    service = _service(tmp_path, poster=poster, enabled=True)
+
+    result = service.notify(
+        event_type="paper_order_filled",
+        title="Paper Order Filled",
+        message="Paper order reached filled status.",
+        severity="SUCCESS",
+        metadata={
+            "run_id": "r15",
+            "dry_run": False,
+            "symbol": "AAPL",
+            "filled_quantity": 2.5,
+            "average_fill_price": 123.45,
+        },
+        deduplication_key="paper_order_filled:r15:ord-2",
+    )
+
+    assert result.status == "sent"
+    content = poster.calls[0]["body"]["content"]
+    assert "Paper Order Filled" in content
+    assert "Filled Quantity: 2.5" in content
+    assert "Average Fill Price: 123.45" in content
+
+
+def test_rejected_wording_uses_safe_reason_only(tmp_path):
+    poster = _Poster()
+    service = _service(tmp_path, poster=poster, enabled=True)
+
+    result = service.notify(
+        event_type="paper_order_rejected",
+        title="Paper Order Rejected",
+        message="Paper order failed or was rejected by broker.",
+        severity="ERROR",
+        metadata={
+            "run_id": "r16",
+            "dry_run": False,
+            "symbol": "AAPL",
+            "reason": "ALPACA_API_KEY=secret-reason",
+        },
+        deduplication_key="paper_order_rejected:r16:ord-3",
+    )
+
+    assert result.status == "sent"
+    content = poster.calls[0]["body"]["content"]
+    assert "Paper Order Rejected" in content
+    assert "reason" in content.lower()
+    assert "secret-reason" not in content
+
+
+def test_dedup_scopes_event_type_and_order_id(tmp_path):
+    poster = _Poster()
+    service = _service(tmp_path, poster=poster, enabled=True)
+
+    first = service.notify(
+        event_type="paper_order_submitted",
+        title="Paper Order Submitted",
+        message="Accepted by Alpaca PAPER.",
+        severity="SUCCESS",
+        metadata={"run_id": "r17", "dry_run": False, "symbol": "AAPL"},
+        deduplication_key="paper_order_submitted:ord-9",
+    )
+    duplicate = service.notify(
+        event_type="paper_order_submitted",
+        title="Paper Order Submitted",
+        message="Accepted by Alpaca PAPER.",
+        severity="SUCCESS",
+        metadata={"run_id": "r17", "dry_run": False, "symbol": "AAPL"},
+        deduplication_key="paper_order_submitted:ord-9",
+    )
+    different_event = service.notify(
+        event_type="paper_order_filled",
+        title="Paper Order Filled",
+        message="Paper order reached filled status.",
+        severity="SUCCESS",
+        metadata={"run_id": "r17", "dry_run": False, "symbol": "AAPL"},
+        deduplication_key="paper_order_filled:ord-9",
+    )
+
+    assert first.status == "sent"
+    assert duplicate.status == "deduplicated"
+    assert different_event.status == "sent"
+    assert len(poster.calls) == 2
+
+
+def test_cancelled_and_partial_fill_events_are_clear(tmp_path):
+    poster = _Poster()
+    service = _service(tmp_path, poster=poster, enabled=True)
+
+    partial = service.notify(
+        event_type="paper_order_partially_filled",
+        title="Paper Order Partially Filled",
+        message="Paper order received a partial fill.",
+        severity="WARNING",
+        metadata={"run_id": "r18", "dry_run": False, "symbol": "AAPL"},
+        deduplication_key="paper_order_partially_filled:r18:ord-10",
+    )
+    cancelled = service.notify(
+        event_type="paper_order_cancelled",
+        title="Paper Order Cancelled",
+        message="Paper order was cancelled before full fill.",
+        severity="WARNING",
+        metadata={"run_id": "r18", "dry_run": False, "symbol": "AAPL"},
+        deduplication_key="paper_order_cancelled:r18:ord-10",
+    )
+
+    assert partial.status == "sent"
+    assert cancelled.status == "sent"
+    assert "Partially Filled" in poster.calls[0]["body"]["content"]
+    assert "Cancelled" in poster.calls[1]["body"]["content"]

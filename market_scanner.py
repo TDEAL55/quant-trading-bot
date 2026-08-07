@@ -1074,8 +1074,12 @@ def scan_universe(
                 "rate_limit_count": int(summary.get("rate_limit_retry_count") or 0),
                 "top_10_candidates": top_ranked,
                 "total_duration": float(summary.get("duration_seconds") or 0.0),
+                "orders_recommended": 0,
+                "orders_submission_requested": 0,
                 "orders_attempted": 0,
                 "orders_submitted": 0,
+                "orders_filled": 0,
+                "orders_rejected": 0,
                 "exit_status": str(summary_status),
             }
         )

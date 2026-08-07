@@ -31,10 +31,14 @@ EVENT_TYPES = {
     "scan_completed",
     "scan_failed",
     "candidate_selected",
+    "trade_recommended",
     "dry_run_trade_skipped",
+    "paper_order_submission_requested",
     "paper_order_submitted",
     "paper_order_filled",
+    "paper_order_partially_filled",
     "paper_order_rejected",
+    "paper_order_cancelled",
     "position_opened",
     "position_closed",
     "risk_limit_triggered",
@@ -55,6 +59,7 @@ SUMMARY_FIELDS_DAILY = (
     "scans_completed",
     "symbols_evaluated",
     "eligible_candidates",
+    "orders_submission_requested",
     "orders_attempted",
     "orders_submitted",
     "filled_orders",
@@ -344,6 +349,11 @@ class DiscordWebhookTransport:
 
 def build_daily_summary_payload(metrics: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = dict(metrics or {})
+    if "orders_submission_requested" not in payload:
+        payload["orders_submission_requested"] = payload.get("orders_attempted", "N/A")
+    if "orders_attempted" not in payload:
+        # Backward-compatible alias for legacy summaries.
+        payload["orders_attempted"] = payload.get("orders_submission_requested", "N/A")
     return {field: payload.get(field, "N/A") for field in SUMMARY_FIELDS_DAILY}
 
 
@@ -480,8 +490,14 @@ class NotificationService:
             "strategy_id",
             "proposed_quantity",
             "proposed_notional",
+            "orders_recommended",
+            "orders_submission_requested",
             "orders_attempted",
             "orders_submitted",
+            "orders_filled",
+            "orders_rejected",
+            "filled_quantity",
+            "average_fill_price",
             "status",
             "reason",
             "safe_error_message",

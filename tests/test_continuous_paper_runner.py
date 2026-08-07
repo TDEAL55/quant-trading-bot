@@ -719,3 +719,38 @@ def test_log_event_prints_with_flush(monkeypatch):
     monkeypatch.setattr(builtins, "print", _fake_print)
     continuous_paper_runner._log_event("unit_test_event", sample=True)
     assert captured["flush"] is True
+
+
+def test_execution_counter_reader_supports_legacy_attempted_field():
+    legacy_result = {
+        "execution": {
+            "execution_counters": {
+                "orders_attempted": 2,
+                "orders_submitted": 1,
+            }
+        }
+    }
+
+    counters = continuous_paper_runner._execution_counters(legacy_result)
+    assert counters["orders_submission_requested"] == 2
+    assert counters["orders_attempted"] == 2
+    assert counters["orders_submitted"] == 1
+
+
+def test_confirmed_count_ignores_requested_not_accepted_submission():
+    result = {
+        "execution_status": "completed",
+        "execution": {
+            "execution_counters": {
+                "orders_recommended": 1,
+                "orders_submission_requested": 1,
+                "orders_submitted": 0,
+                "orders_rejected": 1,
+            },
+            "paper_order": {"order_id": ""},
+            "risk_result": {"approved": True, "checks": {"duplicate_protection": True}},
+            "reconciliation": {"reconciliation_status": "matched", "position_mismatch_count": 0},
+        },
+    }
+
+    assert continuous_paper_runner._confirmed_submitted_order_count(result) == 0

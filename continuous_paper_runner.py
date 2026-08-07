@@ -148,9 +148,31 @@ def _new_order_count(execution: dict[str, Any]) -> int:
     return 1 if order_id else 0
 
 
+def _execution_counters(result: dict[str, Any]) -> dict[str, int]:
+    execution = _result_value(result, "execution") or {}
+    raw = dict(execution.get("execution_counters") or {})
+    submission_requested = raw.get("orders_submission_requested")
+    if submission_requested is None:
+        submission_requested = raw.get("orders_attempted")
+    counters = {
+        "orders_recommended": int(raw.get("orders_recommended") or 0),
+        "orders_submission_requested": int(submission_requested or 0),
+        "orders_submitted": int(raw.get("orders_submitted") or 0),
+        "orders_filled": int(raw.get("orders_filled") or 0),
+        "orders_rejected": int(raw.get("orders_rejected") or 0),
+    }
+    # Deprecated compatibility alias for historical records.
+    counters["orders_attempted"] = int(counters["orders_submission_requested"])
+    return counters
+
+
 def _confirmed_submitted_order_count(result: dict[str, Any]) -> int:
     if str(_result_value(result, "execution_status") or "").strip().lower() != "completed":
         return 0
+
+    counters = _execution_counters(result)
+    if counters["orders_submitted"] > 0:
+        return int(counters["orders_submitted"])
 
     execution = _result_value(result, "execution") or {}
     risk = execution.get("risk_result") or {}
@@ -444,6 +466,7 @@ def run_continuous_paper_runner(
                     if lock_acquired:
                         _log_event("run_lock_released", run_id=run_id, lock_path=str(lock_path))
                 confirmed_order_count = _confirmed_submitted_order_count(result)
+                cycle_counters = _execution_counters(result)
 
                 if confirmed_order_count > 0:
                     state["orders_submitted"] = int(state.get("orders_submitted") or 0) + int(confirmed_order_count)
@@ -482,8 +505,12 @@ def run_continuous_paper_runner(
                     rate_limit_count=int(scan_summary.get("rate_limit_retry_count") or 0),
                     top_10_candidates=top_10,
                     total_duration=float(scan_summary.get("duration_seconds") or 0.0),
-                    orders_attempted=(1 if str(_result_value(result, "execution_status") or "") in {"completed", "no_trade", "risk_rejected", "duplicate_rejected"} else 0),
-                    orders_submitted=int(confirmed_order_count),
+                    orders_recommended=int(cycle_counters.get("orders_recommended") or 0),
+                    orders_submission_requested=int(cycle_counters.get("orders_submission_requested") or 0),
+                    orders_submitted=int(cycle_counters.get("orders_submitted") or 0),
+                    orders_filled=int(cycle_counters.get("orders_filled") or 0),
+                    orders_rejected=int(cycle_counters.get("orders_rejected") or 0),
+                    orders_attempted=int(cycle_counters.get("orders_attempted") or 0),
                     exit_status=str(scan_summary.get("status") or _result_value(result, "execution_status") or "unknown"),
                 )
 
@@ -505,8 +532,12 @@ def run_continuous_paper_runner(
                         "run_id": run_id,
                         "dry_run": bool(dry_run),
                         "status": str(_result_value(result, "execution_status") or "unknown"),
-                        "orders_attempted": (1 if str(_result_value(result, "execution_status") or "") in {"completed", "no_trade", "risk_rejected", "duplicate_rejected"} else 0),
-                        "orders_submitted": int(confirmed_order_count),
+                        "orders_recommended": int(cycle_counters.get("orders_recommended") or 0),
+                        "orders_submission_requested": int(cycle_counters.get("orders_submission_requested") or 0),
+                        "orders_submitted": int(cycle_counters.get("orders_submitted") or 0),
+                        "orders_filled": int(cycle_counters.get("orders_filled") or 0),
+                        "orders_rejected": int(cycle_counters.get("orders_rejected") or 0),
+                        "orders_attempted": int(cycle_counters.get("orders_attempted") or 0),
                     },
                     deduplication_key=f"scan_completed:{run_id}:{stats['scans_completed']}",
                 )
