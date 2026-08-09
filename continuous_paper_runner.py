@@ -118,6 +118,50 @@ def _seconds_until_next_market_open(now_eastern: datetime) -> float:
     return max(0.0, (target - now_eastern).total_seconds())
 
 
+def _stop_requested(stop_event: Any | None) -> bool:
+    if stop_event is None:
+        return False
+    checker = getattr(stop_event, "is_set", None)
+    if not callable(checker):
+        return False
+    try:
+        return bool(checker())
+    except Exception:
+        return False
+
+
+def _sleep_with_stop(
+    sleep_fn: Callable[[float], None],
+    sleep_seconds: float,
+    stop_event: Any | None,
+    *,
+    chunk_seconds: float = 60.0,
+) -> bool:
+    remaining = max(0.0, float(sleep_seconds))
+    if remaining <= 0:
+        return _stop_requested(stop_event)
+
+    if stop_event is None:
+        sleep_fn(remaining)
+        return False
+
+    max_chunk = max(1.0, float(chunk_seconds))
+    while remaining > 0:
+        if _stop_requested(stop_event):
+            return True
+        window = min(remaining, max_chunk)
+        try:
+            sleep_fn(window)
+        except InterruptedError:
+            # Some runtimes interrupt sleep when a signal arrives.
+            if _stop_requested(stop_event):
+                return True
+            continue
+        remaining -= window
+
+    return _stop_requested(stop_event)
+
+
 def _result_value(result: Any, key: str, default: Any = None) -> Any:
     if isinstance(result, dict):
         return result.get(key, default)
@@ -341,7 +385,7 @@ def run_continuous_paper_runner(
 
     try:
         while effective_max_iterations is None or stats["cycles"] < int(effective_max_iterations):
-            if stop_event is not None and callable(getattr(stop_event, "is_set", None)) and stop_event.is_set():
+            if _stop_requested(stop_event):
                 _log_event("continuous_runner_shutdown", reason="stop_event", cycles=stats["cycles"])
                 break
 
@@ -419,8 +463,11 @@ def run_continuous_paper_runner(
                     deduplication_key=f"market_closed_wait:{market_date}",
                     deduplication_window_seconds=60 * 60 * 30,
                 )
-                sleep_fn(sleep_seconds)
+                stopped_during_sleep = _sleep_with_stop(sleep_fn, sleep_seconds, stop_event)
                 stats["cycles"] += 1
+                if stopped_during_sleep:
+                    _log_event("continuous_runner_shutdown", reason="stop_event_during_sleep", cycles=stats["cycles"])
+                    break
                 continue
 
             state = _normalize_daily_state(_load_daily_state(resolved_state_path), market_date)
@@ -435,8 +482,11 @@ def run_continuous_paper_runner(
                     max_daily_orders=max_daily_orders,
                     sleep_seconds=scan_interval_seconds,
                 )
-                sleep_fn(scan_interval_seconds)
+                stopped_during_sleep = _sleep_with_stop(sleep_fn, scan_interval_seconds, stop_event)
                 stats["cycles"] += 1
+                if stopped_during_sleep:
+                    _log_event("continuous_runner_shutdown", reason="stop_event_during_sleep", cycles=stats["cycles"])
+                    break
                 continue
 
             try:
@@ -577,7 +627,9 @@ def run_continuous_paper_runner(
             stats["cycles"] += 1
             if effective_max_iterations is not None and stats["cycles"] >= int(effective_max_iterations):
                 break
-            sleep_fn(scan_interval_seconds)
+            if _sleep_with_stop(sleep_fn, scan_interval_seconds, stop_event):
+                _log_event("continuous_runner_shutdown", reason="stop_event_during_sleep", cycles=stats["cycles"])
+                break
     except KeyboardInterrupt:
         _log_event("continuous_runner_shutdown", run_id=run_id, reason="keyboard_interrupt", cycles=stats["cycles"])
         _notify(

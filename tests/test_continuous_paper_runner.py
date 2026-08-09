@@ -35,6 +35,17 @@ class _SetStopEvent:
         return True
 
 
+class _ToggleStopEvent:
+    def __init__(self):
+        self._stop = False
+
+    def is_set(self):
+        return self._stop
+
+    def set(self):
+        self._stop = True
+
+
 def _config(tmp_path, trading_mode="PAPER", scan_interval_minutes=5, max_daily_orders=1, db_subpath="runner.db"):
     db_path = tmp_path / db_subpath
     return type(
@@ -514,6 +525,58 @@ def test_stop_event_can_prevent_loop_start(tmp_path):
 
     assert stats["cycles"] == 0
     assert sleeps == []
+
+
+def test_stop_event_interrupts_long_market_closed_sleep(tmp_path):
+    cfg = _config(tmp_path)
+    state_path = _state_path(tmp_path)
+    sleeps = []
+    stop_event = _ToggleStopEvent()
+
+    def _sleep(seconds):
+        sleeps.append(seconds)
+        stop_event.set()
+
+    stats = run_continuous_paper_runner(
+        config_loader=lambda: cfg,
+        runner=lambda **kwargs: _failed_result(status="no_candidates"),
+        state_path=state_path,
+        now_provider=_Clock([datetime(2026, 7, 25, 16, 1, tzinfo=EASTERN_TZ)]),
+        sleep_fn=_sleep,
+        max_iterations=5,
+        stop_event=stop_event,
+    )
+
+    assert stats["cycles"] == 1
+    assert stats["closed_market_sleeps"] == 1
+    assert sleeps
+    assert sleeps[0] <= 60.0
+
+
+def test_stop_event_interrupts_scan_interval_sleep(tmp_path):
+    cfg = _config(tmp_path)
+    state_path = _state_path(tmp_path)
+    sleeps = []
+    stop_event = _ToggleStopEvent()
+
+    def _sleep(seconds):
+        sleeps.append(seconds)
+        stop_event.set()
+
+    stats = run_continuous_paper_runner(
+        config_loader=lambda: cfg,
+        runner=lambda **kwargs: _failed_result(status="no_candidates"),
+        state_path=state_path,
+        now_provider=_Clock([datetime(2026, 7, 22, 10, 0, tzinfo=EASTERN_TZ)]),
+        sleep_fn=_sleep,
+        max_iterations=5,
+        stop_event=stop_event,
+    )
+
+    assert stats["cycles"] == 1
+    assert stats["scans_completed"] == 1
+    assert sleeps
+    assert sleeps[0] <= 60.0
 
 
 def test_keyboard_interrupt_during_sleep_shuts_down_cleanly(tmp_path):

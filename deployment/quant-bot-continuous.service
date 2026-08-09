@@ -5,12 +5,15 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-Restart=always
+Restart=on-failure
 RestartSec=10
+TimeoutStopSec=45
+KillSignal=SIGTERM
 User=quantbot
 Group=quantbot
 WorkingDirectory=/home/quantbot/quant-trading-bot
 EnvironmentFile=-/etc/quant-bot/quant-bot.env
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/home/quantbot/quant-trading-bot/.venv/bin/python /home/quantbot/quant-trading-bot/continuous_paper_runner.py
 StandardOutput=journal
 StandardError=journal
