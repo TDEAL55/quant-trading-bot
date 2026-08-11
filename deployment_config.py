@@ -101,7 +101,7 @@ def load_deployment_config(environ: dict[str, str] | None = None) -> DeploymentC
     run_hour = _parse_int("RUN_HOUR", env.get("RUN_HOUR", "9"), minimum=0, maximum=23)
     run_minute = _parse_int("RUN_MINUTE", env.get("RUN_MINUTE", "30"), minimum=0, maximum=59)
     scan_interval_minutes = _parse_int("SCAN_INTERVAL_MINUTES", env.get("SCAN_INTERVAL_MINUTES", "5"), minimum=1)
-    continuous_runner_dry_run = _parse_bool(env.get("CONTINUOUS_RUNNER_DRY_RUN"), default=False)
+    continuous_runner_dry_run = _parse_bool(env.get("CONTINUOUS_RUNNER_DRY_RUN"), default=True)
     notifications_enabled = _parse_bool(env.get("NOTIFICATIONS_ENABLED"), default=False)
     kill_switch = _parse_bool(env.get("KILL_SWITCH"), default=False)
 

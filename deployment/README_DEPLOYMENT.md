@@ -1,6 +1,6 @@
 # Deployment Readiness
 
-This profile runs autonomous PAPER trading only. LIVE mode is hard-blocked.
+This profile runs autonomous PAPER trading only on DigitalOcean. LIVE mode is hard-blocked.
 
 For intraday autonomous mode, use the continuous service (`continuous_paper_runner.py`) so the process remains active and scans every `SCAN_INTERVAL_MINUTES` during market hours.
 
@@ -33,7 +33,9 @@ KILL_SWITCH=false
 RUN_TIMEZONE=America/New_York
 SCAN_INTERVAL_MINUTES=5
 SCAN_ONLY_DURING_MARKET_HOURS=true
-CONTINUOUS_RUNNER_DRY_RUN=false
+CONTINUOUS_RUNNER_DRY_RUN=true
+PAPER_EXECUTION_ENABLED=false
+CONTROLLED_PAPER_VALIDATION=false
 MAX_DAILY_ORDERS=5
 MAX_OPEN_POSITIONS=10
 MAX_POSITION_EQUITY_PERCENT=10
@@ -125,14 +127,16 @@ source .venv/bin/activate
 python unattended_daily_runner.py
 ```
 
-10. Install/refresh continuous intraday service
+10. Install/refresh systemd services
 
 ```bash
 cd /home/quantbot/quant-trading-bot
 sudo cp deployment/quant-bot-continuous.service /etc/systemd/system/quant-bot-continuous.service
+sudo cp deployment/quant-bot-dashboard.service /etc/systemd/system/quant-bot-dashboard.service
 sudo systemctl daemon-reload
 sudo systemctl enable quant-bot-continuous.service
 sudo systemctl restart quant-bot-continuous.service
+sudo systemctl enable quant-bot-dashboard.service
 ```
 
 11. (Optional) Keep existing daily oneshot service/timer for end-of-day summary/backup workflows
@@ -152,27 +156,34 @@ sudo systemctl start quant-bot.service
 systemctl status quant-bot-continuous.service --no-pager
 ```
 
-13. Verify daily service status (optional)
+13. Verify dashboard service status
+
+```bash
+systemctl status quant-bot-dashboard.service --no-pager
+```
+
+14. Verify daily service status (optional)
 
 ```bash
 systemctl status quant-bot.service --no-pager
 ```
 
-14. Verify timer status and next run
+15. Verify timer status and next run
 
 ```bash
 systemctl status quant-bot.timer --no-pager
 systemctl list-timers quant-bot.timer --all
 ```
 
-15. View live logs
+16. View live logs
 
 ```bash
 journalctl -u quant-bot-continuous.service -f -n 200
+journalctl -u quant-bot-dashboard.service -f -n 200
 journalctl -u quant-bot.service -f -n 200
 ```
 
-16. Confirm no live broker order path was called
+17. Confirm no live broker order path was called
 
 ```bash
 journalctl -u quant-bot.service -n 500 --no-pager | grep -Ei "broker execution blocked|no broker orders were submitted|Trading mode must be exactly PAPER|LIVE trading is hard-blocked"

@@ -2821,11 +2821,11 @@ def _component_status(payload, view):
     review_warning = bool(view.get("review_required"))
     status = {
         "GitHub": "healthy",
-        "Railway worker": "healthy" if bot_ok else "warning",
-        "Railway cron": "healthy" if payload.get("latest_run") else "warning",
+        "Continuous runner": "healthy" if bot_ok else "warning",
+        "Systemd scheduler": "healthy" if payload.get("latest_run") else "warning",
         "Alpaca Paper": "healthy" if alpaca_ok else "warning",
-        "Railway volume": "healthy" if db_ok else "warning",
-        "PostgreSQL": "healthy" if db_ok else "offline",
+        "Persistent storage": "healthy" if db_ok else "warning",
+        "SQLite database": "healthy" if db_ok else "offline",
         "Discord notifications": "warning" if review_warning else "healthy",
         "Streamlit dashboard": "healthy" if db_ok else "warning",
     }
@@ -2837,11 +2837,11 @@ def render_architecture_page(payload, view):
     statuses = _component_status(payload, view)
     nodes = [
         ("GitHub", "Source control and release history", statuses.get("GitHub", "warning")),
-        ("Railway worker", "Primary paper-trading worker", statuses.get("Railway worker", "warning")),
-        ("Railway cron", "Scheduled execution path", statuses.get("Railway cron", "warning")),
-        ("Railway volume", "Persistent monitoring state", statuses.get("Railway volume", "warning")),
+        ("Continuous runner", "Primary paper-trading worker", statuses.get("Continuous runner", "warning")),
+        ("Systemd scheduler", "Service supervision and restart policy", statuses.get("Systemd scheduler", "warning")),
+        ("Persistent storage", "Monitoring and state files on server disk", statuses.get("Persistent storage", "warning")),
         ("Alpaca Paper", "Broker connectivity and auth", statuses.get("Alpaca Paper", "warning")),
-        ("PostgreSQL", "Read-only monitoring database", statuses.get("PostgreSQL", "warning")),
+        ("SQLite database", "Read-only monitoring database", statuses.get("SQLite database", "warning")),
         ("Discord notifier", "Read-only alert delivery", statuses.get("Discord notifications", "warning")),
         ("Streamlit dashboard", "This command center UI", statuses.get("Streamlit dashboard", "warning")),
     ]

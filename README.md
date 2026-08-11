@@ -54,41 +54,100 @@ python dashboard.py
 ## Notes
 This software is for research and education only. It does not guarantee profits and should not be used as financial advice.
 
-## Railway deployment
-Railway is intended for dashboard/API hosting only. Autonomous PAPER trading workers should run on a single host (DigitalOcean systemd) to avoid duplicate execution against the same account/state.
+## DigitalOcean deployment
+DigitalOcean VPS is the single supported production deployment target.
 
-### Safety defaults for cloud
+### Deployment architecture
+
+```text
+DigitalOcean VPS
+|- quant-bot-continuous.service
+|  `- continuous_paper_runner.py
+|- quant-bot-dashboard.service
+|  `- streamlit dashboard_app.py
+|- SQLite database (/var/lib/quant-bot/quant-bot.db)
+|- Discord notifications
+`- journalctl logs
+```
+
+### Safety defaults for production
 - PAPER mode only (`TRADING_MODE=PAPER`)
+- Dry-run enabled by default (`CONTINUOUS_RUNNER_DRY_RUN=true`)
+- Controlled execution disabled by default (`PAPER_EXECUTION_ENABLED=false`, `CONTROLLED_PAPER_VALIDATION=false`)
 - LIVE mode blocked (`TRADING_MODE=LIVE` raises and exits)
-- Real-money trading is blocked (paper client only)
-- No automatic strategy changes
-- No automatic parameter optimization
-- Daily summaries are still written to `daily_summaries/`
-- Final report is written to `TWO_WEEK_REPORT.md`
 
-### Deployment split
-- DigitalOcean (`quant-bot-continuous.service`): autonomous PAPER worker (`continuous_paper_runner.py`).
-- Railway (`worker` service): dashboard/API process only (`streamlit run dashboard_app.py ...`).
+### Initial server deployment
+1. Clone and update repository:
 
-### Railway worker guard
-- `ALLOW_RAILWAY_TRADING_WORKER=false` is the safe default.
-- When Railway environment markers are detected, `continuous_paper_runner.py` fails closed unless `ALLOW_RAILWAY_TRADING_WORKER=true` is explicitly set.
-- This prevents accidental dual-worker execution across DigitalOcean and Railway.
+```bash
+cd /home/quantbot
+git clone https://github.com/TDEAL55/quant-trading-bot.git
+cd quant-trading-bot
+git checkout sprint14-continuous-runner
+git pull --ff-only
+```
 
-### Required Railway environment variables
-Set these in Railway service variables (do not commit credentials):
+2. Create virtual environment and install dependencies:
 
-- `DATABASE_URL=<railway_postgres_url>`
-- `DASHBOARD_PASSWORD=<strong_password_for_dashboard_access>`
-- `ALLOW_RAILWAY_TRADING_WORKER=false`
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
 
-Optional:
+3. Configure runtime environment:
 
-- `PAPER_DAILY_STATE_PATH=/app/state/paper_daily_state.json`
-- `BOT_RUN_ID=<optional_external_run_id_for_idempotency>`
+```bash
+sudo install -d -m 0750 -o root -g quantbot /etc/quant-bot
+sudo cp deployment/deploy.example.env /etc/quant-bot/quant-bot.env
+sudo chown root:quantbot /etc/quant-bot/quant-bot.env
+sudo chmod 0600 /etc/quant-bot/quant-bot.env
+sudo nano /etc/quant-bot/quant-bot.env
+```
 
-### Scheduler setup in Railway
-Do not schedule autonomous trading worker jobs in Railway unless there is an explicit operational decision to move worker ownership away from DigitalOcean and `ALLOW_RAILWAY_TRADING_WORKER=true` is intentionally set.
+4. Install migrations:
+
+```bash
+source .venv/bin/activate
+python monitoring_db.py --migrate
+```
+
+5. Install systemd units:
+
+```bash
+sudo cp deployment/quant-bot-continuous.service /etc/systemd/system/
+sudo cp deployment/quant-bot-dashboard.service /etc/systemd/system/
+sudo systemctl daemon-reload
+```
+
+### Continuous runner
+
+```bash
+sudo systemctl enable quant-bot-continuous.service
+sudo systemctl start quant-bot-continuous.service
+```
+
+### Dashboard
+
+```bash
+sudo systemctl enable quant-bot-dashboard.service
+sudo systemctl start quant-bot-dashboard.service
+```
+
+### Health checks
+
+```bash
+systemctl status quant-bot-continuous.service
+systemctl status quant-bot-dashboard.service
+```
+
+### Logs
+
+```bash
+journalctl -u quant-bot-continuous.service
+journalctl -u quant-bot-dashboard.service
+```
 
 ## Read-only monitoring dashboard (v1)
 

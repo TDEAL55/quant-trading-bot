@@ -157,7 +157,7 @@ def _report_markdown(analysis, break_even_bps, regulatory_fee_bps, state):
         "- Strategy timing fixed: Buy 3:58 PM ET, sell 9:32 AM ET next trading day.",
         "- Symbol: SPY only.",
         "- Data: Alpaca SIP minute bars.",
-        "- Execution: no order submission, no Railway integration, LIVE mode blocked.",
+        "- Execution: no order submission, no cloud worker integration, LIVE mode blocked.",
         "- Calendar year: 2023.",
         "- Processing model: month-by-month with resumable progress and per-month cache directories.",
         "",

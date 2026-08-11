@@ -238,10 +238,7 @@ def _daily_state_path():
     if configured:
         return Path(configured)
 
-    running_in_cloud = any(
-        os.getenv(name)
-        for name in ("RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID")
-    ) or Path("/app").exists()
+    running_in_cloud = Path("/app").exists()
 
     return DEFAULT_CLOUD_DAILY_STATE_PATH if running_in_cloud else DEFAULT_LOCAL_DAILY_STATE_PATH
 

@@ -1,0 +1,20 @@
+[Unit]
+Description=Quant Bot Streamlit Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=5
+User=quantbot
+Group=quantbot
+WorkingDirectory=/home/quantbot/quant-trading-bot
+EnvironmentFile=-/etc/quant-bot/quant-bot.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/quantbot/quant-trading-bot/.venv/bin/streamlit run /home/quantbot/quant-trading-bot/dashboard_app.py --server.address 127.0.0.1 --server.port 8501 --server.headless true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
