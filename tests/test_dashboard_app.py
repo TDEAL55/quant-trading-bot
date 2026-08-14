@@ -99,6 +99,109 @@ def test_market_clock_open_and_closed_states():
     assert closed_clock["is_open"] is False
 
 
+def test_live_readiness_defaults_not_ready(monkeypatch):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("CONTINUOUS_RUNNER_DRY_RUN", "true")
+    monkeypatch.setenv("PAPER_BROKER_BACKEND", "SIMULATED")
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "test-pass")
+    monkeypatch.delenv("DASHBOARD_PUBLIC_HTTPS_ENABLED", raising=False)
+
+    snapshot = dashboard_app.build_live_readiness_snapshot(
+        {
+            "latest_run": {"trading_mode": "PAPER", "run_timestamp": "2026-07-12T15:00:00+00:00"},
+            "latest_signal": {},
+            "latest_account": {},
+            "recent_orders": [],
+        },
+        {},
+    )
+
+    assert snapshot["overall_status"] == "NOT READY"
+
+
+def test_service_health_telemetry_handles_missing_data():
+    telemetry = dashboard_app.build_service_health_telemetry(
+        {
+            "latest_run": {},
+            "latest_scanner_run": {},
+            "service_health": {},
+            "db_connected": False,
+        },
+        {"account_status": "unknown"},
+    )
+
+    assert telemetry["database_availability"] == "Disconnected"
+    assert telemetry["broker_connectivity"] == "Unavailable"
+    assert telemetry["recent_error_count"] == 0
+
+
+def test_monitor_status_redacts_secret_like_errors(monkeypatch):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("CONTINUOUS_RUNNER_DRY_RUN", "true")
+    snapshot = dashboard_app.build_monitor_status_snapshot(
+        {
+            "latest_run": {
+                "trading_mode": "PAPER",
+                "run_timestamp": "2026-07-12T15:00:00+00:00",
+                "safe_error_message": "api_key=abc123secret",
+            },
+            "latest_signal": {},
+            "latest_account": {},
+            "recent_orders": [],
+            "recent_runs": [
+                {
+                    "bot_status": "error",
+                    "safe_error_message": "token=super-secret-token",
+                }
+            ],
+        },
+        {"bot_health": {"style": "warning"}},
+    )
+    assert "super-secret-token" not in str(snapshot.get("last_error"))
+    assert "[REDACTED]" in str(snapshot.get("last_error"))
+
+
+def test_monitor_status_reports_autonomous_paper_fields(monkeypatch):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("CONTINUOUS_RUNNER_DRY_RUN", "false")
+    monkeypatch.setenv("PAPER_EXECUTION_ENABLED", "true")
+    monkeypatch.setenv("CONTROLLED_PAPER_VALIDATION", "false")
+
+    snapshot = dashboard_app.build_monitor_status_snapshot(
+        {
+            "latest_run": {"trading_mode": "PAPER", "run_timestamp": "2026-07-12T15:00:00+00:00", "market_date": "2026-07-12"},
+            "latest_signal": {"market_date": "2026-07-12"},
+            "latest_account": {"open_positions": 2},
+            "latest_scanner_run": {
+                "started_at": "2026-07-12T14:58:00+00:00",
+                "completed_at": "2026-07-12T15:00:00+00:00",
+                "duration_seconds": 120.0,
+                "symbol_count": 350,
+                "eligible_count": 8,
+            },
+            "recent_orders": [
+                {
+                    "market_date": "2026-07-12",
+                    "event_timestamp": "2026-07-12T15:00:30+00:00",
+                    "submitted": 1,
+                    "safe_order_status": "filled",
+                }
+            ],
+            "scanner_rejections": [{"reason": "reward_risk_below_minimum"}],
+            "recent_runs": [],
+        },
+        {"bot_health": {"style": "healthy"}},
+    )
+
+    assert snapshot.get("autonomous_paper_trading") == "ENABLED"
+    assert snapshot.get("dry_run") == "OFF"
+    assert snapshot.get("paper_execution") == "ENABLED"
+    assert snapshot.get("controlled_validation") == "OFF"
+    assert int(snapshot.get("orders_submitted_today") or 0) == 1
+    assert int(snapshot.get("orders_filled_today") or 0) == 1
+    assert int(snapshot.get("open_paper_positions") or 0) == 2
+
+
 def test_signal_strength_meter_boundaries():
     weak = dashboard_app.build_signal_strength(0.01)
     strong = dashboard_app.build_signal_strength(9.0)
@@ -370,7 +473,7 @@ def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch)
 
     nav_calls = [call for call in fake_st._calls if call[0] == "selectbox" and call[1] == "Navigate"]
     assert nav_calls
-    assert nav_calls[0][2] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
+    assert nav_calls[0][2] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "LIVE Readiness", "Alerts", "Research", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
     assert all("trade" not in str(page).lower() for page in nav_calls[0][2])
 
     build_markers = [call for call in fake_st._calls if call[0] == "markdown" and dashboard_app.UI_BUILD_LABEL in call[1]]

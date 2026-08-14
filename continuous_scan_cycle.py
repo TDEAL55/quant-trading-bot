@@ -29,6 +29,9 @@ from config import (
     PAPER_VALIDATION_REBALANCE_TOLERANCE,
     PAPER_VALIDATION_RECONCILIATION_TOLERANCE,
     PAPER_EXECUTION_ENABLED,
+    SCANNER_MAX_COARSE_CANDIDATES,
+    SCANNER_MAX_DEEP_SCORE_SYMBOLS,
+    SCANNER_MAX_SCAN_SECONDS,
     PORTFOLIO_ALLOCATION_MODE,
     PORTFOLIO_MAX_CORRELATION,
     PORTFOLIO_MAX_POSITION_PERCENT,
@@ -396,8 +399,9 @@ def run_continuous_scan_cycle(
         raise RuntimeError("continuous scan cycle requires TRADING_MODE=PAPER")
 
     validation_order_limit = max(int(MAX_VALIDATION_ORDERS or 0), 0)
-    controlled_execution_enabled = bool(PAPER_EXECUTION_ENABLED) and bool(CONTROLLED_PAPER_VALIDATION) and validation_order_limit >= 1
-    validation_notional_cap = max(float(MAX_VALIDATION_ORDER_NOTIONAL or 0.0), 0.0)
+    autonomous_execution_enabled = bool(PAPER_EXECUTION_ENABLED)
+    controlled_validation_mode = bool(autonomous_execution_enabled and CONTROLLED_PAPER_VALIDATION)
+    validation_notional_cap = max(float(MAX_VALIDATION_ORDER_NOTIONAL or 0.0), 0.0) if controlled_validation_mode else 0.0
 
     started_dt = _coerce_utc(now_provider())
     started_at = started_dt.isoformat()
@@ -652,6 +656,9 @@ def run_continuous_scan_cycle(
         scan_runner,
         universe_records,
         progress_callback=_scan_progress_telemetry,
+        max_scan_seconds=int(SCANNER_MAX_SCAN_SECONDS),
+        coarse_candidate_limit=int(SCANNER_MAX_COARSE_CANDIDATES),
+        deep_score_limit=int(SCANNER_MAX_DEEP_SCORE_SYMBOLS),
     )
     summary = dict(scan_payload.get("summary") or {})
     summary["full_universe_count"] = int(full_universe_count)
@@ -1133,7 +1140,11 @@ def run_continuous_scan_cycle(
             allow_fractional=bool(PAPER_VALIDATION_ALLOW_FRACTIONAL),
             quantity_precision=int(PAPER_VALIDATION_QUANTITY_PRECISION),
             rebalance_tolerance=float(PAPER_VALIDATION_REBALANCE_TOLERANCE),
-            maximum_orders=max(1, min(int(PAPER_VALIDATION_MAX_ORDERS), int(validation_order_limit or 1))),
+            maximum_orders=(
+                max(1, min(int(PAPER_VALIDATION_MAX_ORDERS), int(validation_order_limit or 1)))
+                if controlled_validation_mode
+                else max(1, int(PAPER_VALIDATION_MAX_ORDERS))
+            ),
             cash_buffer=float(PAPER_VALIDATION_CASH_BUFFER),
         )
         target_weight = min(target_notional / max(float(broker_equity), 1.0), 1.0)
@@ -1234,7 +1245,7 @@ def run_continuous_scan_cycle(
             "stale_data": bool(stale_data_ok),
             "liquidity": bool(liquidity_ok),
             "reward_risk": bool(reward_risk_ok),
-            "validation_order_limit": bool(validation_order_limit >= 1),
+            "validation_order_limit": bool((not controlled_validation_mode) or validation_order_limit >= 1),
             "duplicate_protection": True,
         }
 
@@ -1314,7 +1325,7 @@ def run_continuous_scan_cycle(
 
         broker_pre_positions = dict(broker_positions)
         broker_pre_cash = float(broker_cash)
-        submission_requested = (not bool(dry_run)) and bool(controlled_execution_enabled)
+        submission_requested = (not bool(dry_run)) and bool(autonomous_execution_enabled)
 
         if not submission_requested:
             skip_reason = "dry_run_mode" if bool(dry_run) else "paper_execution_disabled"
@@ -1334,7 +1345,7 @@ def run_continuous_scan_cycle(
                 notification_callback,
                 event_type="dry_run_trade_skipped",
                 title="Execution Skipped",
-                message=("PAPER DRY RUN mode skipped order submission." if bool(dry_run) else "Controlled paper execution is disabled by configuration."),
+                message=("PAPER DRY RUN mode skipped order submission." if bool(dry_run) else "Autonomous paper execution is disabled by configuration."),
                 severity="INFO",
                 metadata={
                     "run_id": cycle_run_id,

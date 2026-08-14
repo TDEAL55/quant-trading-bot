@@ -256,6 +256,33 @@ def _normalize_daily_state(state: dict[str, Any], market_date: str) -> dict[str,
     return {"market_date": market_date, "orders_submitted": max(0, orders_submitted)}
 
 
+def _read_lock_snapshot(lock_path: Path) -> dict[str, Any]:
+    if not lock_path.exists():
+        return {}
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+    acquired_at = str(payload.get("acquired_at") or "")
+    age_seconds = None
+    if acquired_at:
+        try:
+            parsed = datetime.fromisoformat(acquired_at)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=ZoneInfo("UTC"))
+            age_seconds = max((datetime.now(ZoneInfo("UTC")) - parsed.astimezone(ZoneInfo("UTC"))).total_seconds(), 0.0)
+        except Exception:
+            age_seconds = None
+
+    return {
+        "owner": str(payload.get("owner") or ""),
+        "pid": int(payload.get("pid") or 0),
+        "acquired_at": acquired_at,
+        "age_seconds": (round(float(age_seconds), 3) if age_seconds is not None else None),
+    }
+
+
 def run_continuous_paper_runner(
     database_url: str | None = None,
     config_loader: Callable[[], Any] = load_deployment_config,
@@ -358,6 +385,7 @@ def run_continuous_paper_runner(
         "quota_skips": 0,
         "closed_market_sleeps": 0,
     }
+    last_active_cycle_key: str | None = None
     daily_summary_enabled = str(os.getenv("NOTIFICATION_DAILY_SUMMARY_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
     weekly_summary_enabled = str(os.getenv("NOTIFICATION_WEEKLY_SUMMARY_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
     daily_summary_hour, daily_summary_minute = _parse_summary_time_et(os.getenv("DAILY_SUMMARY_TIME_ET", "16:15"))
@@ -572,13 +600,27 @@ def run_continuous_paper_runner(
                 )
             except RunLockBusyError:
                 stats["lock_skips"] += 1
-                _log_event(
-                    "continuous_runner_lock_busy",
-                    run_id=run_id,
-                    timestamp=now_eastern.isoformat(),
-                    market_date=market_date,
-                    sleep_seconds=scan_interval_seconds,
+                snapshot = _read_lock_snapshot(lock_path)
+                cycle_key = "|".join(
+                    [
+                        str(snapshot.get("pid") or 0),
+                        str(snapshot.get("acquired_at") or ""),
+                        market_date,
+                    ]
                 )
+                if cycle_key != last_active_cycle_key:
+                    _log_event(
+                        "scan_skipped_previous_cycle_active",
+                        run_id=run_id,
+                        timestamp=now_eastern.isoformat(),
+                        market_date=market_date,
+                        sleep_seconds=scan_interval_seconds,
+                        active_run_owner=str(snapshot.get("owner") or "unknown"),
+                        active_run_pid=int(snapshot.get("pid") or 0),
+                        active_run_acquired_at=str(snapshot.get("acquired_at") or ""),
+                        active_run_age_seconds=snapshot.get("age_seconds"),
+                    )
+                    last_active_cycle_key = cycle_key
             except Exception as exc:
                 stats["scans_failed"] += 1
                 _log_event(

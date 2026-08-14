@@ -643,6 +643,60 @@ def test_scan_interval_path_continues_after_lock_busy_and_exception(tmp_path):
     assert sleeps == [300]
 
 
+def test_lock_busy_events_are_deduplicated_for_same_active_cycle(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    state_path = _state_path(tmp_path)
+    lock_path = cfg.database_path.with_suffix(".continuous.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(
+        json.dumps(
+            {
+                "owner": "continuous-paper-runner",
+                "pid": 424242,
+                "acquired_at": "2026-07-22T14:00:00+00:00",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    events = []
+    monkeypatch.setattr(
+        continuous_paper_runner,
+        "_log_event",
+        lambda event, **fields: events.append((event, dict(fields))),
+    )
+
+    class AlwaysBusyLock:
+        def __init__(self, **kwargs):
+            del kwargs
+
+        def __enter__(self):
+            raise RunLockBusyError("busy")
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    stats = run_continuous_paper_runner(
+        config_loader=lambda: cfg,
+        runner=lambda **kwargs: _failed_result(status="no_candidates"),
+        state_path=state_path,
+        now_provider=_Clock(
+            [
+                datetime(2026, 7, 22, 10, 0, tzinfo=EASTERN_TZ),
+                datetime(2026, 7, 22, 10, 5, tzinfo=EASTERN_TZ),
+            ]
+        ),
+        sleep_fn=lambda _seconds: None,
+        lock_factory=AlwaysBusyLock,
+        max_iterations=2,
+    )
+
+    skip_events = [name for name, _ in events if name == "scan_skipped_previous_cycle_active"]
+    assert stats["lock_skips"] == 2
+    assert len(skip_events) == 1
+
+
 def test_build_full_universe_dry_run_command_uses_pipefail_and_python_exit_code():
     command = continuous_paper_runner.build_full_universe_dry_run_command()
     assert "set -o pipefail" in command

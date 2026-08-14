@@ -16,9 +16,10 @@ from config import (
     SCANNER_ALLOWED_SIGNALS,
     SCANNER_BATCH_SIZE,
     SCANNER_BLOCKED_REGIMES,
+    SCANNER_MAX_COARSE_CANDIDATES,
     SCANNER_DATA_REQUEST_TIMEOUT_SECONDS,
-    SCANNER_DEEP_SCORE_LIMIT,
     SCANNER_LIGHTWEIGHT_BATCH_SIZE,
+    SCANNER_MAX_DEEP_SCORE_SYMBOLS,
     SCANNER_PROGRESS_EVERY,
     SCANNER_MAX_SCAN_SECONDS,
     SCANNER_MAX_MISSING_PERCENT,
@@ -643,7 +644,8 @@ def scan_universe(
     max_retries: int = SCANNER_MAX_RETRIES,
     batch_size: int = SCANNER_BATCH_SIZE,
     lightweight_batch_size: int = SCANNER_LIGHTWEIGHT_BATCH_SIZE,
-    deep_score_limit: int = SCANNER_DEEP_SCORE_LIMIT,
+    deep_score_limit: int = SCANNER_MAX_DEEP_SCORE_SYMBOLS,
+    coarse_candidate_limit: int = SCANNER_MAX_COARSE_CANDIDATES,
     progress_every: int = SCANNER_PROGRESS_EVERY,
     max_scan_seconds: int = SCANNER_MAX_SCAN_SECONDS,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
@@ -665,6 +667,13 @@ def scan_universe(
 
     started = time.perf_counter()
     deadline = started + float(max_scan_seconds if int(max_scan_seconds) > 0 else 365 * 24 * 3600)
+
+    def _remaining_timeout_seconds(default_timeout: float) -> float:
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            return 0.0
+        return max(min(float(default_timeout), remaining), 0.1)
+
     tracemalloc.start()
 
     stage_timers: dict[str, float] = {}
@@ -756,10 +765,15 @@ def scan_universe(
         batch_symbol_errors: dict[str, Exception] = {}
 
         for attempt in range(max(int(max_retries), 0) + 1):
+            remaining_timeout = _remaining_timeout_seconds(max(float(request_timeout_seconds), 1.0))
+            if remaining_timeout <= 0:
+                deadline_hit = True
+                batch_exception = TimeoutError("lightweight stage exceeded SCANNER_MAX_SCAN_SECONDS")
+                break
             try:
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(data_loader_batch, symbols, light_start, light_end)
-                    batch_frames = dict(future.result(timeout=max(float(request_timeout_seconds), 1.0)) or {})
+                    batch_frames = dict(future.result(timeout=remaining_timeout) or {})
                     batch_symbol_errors = dict(getattr(data_loader_batch, "_last_errors", {}) or {})
                 break
             except FutureTimeoutError as exc:
@@ -780,7 +794,15 @@ def scan_universe(
                 else:
                     time.sleep((2 ** attempt) * 0.5 + random.uniform(0.0, 0.2))
 
-        for item in batch:
+        for idx, item in enumerate(batch):
+            if time.perf_counter() >= deadline:
+                deadline_hit = True
+                remaining_items = batch[idx:]
+                for pending in remaining_items:
+                    pending_symbol = normalize_symbol(pending.get("symbol", ""))
+                    timed_out_symbols.append(pending_symbol)
+                    scan_results.append(_build_error_result(pending, "scan timeout: lightweight stage exceeded SCANNER_MAX_SCAN_SECONDS"))
+                break
             symbol = normalize_symbol(item.get("symbol", ""))
             symbol_started = time.perf_counter()
             history = batch_frames.get(symbol)
@@ -852,15 +874,21 @@ def scan_universe(
             normalize_symbol(item.get("symbol", "")),
         ),
     )
-    effective_deep_limit = int(deep_score_limit) if int(deep_score_limit) > 0 else len(coarse_ranked)
-    deep_candidates = coarse_ranked[:effective_deep_limit]
-    for item in coarse_ranked[effective_deep_limit:]:
+    effective_coarse_limit = int(coarse_candidate_limit) if int(coarse_candidate_limit) > 0 else len(coarse_ranked)
+    stage_c_candidates = coarse_ranked[:effective_coarse_limit]
+    for item in coarse_ranked[effective_coarse_limit:]:
+        scan_results.append(_build_rejected_result(item, ["coarse ranking below candidate cutoff"]))
+        _count_reasons(filtered_count_by_reason, ["coarse ranking below candidate cutoff"])
+
+    effective_deep_limit = int(deep_score_limit) if int(deep_score_limit) > 0 else len(stage_c_candidates)
+    deep_candidates = stage_c_candidates[:effective_deep_limit]
+    for item in stage_c_candidates[effective_deep_limit:]:
         scan_results.append(_build_rejected_result(item, ["coarse ranking below deep score limit"]))
         _count_reasons(filtered_count_by_reason, ["coarse ranking below deep score limit"])
     stage_timers["coarse_ranking_seconds"] = round(max(time.perf_counter() - stage_started, 0.0), 4)
     stage_counts["coarse_ranking"] = {
         "entered": int(len(lightweight_survivors)),
-        "exited": int(len(deep_candidates)),
+        "exited": int(len(stage_c_candidates)),
     }
 
     if progress_callback:
@@ -889,10 +917,15 @@ def scan_universe(
         batch_exception: Exception | None = None
         batch_symbol_errors: dict[str, Exception] = {}
         for attempt in range(max(int(max_retries), 0) + 1):
+            remaining_timeout = _remaining_timeout_seconds(max(float(request_timeout_seconds), 1.0))
+            if remaining_timeout <= 0:
+                deadline_hit = True
+                batch_exception = TimeoutError("full scoring stage exceeded SCANNER_MAX_SCAN_SECONDS")
+                break
             try:
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(data_loader_batch, symbols, start_date, end_date)
-                    batch_frames = dict(future.result(timeout=max(float(request_timeout_seconds), 1.0)) or {})
+                    batch_frames = dict(future.result(timeout=remaining_timeout) or {})
                     batch_symbol_errors = dict(getattr(data_loader_batch, "_last_errors", {}) or {})
                 break
             except FutureTimeoutError:
@@ -913,7 +946,15 @@ def scan_universe(
                 else:
                     time.sleep((2 ** attempt) * 0.5 + random.uniform(0.0, 0.2))
 
-        for item in batch:
+        for idx, item in enumerate(batch):
+            if time.perf_counter() >= deadline:
+                deadline_hit = True
+                remaining_items = batch[idx:]
+                for pending in remaining_items:
+                    pending_symbol = normalize_symbol(pending.get("symbol", ""))
+                    timed_out_symbols.append(pending_symbol)
+                    scan_results.append(_build_error_result(pending, "scan timeout: full scoring stage exceeded SCANNER_MAX_SCAN_SECONDS"))
+                break
             symbol = normalize_symbol(item.get("symbol", ""))
             symbol_started = time.perf_counter()
             history = batch_frames.get(symbol)
@@ -993,6 +1034,7 @@ def scan_universe(
     summary["max_workers"] = int(max_workers)
     summary["batch_size"] = int(max(batch_size, 1))
     summary["lightweight_batch_size"] = int(max(lightweight_batch_size, 1))
+    summary["coarse_candidate_limit"] = int(effective_coarse_limit)
     summary["deep_score_limit"] = int(effective_deep_limit)
     summary["max_scan_seconds"] = int(max_scan_seconds)
     summary["progress_every"] = int(max(progress_every, 1))
@@ -1008,7 +1050,7 @@ def scan_universe(
     ranking_completed = True
     infrastructure_failed = bool(universe_total_count <= 0 or (len(metadata_pass_records) > 0 and lightweight_processed == 0))
     stage_b_survivors = len(lightweight_survivors)
-    stage_c_survivors = len(deep_candidates)
+    stage_c_survivors = len(stage_c_candidates)
     deep_threshold = max(1, int(max(stage_c_survivors, 1) * 0.50))
     partial_success_acceptable = bool(ranking_completed and deep_scored_count >= deep_threshold)
 

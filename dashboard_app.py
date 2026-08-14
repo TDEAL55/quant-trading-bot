@@ -26,7 +26,8 @@ try:
 except Exception:  # pragma: no cover
     st_autorefresh = None
 
-    from config import BENCHMARK_SYMBOL
+from config import BENCHMARK_SYMBOL
+from deployment_config import load_deployment_config
 from monitoring_db import MonitoringDatabase
 from dashboard_data import fetch_dashboard_payload
 from dashboard_exports import export_daily_activity, export_performance_summary, export_sanitized_orders, export_signal_history, export_system_health
@@ -91,7 +92,7 @@ THEMES = {
     },
 }
 
-PAGE_OPTIONS = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "Alerts", "Research", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
+PAGE_OPTIONS = ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "LIVE Readiness", "Alerts", "Research", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
 MODE_OPTIONS = ["Standard Mode", "Focus Mode", "Presentation Mode"]
 THEME_OPTIONS = ["Midnight Blue", "Black Terminal", "Arctic Glass"]
 AUTO_REFRESH_OPTIONS = ["Off", "30 seconds", "60 seconds", "5 minutes"]
@@ -1307,6 +1308,219 @@ def build_dashboard_view_model(payload):
     }
 
 
+def _safe_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _seconds_since_iso(value) -> int | None:
+    dt = _parse_iso(value)
+    if dt is None:
+        return None
+    return max(int((datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds()), 0)
+
+
+def _human_age(value) -> str:
+    seconds = _seconds_since_iso(value)
+    if seconds is None:
+        return "Unknown"
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h"
+
+
+def _runner_pid_from_lock() -> int | None:
+    try:
+        config = load_deployment_config()
+        lock_path = Path(config.database_path).with_suffix(".continuous.lock")
+        if not lock_path.exists():
+            return None
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        pid = _safe_int(payload.get("pid"), 0)
+        return pid if pid > 0 else None
+    except Exception:
+        return None
+
+
+def build_monitor_status_snapshot(payload, view):
+    latest_run = payload.get("latest_run") or {}
+    latest_signal = payload.get("latest_signal") or {}
+    latest_account = payload.get("latest_account") or {}
+    latest_scanner_run = payload.get("latest_scanner_run") or {}
+    recent_orders = payload.get("recent_orders") or []
+    scanner_rejections = payload.get("scanner_rejections") or []
+
+    trading_mode = str((latest_run.get("trading_mode") or os.getenv("TRADING_MODE") or "PAPER")).upper()
+    dry_run = _as_bool(os.getenv("CONTINUOUS_RUNNER_DRY_RUN", "true"))
+    paper_execution_enabled = _as_bool(os.getenv("PAPER_EXECUTION_ENABLED", "false"))
+    controlled_validation = _as_bool(os.getenv("CONTROLLED_PAPER_VALIDATION", "false"))
+    kill_switch = _as_bool(os.getenv("KILL_SWITCH", "false"))
+    last_scan_start_raw = latest_scanner_run.get("started_at")
+    last_scan_finish_raw = latest_scanner_run.get("completed_at") or latest_signal.get("snapshot_timestamp")
+    last_scan = last_scan_finish_raw
+    last_broker = latest_account.get("snapshot_timestamp") or latest_run.get("run_timestamp")
+    last_order_event = (recent_orders[0] if recent_orders else {}).get("event_timestamp")
+    last_error = ""
+    for row in payload.get("recent_runs") or []:
+        if str(row.get("bot_status") or "").strip().lower() == "error":
+            last_error = row.get("safe_error_message") or row.get("stop_reason") or row.get("run_timestamp")
+            break
+    if not last_error:
+        last_error = view.get("latest_safe_error_message") or "None"
+
+    heartbeat_seconds = _seconds_since_iso(latest_run.get("run_timestamp"))
+    heartbeat_stale = heartbeat_seconds is None or heartbeat_seconds > 60 * 30
+
+    current_market_date = str(
+        latest_signal.get("market_date")
+        or latest_run.get("market_date")
+        or datetime.now(timezone.utc).date().isoformat()
+    )
+
+    orders_requested_today = 0
+    orders_submitted_today = 0
+    orders_filled_today = 0
+    for row in recent_orders:
+        if str(row.get("market_date") or "") != current_market_date:
+            continue
+        orders_requested_today += 1
+        if int(row.get("submitted") or 0) == 1:
+            orders_submitted_today += 1
+        status = str(row.get("safe_order_status") or "").strip().lower()
+        if status in {"filled", "partially_filled"}:
+            orders_filled_today += 1
+
+    latest_rejection_reason = "None"
+    if scanner_rejections:
+        latest_rejection_reason = (
+            scanner_rejections[0].get("reason")
+            or scanner_rejections[0].get("rejection_reason")
+            or scanner_rejections[0].get("rejection_reasons_json")
+            or "None"
+        )
+
+    autonomous_enabled = bool(
+        trading_mode == "PAPER"
+        and paper_execution_enabled
+        and (not dry_run)
+        and (not kill_switch)
+    )
+
+    scan_duration_seconds = None
+    try:
+        scan_duration_seconds = float(latest_scanner_run.get("duration_seconds") or 0.0)
+    except (TypeError, ValueError):
+        scan_duration_seconds = None
+
+    return {
+        "bot_service": "RUNNING" if bool(latest_run) and view.get("bot_health", {}).get("style") != "error" else "STOPPED",
+        "dashboard_service": "RUNNING",
+        "trading_mode": trading_mode,
+        "autonomous_paper_trading": "ENABLED" if autonomous_enabled else "DISABLED",
+        "dry_run": "ON" if dry_run else "OFF",
+        "paper_execution": "ENABLED" if paper_execution_enabled else "DISABLED",
+        "controlled_validation": "ON" if controlled_validation else "OFF",
+        "kill_switch": "ON" if kill_switch else "OFF",
+        "last_scan": format_timestamp_eastern(last_scan),
+        "last_scan_start": format_timestamp_eastern(last_scan_start_raw),
+        "last_scan_finish": format_timestamp_eastern(last_scan_finish_raw),
+        "scan_duration_seconds": scan_duration_seconds,
+        "symbols_considered": int(latest_scanner_run.get("symbol_count") or 0),
+        "candidates_selected": int(latest_scanner_run.get("eligible_count") or 0),
+        "latest_rejection_reason": _safe_text(latest_rejection_reason, "None"),
+        "orders_requested_today": int(orders_requested_today),
+        "orders_submitted_today": int(orders_submitted_today),
+        "orders_filled_today": int(orders_filled_today),
+        "open_paper_positions": int(latest_account.get("open_positions") or 0),
+        "last_broker_check": format_timestamp_eastern(last_broker),
+        "last_order_event": format_timestamp_eastern(last_order_event),
+        "last_error": _safe_text(last_error, "None"),
+        "heartbeat_stale": heartbeat_stale,
+    }
+
+
+def build_service_health_telemetry(payload, view):
+    latest_run = payload.get("latest_run") or {}
+    latest_scanner_run = payload.get("latest_scanner_run") or {}
+    service_health = payload.get("service_health") or {}
+    runner_pid = _runner_pid_from_lock()
+
+    return {
+        "continuous_runner_pid": runner_pid or "Unknown",
+        "dashboard_pid": os.getpid(),
+        "service_uptime": _human_age(latest_run.get("run_timestamp")),
+        "restart_count": int(service_health.get("observed_runner_restarts_24h") or service_health.get("observed_runner_run_id_transitions") or 0),
+        "scan_cycle_freshness": _human_age(latest_scanner_run.get("completed_at")),
+        "database_availability": "Connected" if payload.get("db_connected") else "Disconnected",
+        "broker_connectivity": "Connected" if _is_active_account_status(view.get("account_status")) else "Unavailable",
+        "recent_error_count": int(service_health.get("recent_error_count_24h") or 0),
+    }
+
+
+def build_live_readiness_snapshot(payload, view):
+    latest_run = payload.get("latest_run") or {}
+    latest_signal = payload.get("latest_signal") or {}
+    latest_account = payload.get("latest_account") or {}
+    recent_orders = payload.get("recent_orders") or []
+
+    trading_mode = str((latest_run.get("trading_mode") or os.getenv("TRADING_MODE") or "PAPER")).upper()
+    dry_run = _as_bool(os.getenv("CONTINUOUS_RUNNER_DRY_RUN", "true"))
+    kill_switch = _as_bool(os.getenv("KILL_SWITCH", "false"))
+    max_order_notional = _as_float(os.getenv("MAX_ORDER_NOTIONAL", latest_signal.get("max_daily_submitted_notional") or 0.0), 0.0)
+    max_daily_orders = _safe_int(os.getenv("MAX_DAILY_ORDERS", latest_signal.get("max_daily_orders") or 0), 0)
+    max_open_positions = _safe_int(os.getenv("MAX_OPEN_POSITIONS", 0), 0)
+    max_daily_loss = _as_float(os.getenv("MAX_DAILY_LOSS", os.getenv("DAILY_MAX_LOSS", 0.0)), 0.0)
+
+    has_live_credentials = bool(str(os.getenv("ALPACA_LIVE_API_KEY", "")).strip() and str(os.getenv("ALPACA_LIVE_API_SECRET", "")).strip())
+    duplicate_protection = str(latest_signal.get("duplicate_signal_status") or "").strip().lower() not in {"", "unknown", "off", "disabled"}
+    latest_order_test = None
+    for row in recent_orders:
+        status = str(row.get("safe_order_status") or "").strip().lower()
+        if status in {"filled", "accepted", "new", "submitted"}:
+            latest_order_test = row.get("event_timestamp")
+            break
+
+    latest_service_health = latest_run.get("run_timestamp")
+    latest_broker_heartbeat = latest_account.get("snapshot_timestamp") or latest_run.get("run_timestamp")
+    notification_ready = _as_bool(os.getenv("NOTIFICATIONS_ENABLED", "false"))
+    dashboard_auth_enabled = bool(str(os.getenv("DASHBOARD_PASSWORD", "")).strip())
+    https_enabled = _as_bool(os.getenv("DASHBOARD_PUBLIC_HTTPS_ENABLED", "false"))
+
+    gates = [
+        ("LIVE trading hard-block status", trading_mode != "LIVE", "ON" if trading_mode != "LIVE" else "OFF"),
+        ("broker mode", True, _safe_text(os.getenv("PAPER_BROKER_BACKEND", "SIMULATED"), "SIMULATED")),
+        ("live credentials configured", True, "YES" if has_live_credentials else "NO"),
+        ("kill switch", not kill_switch, "ON" if kill_switch else "OFF"),
+        ("max order notional", max_order_notional > 0, format_currency(max_order_notional, "$0.00")),
+        ("max daily orders", max_daily_orders > 0, str(max_daily_orders)),
+        ("max open positions", max_open_positions > 0, str(max_open_positions)),
+        ("max daily loss", max_daily_loss > 0, format_currency(max_daily_loss, "$0.00") if max_daily_loss > 0 else "Not configured"),
+        ("duplicate/idempotency protection", duplicate_protection, "ENABLED" if duplicate_protection else "UNKNOWN"),
+        ("current account buying power", _as_float(latest_account.get("buying_power"), 0.0) >= 0.0, format_currency(latest_account.get("buying_power"), "$0.00")),
+        ("latest broker heartbeat", latest_broker_heartbeat is not None, format_timestamp_eastern(latest_broker_heartbeat)),
+        ("latest successful order lifecycle test", latest_order_test is not None, format_timestamp_eastern(latest_order_test)),
+        ("latest service health result", latest_service_health is not None, format_timestamp_eastern(latest_service_health)),
+        ("notification readiness", notification_ready, "ENABLED" if notification_ready else "DISABLED"),
+        ("dashboard authentication enabled", dashboard_auth_enabled, "ENABLED" if dashboard_auth_enabled else "DISABLED"),
+        ("HTTPS enabled", https_enabled, "ENABLED" if https_enabled else "DISABLED"),
+    ]
+
+    overall_ready = all(item[1] for item in gates)
+    return {
+        "gates": [
+            {"name": name, "pass": passed, "value": value}
+            for name, passed, value in gates
+        ],
+        "overall_status": "READY FOR MANUAL LIVE VALIDATION" if overall_ready else "NOT READY",
+        "trading_mode": trading_mode,
+        "dry_run": dry_run,
+    }
+
+
 def _fetch_payload_uncached(database_url: str | None):
     try:
         payload = fetch_dashboard_payload(database_url or os.getenv("DATABASE_URL"), database_factory=MonitoringDatabase)
@@ -2100,6 +2314,77 @@ def render_header(payload, view):
         st.success(st.session_state.get("dashboard_last_manual_refresh_status"))
 
 
+def render_status_header(payload, view):
+    status = build_monitor_status_snapshot(payload, view)
+    warning_flags = []
+    if str(status.get("trading_mode", "")).upper() == "LIVE":
+        warning_flags.append("TRADING MODE IS LIVE")
+    if status.get("kill_switch") == "ON":
+        warning_flags.append("KILL SWITCH IS ON")
+    if status.get("heartbeat_stale"):
+        warning_flags.append("SERVICE HEARTBEAT IS STALE")
+
+    st.markdown("### Live Monitor Status")
+    cols = st.columns(4)
+    _metric_card(cols[0], "Bot Service", status.get("bot_service", "STOPPED"), "healthy" if status.get("bot_service") == "RUNNING" else "error")
+    _metric_card(cols[1], "Dashboard Service", status.get("dashboard_service", "RUNNING"), "healthy")
+    _metric_card(cols[2], "Trading Mode", status.get("trading_mode", "PAPER"), "critical" if status.get("trading_mode") == "LIVE" else "healthy")
+    _metric_card(cols[3], "Autonomous PAPER Trading", status.get("autonomous_paper_trading", "DISABLED"), "healthy" if status.get("autonomous_paper_trading") == "ENABLED" else "warning")
+
+    cols2 = st.columns(4)
+    _metric_card(cols2[0], "PAPER Execution", status.get("paper_execution", "DISABLED"), "healthy" if status.get("paper_execution") == "ENABLED" else "warning")
+    _metric_card(cols2[1], "Kill Switch", status.get("kill_switch", "OFF"), "critical" if status.get("kill_switch") == "ON" else "healthy")
+    _metric_card(cols2[2], "Dry Run", status.get("dry_run", "ON"), "warning" if status.get("dry_run") == "ON" else "healthy")
+    _metric_card(cols2[3], "Controlled Validation", status.get("controlled_validation", "OFF"), "warning" if status.get("controlled_validation") == "ON" else "healthy")
+
+    cols3 = st.columns(4)
+    _metric_card(cols3[0], "Last Scan Start", status.get("last_scan_start", "Unknown"), "neutral")
+    _metric_card(cols3[1], "Last Scan Finish", status.get("last_scan_finish", "Unknown"), "neutral")
+    _metric_card(cols3[2], "Scan Duration (s)", _safe_text(status.get("scan_duration_seconds"), "Unknown"), "neutral")
+    _metric_card(cols3[3], "Symbols Considered", int(status.get("symbols_considered") or 0), "neutral")
+
+    cols4 = st.columns(4)
+    _metric_card(cols4[0], "Candidates Selected", int(status.get("candidates_selected") or 0), "neutral")
+    _metric_card(cols4[1], "Orders Requested Today", int(status.get("orders_requested_today") or 0), "neutral")
+    _metric_card(cols4[2], "Orders Submitted Today", int(status.get("orders_submitted_today") or 0), "neutral")
+    _metric_card(cols4[3], "Orders Filled Today", int(status.get("orders_filled_today") or 0), "neutral")
+
+    cols5 = st.columns(3)
+    _metric_card(cols5[0], "Open PAPER Positions", int(status.get("open_paper_positions") or 0), "neutral")
+    _metric_card(cols5[1], "Last Order Event", status.get("last_order_event", "Unknown"), "neutral")
+    _metric_card(cols5[2], "Last Broker Check", status.get("last_broker_check", "Unknown"), "neutral")
+
+    cols6 = st.columns(2)
+    _metric_card(cols6[0], "Latest Rejection Reason", status.get("latest_rejection_reason", "None"), "warning" if status.get("latest_rejection_reason") not in {"", "None"} else "healthy")
+    _metric_card(cols6[1], "Last Error", status.get("last_error", "None"), "warning" if status.get("last_error") not in {"", "None"} else "healthy")
+
+    if warning_flags:
+        st.error(" | ".join(warning_flags))
+
+
+def render_live_readiness_page(payload, view):
+    st.markdown("### LIVE Readiness")
+    snapshot = build_live_readiness_snapshot(payload, view)
+
+    overall = snapshot.get("overall_status", "NOT READY")
+    if overall == "READY FOR MANUAL LIVE VALIDATION":
+        st.success(overall)
+    else:
+        st.warning(overall)
+
+    gate_rows = []
+    for gate in snapshot.get("gates", []):
+        gate_rows.append(
+            {
+                "Gate": gate.get("name"),
+                "Status": "PASS" if gate.get("pass") else "FAIL",
+                "Value": _safe_text(gate.get("value"), "Unknown"),
+            }
+        )
+    st.dataframe(gate_rows)
+    st.caption("Read-only readiness checklist. This page does not enable LIVE trading.")
+
+
 def render_alert_banner(payload, view):
     alert_messages = []
     if view.get("review_required"):
@@ -2380,15 +2665,27 @@ def render_strategy_page(payload, view):
 
 def render_account_page(payload, view):
     st.markdown("<div class='dq-section-tag'>PORTFOLIO</div>", unsafe_allow_html=True)
-    acc_cols = st.columns(3)
+    history = payload.get("portfolio_history") or []
+    order_count_by_day = payload.get("order_count_by_day") or []
+    baseline_value = _as_float((history[0] if history else {}).get("portfolio_value"), 0.0)
+    total_return_pct = 0.0 if baseline_value <= 0 else ((_as_float(view.get("portfolio_value"), 0.0) - baseline_value) / baseline_value) * 100.0
+    orders_today = int((order_count_by_day[-1] if order_count_by_day else {}).get("submitted_count") or 0)
+
+    acc_cols = st.columns(4)
     _metric_card(acc_cols[0], "Portfolio Value", format_currency(view["portfolio_value"]), "neutral")
     _metric_card(acc_cols[1], "Cash", format_currency(view["cash"]), "neutral")
     _metric_card(acc_cols[2], "Buying Power", format_currency(view["buying_power"]), "neutral")
+    _metric_card(acc_cols[3], "Open Positions", int(view.get("open_positions") or 0), "neutral")
 
-    second_row = st.columns(3)
+    second_row = st.columns(4)
     _metric_card(second_row[0], "Unrealized P&L", format_currency(view["unrealized_paper_pl"]), "buy" if view["unrealized_paper_pl"] >= 0 else "sell")
-    _metric_card(second_row[1], "Realized P&L", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] >= 0 else "sell")
-    _metric_card(second_row[2], "Account Status", view["account_status"], "healthy" if _is_active_account_status(view["account_status"]) else "warning")
+    _metric_card(second_row[1], "Daily P/L", format_currency(view.get("today_pl", 0.0)), "buy" if _as_float(view.get("today_pl"), 0.0) >= 0 else "sell")
+    _metric_card(second_row[2], "Total PAPER Return", format_percent(total_return_pct, "0.00%"), "buy" if total_return_pct >= 0 else "sell")
+    _metric_card(second_row[3], "Orders Today", orders_today, "neutral")
+
+    third_row = st.columns(2)
+    _metric_card(third_row[0], "Realized P&L", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] >= 0 else "sell")
+    _metric_card(third_row[1], "Account Status", view["account_status"], "healthy" if _is_active_account_status(view["account_status"]) else "warning")
 
     st.markdown("### Portfolio Allocation", unsafe_allow_html=True)
     if go is not None:
@@ -2410,23 +2707,29 @@ def render_account_page(payload, view):
     latest_account = payload.get("latest_account") or {}
     positions = latest_account.get("positions") if isinstance(latest_account, dict) else None
     if isinstance(positions, list) and positions:
-        st.markdown("### Position Cards")
+        st.markdown("### Open Positions")
+        position_rows = []
+        now_utc = datetime.now(timezone.utc)
         for position in positions:
-            pcols = st.columns(2)
-            pnl = _as_float(position.get("unrealized_pl"), 0.0)
-            style = "buy" if pnl >= 0 else "sell"
-            _metric_card(
-                pcols[0],
-                str(position.get("symbol", "Position")),
-                f"Qty {position.get('quantity', 'N/A')} | MV {format_currency(position.get('market_value', 0.0))}",
-                style,
+            entry_ts = position.get("entry_timestamp")
+            hold_seconds = _seconds_since_iso(entry_ts)
+            holding_time = "Unknown" if hold_seconds is None else (f"{hold_seconds // 3600}h" if hold_seconds >= 3600 else f"{max(hold_seconds // 60, 0)}m")
+            position_rows.append(
+                {
+                    "symbol": position.get("symbol"),
+                    "quantity": position.get("quantity"),
+                    "entry_price": position.get("average_entry_price"),
+                    "current_price": position.get("current_price"),
+                    "market_value": position.get("market_value"),
+                    "unrealized_p_l": position.get("unrealized_pl"),
+                    "strategy": position.get("strategy") or position.get("strategy_id") or "N/A",
+                    "quantum_score_entry": position.get("quantum_score_entry") or position.get("entry_quantum_score") or "N/A",
+                    "stop": position.get("stop") or position.get("stop_price") or "N/A",
+                    "target": position.get("target") or position.get("target_price") or "N/A",
+                    "holding_time": holding_time,
+                }
             )
-            _metric_card(
-                pcols[1],
-                "Entry / Current / Unrealized",
-                f"{format_currency(position.get('average_entry_price', 0.0))} / {format_currency(position.get('current_price', 0.0))} / {format_currency(pnl)}",
-                style,
-            )
+        st.dataframe(position_rows)
     else:
         _empty_state("No open paper positions. The bot is waiting for a valid rule-based entry signal.")
 
@@ -2468,29 +2771,44 @@ def render_risk_page(payload, view):
 
 
 def render_orders_page(payload):
-    rows = build_order_rows(payload.get("recent_orders") or [])
+    rows = []
+    for order in payload.get("recent_orders") or []:
+        rows.append(
+            {
+                "timestamp": format_timestamp_eastern(order.get("event_timestamp")),
+                "symbol": order.get("symbol", "SPY"),
+                "side": normalize_signal(order.get("signal", "HOLD")),
+                "quantity_notional": format_currency(order.get("notional"), "$0.00"),
+                "order_type": order.get("order_type") or "market",
+                "status": friendly_status_text(order.get("safe_order_status"), "unknown"),
+                "average_fill": format_currency(order.get("average_fill_price"), "$0.00"),
+                "strategy": order.get("strategy") or order.get("strategy_id") or "N/A",
+                "source_scan": order.get("source_scan") or order.get("source_scan_run_id") or "N/A",
+                "submitted": bool(_as_bool(order.get("submitted"))),
+                "stop_reason": _safe_text(order.get("stop_reason"), "N/A"),
+            }
+        )
     if not rows:
         st.info("No paper orders yet")
         return
 
     filter_cols = st.columns(4)
-    submitted_filter = filter_cols[0].selectbox("Submitted", ["All", "Submitted", "Not Submitted"], key="orders_submitted_filter")
-    signal_filter = filter_cols[1].selectbox("Signal", ["All", "BUY", "HOLD", "SELL"], key="orders_signal_filter")
-    stop_reason_filter = filter_cols[2].text_input("Stop reason contains", "", key="orders_stop_reason_filter")
-    date_filter = filter_cols[3].text_input("Date contains", "", key="orders_date_filter")
+    status_filter = filter_cols[0].selectbox("Status", ["All", "Submitted", "Accepted", "Filled", "Rejected", "Cancelled"], key="orders_status_filter")
+    signal_filter = filter_cols[1].selectbox("Side", ["All", "BUY", "HOLD", "SELL"], key="orders_signal_filter")
+    strategy_filter = filter_cols[2].text_input("Strategy contains", "", key="orders_strategy_filter")
+    date_filter = filter_cols[3].text_input("Timestamp contains", "", key="orders_date_filter")
 
     filtered = rows
-    if submitted_filter != "All":
-        want = submitted_filter == "Submitted"
-        filtered = [row for row in filtered if bool(row["Submitted"]) == want]
+    if status_filter != "All":
+        filtered = [row for row in filtered if str(row.get("status", "")).strip().lower() == status_filter.lower()]
     if signal_filter != "All":
-        filtered = [row for row in filtered if row["Signal"] == signal_filter]
-    if stop_reason_filter.strip():
-        q = stop_reason_filter.strip().lower()
-        filtered = [row for row in filtered if q in str(row.get("Stop Reason", "")).lower()]
+        filtered = [row for row in filtered if row["side"] == signal_filter]
+    if strategy_filter.strip():
+        q = strategy_filter.strip().lower()
+        filtered = [row for row in filtered if q in str(row.get("strategy", "")).lower()]
     if date_filter.strip():
         qd = date_filter.strip().lower()
-        filtered = [row for row in filtered if qd in str(row.get("Timestamp", "")).lower()]
+        filtered = [row for row in filtered if qd in str(row.get("timestamp", "")).lower()]
 
     if not filtered:
         st.info("No paper orders yet")
@@ -2868,6 +3186,64 @@ def render_architecture_page(payload, view):
         )
     st.markdown("</div>", unsafe_allow_html=True)
 
+    telemetry = build_service_health_telemetry(payload, view)
+    st.markdown("### Service Health Telemetry")
+    tcols = st.columns(4)
+    _metric_card(tcols[0], "Continuous Runner PID", telemetry.get("continuous_runner_pid"), "neutral")
+    _metric_card(tcols[1], "Dashboard PID", telemetry.get("dashboard_pid"), "neutral")
+    _metric_card(tcols[2], "Service Uptime", telemetry.get("service_uptime"), "neutral")
+    _metric_card(tcols[3], "Restart Count", telemetry.get("restart_count"), "warning" if _safe_int(telemetry.get("restart_count"), 0) > 0 else "healthy")
+
+    tcols2 = st.columns(4)
+    _metric_card(tcols2[0], "Scan Freshness", telemetry.get("scan_cycle_freshness"), "neutral")
+    _metric_card(tcols2[1], "Database", telemetry.get("database_availability"), "healthy" if telemetry.get("database_availability") == "Connected" else "error")
+    _metric_card(tcols2[2], "Broker Connectivity", telemetry.get("broker_connectivity"), "healthy" if telemetry.get("broker_connectivity") == "Connected" else "warning")
+    _metric_card(tcols2[3], "Recent Error Count", telemetry.get("recent_error_count"), "warning" if _safe_int(telemetry.get("recent_error_count"), 0) > 0 else "healthy")
+
+
+def render_scanner_candidate_panel(payload):
+    st.markdown("### Scanner / Candidate Panel")
+    scanner = payload.get("latest_scanner_run") or {}
+    top_rows = payload.get("top_scanner_results") or []
+    rejection_rows = payload.get("scanner_rejections") or []
+    sector_rows = payload.get("scanner_sector_distribution") or []
+
+    cols = st.columns(5)
+    _metric_card(cols[0], "Last Scan", format_timestamp_eastern(scanner.get("completed_at")), "neutral")
+    _metric_card(cols[1], "Universe Size", int(scanner.get("symbol_count") or 0), "neutral")
+    _metric_card(cols[2], "Symbols Scanned", int(scanner.get("success_count") or 0), "neutral")
+    _metric_card(cols[3], "Eligible Candidates", int(scanner.get("eligible_count") or 0), "healthy")
+    _metric_card(cols[4], "Errors", int(scanner.get("error_count") or 0), "warning" if int(scanner.get("error_count") or 0) > 0 else "healthy")
+
+    if top_rows:
+        normalized_top = []
+        for row in top_rows[:20]:
+            normalized_top.append(
+                {
+                    "symbol": row.get("symbol"),
+                    "quantum_score": row.get("overall_score"),
+                    "strategy_ids": row.get("reasons_json") or "N/A",
+                    "sector": row.get("sector") or "N/A",
+                    "confidence": row.get("confidence"),
+                    "rejection_reason": "",
+                }
+            )
+        st.markdown("#### Top 20 Quantum Scores")
+        st.dataframe(normalized_top)
+    else:
+        st.info("No scanner candidates available.")
+
+    if rejection_rows:
+        rej = []
+        for row in rejection_rows:
+            rej.append({"symbol": row.get("symbol"), "rejection_reason": _safe_text(row.get("rejection_reasons_json"), "N/A")})
+        st.markdown("#### Rejection Reasons")
+        st.dataframe(rej)
+
+    if sector_rows:
+        st.markdown("#### Sector Breakdown")
+        st.dataframe(sector_rows)
+
 
 render_operations_page = render_architecture_page
 render_alerts_page = render_notification_center
@@ -2938,6 +3314,9 @@ def render_system_health_page(payload, view):
 
 
 def render_research_page():
+    payload_root = st.session_state.get("dashboard_root_payload") or {}
+    render_scanner_candidate_panel(payload_root)
+
     st.markdown("### RESEARCH JOURNAL — READ ONLY")
     payload = st.session_state.get("dashboard_research_payload") or {
         "db_connected": False,
@@ -3401,6 +3780,8 @@ def render_self_improving_page():
             compare_rows.append(
                 {
                     "symbol": row.get("symbol"),
+                    "current_allocation_pct": row.get("current_allocation_pct") or row.get("current_weight") or 0.0,
+                    "proposed_allocation_pct": row.get("target_allocation_pct") or 0.0,
                     "selected": bool(row.get("selected")),
                     "target_allocation_pct": row.get("target_allocation_pct"),
                     "target_notional": row.get("target_notional"),
@@ -3561,6 +3942,7 @@ def render_dashboard(database_url: str | None = None):
         "performance": [{"metric": "portfolio_value", "value": view.get("portfolio_value")}, {"metric": "today_pl", "value": view.get("today_pl")}, {"metric": "total_pl", "value": view.get("total_pl")}],
     }
     st.session_state["dashboard_research_payload"] = payload.get("research") or {}
+    st.session_state["dashboard_root_payload"] = payload
     render_sidebar(payload)
     if st.session_state.get("dashboard_presentation_mode"):
         if st.button("Exit Presentation Mode", key="dashboard_exit_presentation"):
@@ -3581,6 +3963,7 @@ def render_dashboard(database_url: str | None = None):
         st_autorefresh(interval=refresh_seconds * 1000, key="dashboard_auto_refresh_tick")
 
     _render_with_error_guard("Header", render_header, payload, view)
+    _render_with_error_guard("Live Monitor Status", render_status_header, payload, view)
     selected_page = _render_navigation(PAGE_OPTIONS)
     st.session_state["dashboard_page"] = selected_page
 
@@ -3592,6 +3975,7 @@ def render_dashboard(database_url: str | None = None):
         "Orders": render_orders_page,
         "Performance": render_performance_page,
         "Operations": render_operations_page,
+        "LIVE Readiness": render_live_readiness_page,
         "Alerts": render_alerts_page,
         "Research": render_research_page,
         "Factor Attribution": render_factor_attribution_page,

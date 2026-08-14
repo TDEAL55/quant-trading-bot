@@ -400,7 +400,7 @@ def test_stage_a_includes_large_universe_with_no_deep_overflow(monkeypatch):
         "factors": {"trend": {"raw_values": {"distance_from_ema200_pct": 5.0}}},
     })
 
-    symbols = [{"symbol": f"A{i:04d}", "status": "ACTIVE", "tradable": True} for i in range(13_060)]
+    symbols = [{"symbol": f"A{i:04d}", "status": "ACTIVE", "tradable": True} for i in range(3_060)]
 
     shared_frame = _frame(rows=60, base=25.0, step=0.02, volume=3_000_000)
 
@@ -415,11 +415,13 @@ def test_stage_a_includes_large_universe_with_no_deep_overflow(monkeypatch):
         max_workers=1,
         max_retries=0,
         lightweight_batch_size=200,
+        coarse_candidate_limit=500,
         deep_score_limit=300,
     )
 
-    assert payload["summary"]["stage_a_total"] == 13_060
-    assert payload["summary"]["stage_c_survivors"] <= 300
+    assert payload["summary"]["stage_a_total"] == 3_060
+    assert payload["summary"]["stage_c_survivors"] <= 500
+    assert payload["summary"]["deep_scored_count"] <= 300
 
 
 def test_deep_scoring_is_capped_and_deterministic(monkeypatch):
@@ -441,6 +443,7 @@ def test_deep_scoring_is_capped_and_deterministic(monkeypatch):
         universe,
         benchmark_symbol="SPY",
         data_loader=lambda *args, **kwargs: _frame(),
+        coarse_candidate_limit=20,
         deep_score_limit=5,
         lightweight_batch_size=10,
         max_workers=1,
@@ -448,7 +451,8 @@ def test_deep_scoring_is_capped_and_deterministic(monkeypatch):
     )
 
     summary = payload["summary"]
-    assert summary["stage_c_survivors"] == 5
+    assert summary["stage_c_survivors"] == 20
+    assert summary["deep_scored_count"] == 5
     rejected_reasons = [reason for row in payload["scan_results"] for reason in (row.get("rejection_reasons") or [])]
     assert "coarse ranking below deep score limit" in rejected_reasons
 

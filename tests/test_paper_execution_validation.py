@@ -199,6 +199,33 @@ def test_controlled_validation_executes_and_emits_lifecycle_events(monkeypatch):
     assert "paper_order_filled" in event_types
 
 
+def test_autonomous_paper_executes_without_controlled_validation(monkeypatch):
+    monkeypatch.setattr("continuous_scan_cycle.PAPER_EXECUTION_ENABLED", True)
+    monkeypatch.setattr("continuous_scan_cycle.CONTROLLED_PAPER_VALIDATION", False)
+
+    broker = _Broker()
+    result = run_continuous_scan_cycle(
+        database_url="sqlite:///unused.db",
+        config_loader=lambda: _Config(),
+        now_provider=lambda: datetime(2026, 8, 6, 14, 6, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=_scan_runner,
+        shortlist_runner=_shortlist_runner,
+        scan_persistor=lambda **kwargs: {"storage": "database"},
+        execution_repo_factory=lambda **kwargs: _Repo(),
+        positions_loader=lambda: ([], 5000.0, 5000.0),
+        universe_loader=lambda: [{"symbol": "AAA", "company_name": "AAA", "sector": "Unknown", "industry": "Unknown"}],
+        persist=True,
+        dry_run=False,
+    )
+
+    counters = result.execution.get("execution_counters") or {}
+    assert broker.submissions
+    assert int(counters.get("orders_recommended") or 0) == 1
+    assert int(counters.get("orders_submission_requested") or 0) == 1
+    assert int(counters.get("orders_submitted") or 0) == 1
+
+
 def test_controlled_validation_rejected_order_does_not_increment_submitted(monkeypatch):
     monkeypatch.setattr("continuous_scan_cycle.PAPER_EXECUTION_ENABLED", True)
     monkeypatch.setattr("continuous_scan_cycle.CONTROLLED_PAPER_VALIDATION", True)
