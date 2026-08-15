@@ -46,6 +46,8 @@ def test_dashboard_service_targets_streamlit_dashboard():
     assert "--server.port 8501" in text
     assert "User=quantbot" in text
     assert "Restart=on-failure" in text
+    assert "Environment=DASHBOARD_APP_AUTH_ENABLED=false" in text
+    assert "Environment=DASHBOARD_EXTERNAL_AUTH_ENABLED=true" in text
 
 
 def test_dashboard_path_is_read_only_for_trading_actions():
@@ -55,6 +57,20 @@ def test_dashboard_path_is_read_only_for_trading_actions():
     service_text = (REPO_ROOT / "deployment" / "quant-bot-dashboard.service").read_text(encoding="utf-8")
     assert "continuous_paper_runner.py" not in service_text
     assert "unattended_daily_runner.py" not in service_text
+
+
+def test_nginx_dashboard_proxy_keeps_streamlit_localhost_only():
+    text = (REPO_ROOT / "deployment" / "nginx-quant-bot-dashboard.conf").read_text(encoding="utf-8")
+    assert "proxy_pass http://127.0.0.1:8501" in text
+    assert "proxy_set_header Upgrade $http_upgrade" in text
+    assert "auth_basic" in text
+    assert "auth_basic_user_file" in text
+
+
+def test_nginx_dashboard_proxy_does_not_expose_runner():
+    text = (REPO_ROOT / "deployment" / "nginx-quant-bot-dashboard.conf").read_text(encoding="utf-8")
+    assert "continuous_paper_runner.py" not in text
+    assert "127.0.0.1:8501" in text
 
 
 def test_paper_and_dry_run_defaults(monkeypatch):

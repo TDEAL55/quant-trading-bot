@@ -21,6 +21,8 @@ Minimum required values:
 ```bash
 APP_ENV=production
 DATABASE_URL=sqlite:////var/lib/quant-bot/quant-bot.db
+DASHBOARD_APP_AUTH_ENABLED=false
+DASHBOARD_EXTERNAL_AUTH_ENABLED=true
 TRADING_MODE=PAPER
 PAPER_BROKER_BACKEND=ALPACA
 ALPACA_API_KEY=REPLACE_ME
@@ -191,6 +193,7 @@ journalctl -u quant-bot.service -n 500 --no-pager | grep -Ei "broker execution b
 
 ## Security notes
 
+- The DigitalOcean dashboard disables its in-app password gate only because nginx Basic Auth is the mandatory external authentication layer.
 - Never commit secrets; set `DISCORD_WEBHOOK_URL` only in server env.
 - Keep `/etc/quant-bot/quant-bot.env` mode `0600` owned by `root:quantbot`.
 - Service must run as non-root `quantbot`.

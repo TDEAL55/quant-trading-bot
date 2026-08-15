@@ -16,6 +16,22 @@ def test_password_protection_helper():
     assert dashboard_app.check_dashboard_password("", "def") is False
 
 
+def test_dashboard_app_auth_defaults_to_required(monkeypatch):
+    monkeypatch.delenv("DASHBOARD_APP_AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("DASHBOARD_EXTERNAL_AUTH_ENABLED", raising=False)
+
+    assert dashboard_app.dashboard_app_auth_required() is True
+
+
+def test_dashboard_app_auth_skipped_only_with_external_auth(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_APP_AUTH_ENABLED", "false")
+    monkeypatch.setenv("DASHBOARD_EXTERNAL_AUTH_ENABLED", "true")
+    assert dashboard_app.dashboard_app_auth_required() is False
+
+    monkeypatch.setenv("DASHBOARD_EXTERNAL_AUTH_ENABLED", "false")
+    assert dashboard_app.dashboard_app_auth_required() is True
+
+
 def test_paper_only_enforcement_blocks_live():
     with pytest.raises(RuntimeError, match="blocked in LIVE mode"):
         dashboard_app.enforce_paper_mode("LIVE")
@@ -466,8 +482,9 @@ def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch)
         "order_count_by_day": list(reversed(_FakeDatabase().fetch_order_count_by_day())),
     })
     monkeypatch.setenv("TRADING_MODE", "PAPER")
-    monkeypatch.setenv("DASHBOARD_PASSWORD", "test-pass")
-    fake_st.session_state["dashboard_authenticated"] = True
+    monkeypatch.delenv("DASHBOARD_PASSWORD", raising=False)
+    monkeypatch.setenv("DASHBOARD_APP_AUTH_ENABLED", "false")
+    monkeypatch.setenv("DASHBOARD_EXTERNAL_AUTH_ENABLED", "true")
 
     dashboard_app.render_dashboard(database_url="postgresql://example")
 
@@ -479,6 +496,8 @@ def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch)
     build_markers = [call for call in fake_st._calls if call[0] == "markdown" and dashboard_app.UI_BUILD_LABEL in call[1]]
     assert len(build_markers) == 1
     assert not any(call[0] == "markdown" and "<div class='dq-skeleton'>" in call[1] for call in fake_st._calls)
+    assert not any(call[0] == "text_input" and call[1] == "Dashboard Password" for call in fake_st._calls)
+    assert "Access denied" not in str(fake_st._calls)
 
 
 def test_refresh_calls_cache_clear_and_rerun_without_trading_actions(monkeypatch):
@@ -530,6 +549,7 @@ def test_successful_authentication_clears_password_and_reruns(monkeypatch):
     assert fake_st.session_state.get("dashboard_authenticated") is True
     assert fake_st.session_state.get("dashboard_password_clear_requested") is True
     assert any(call[0] == "rerun" for call in fake_st._calls)
+    assert "test-pass" not in str(fake_st._calls)
 
 
 def test_hold_and_market_closed_are_neutral_in_status_bar():

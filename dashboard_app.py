@@ -331,6 +331,12 @@ def _as_bool(value):
     return str(value).strip().lower() in {"1", "true", "yes"}
 
 
+def dashboard_app_auth_required() -> bool:
+    app_auth_enabled = _as_bool(os.getenv("DASHBOARD_APP_AUTH_ENABLED", "true"))
+    external_auth_enabled = _as_bool(os.getenv("DASHBOARD_EXTERNAL_AUTH_ENABLED", "false"))
+    return app_auth_enabled or not external_auth_enabled
+
+
 def _as_float(value, default=0.0):
     try:
         return float(value)
@@ -1487,7 +1493,10 @@ def build_live_readiness_snapshot(payload, view):
     latest_service_health = latest_run.get("run_timestamp")
     latest_broker_heartbeat = latest_account.get("snapshot_timestamp") or latest_run.get("run_timestamp")
     notification_ready = _as_bool(os.getenv("NOTIFICATIONS_ENABLED", "false"))
-    dashboard_auth_enabled = bool(str(os.getenv("DASHBOARD_PASSWORD", "")).strip())
+    dashboard_auth_enabled = (
+        not dashboard_app_auth_required()
+        or bool(str(os.getenv("DASHBOARD_PASSWORD", "")).strip())
+    )
     https_enabled = _as_bool(os.getenv("DASHBOARD_PUBLIC_HTTPS_ENABLED", "false"))
 
     gates = [
@@ -3905,9 +3914,10 @@ def render_dashboard(database_url: str | None = None):
 
     apply_dashboard_css(st.session_state.get("dashboard_theme", "Midnight Blue"))
 
-    expected_password = os.getenv("DASHBOARD_PASSWORD", "")
-    if not _ensure_authenticated(expected_password):
-        st.stop()
+    if dashboard_app_auth_required():
+        expected_password = os.getenv("DASHBOARD_PASSWORD", "")
+        if not _ensure_authenticated(expected_password):
+            st.stop()
 
     if st.session_state.get("dashboard_force_refresh"):
         clear_dashboard_cache()
