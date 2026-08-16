@@ -218,6 +218,23 @@ def test_monitor_status_reports_autonomous_paper_fields(monkeypatch):
     assert int(snapshot.get("open_paper_positions") or 0) == 2
 
 
+def test_monitor_status_uses_read_only_service_health_probe(monkeypatch):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    snapshot = dashboard_app.build_monitor_status_snapshot(
+        {
+            "latest_run": {},
+            "latest_signal": {},
+            "latest_account": {},
+            "recent_orders": [],
+            "recent_runs": [],
+            "service_health": {"continuous_service_active": True},
+        },
+        {"bot_health": {"style": "warning"}, "latest_safe_error_message": ""},
+    )
+
+    assert snapshot["bot_service"] == "RUNNING"
+
+
 def test_signal_strength_meter_boundaries():
     weak = dashboard_app.build_signal_strength(0.01)
     strong = dashboard_app.build_signal_strength(9.0)

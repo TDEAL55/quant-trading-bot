@@ -14,6 +14,7 @@ EnvironmentFile=-/etc/quant-bot/quant-bot.env
 Environment=PYTHONUNBUFFERED=1
 Environment=DASHBOARD_APP_AUTH_ENABLED=false
 Environment=DASHBOARD_EXTERNAL_AUTH_ENABLED=true
+Environment=DASHBOARD_BROKER_ACCOUNT_FALLBACK_ENABLED=true
 ExecStart=/home/quantbot/quant-trading-bot/.venv/bin/streamlit run /home/quantbot/quant-trading-bot/dashboard_app.py --server.address 127.0.0.1 --server.port 8501 --server.headless true
 StandardOutput=journal
 StandardError=journal

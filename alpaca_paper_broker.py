@@ -203,7 +203,9 @@ class AlpacaPaperBroker:
             result[symbol] = {
                 "quantity": _to_float(getattr(position, "qty", 0.0), 0.0),
                 "avg_price": _to_float(getattr(position, "avg_entry_price", 0.0), 0.0),
+                "current_price": _to_float(getattr(position, "current_price", 0.0), 0.0),
                 "market_value": _to_float(getattr(position, "market_value", 0.0), 0.0),
+                "unrealized_pl": _to_float(getattr(position, "unrealized_pl", 0.0), 0.0),
             }
         return result
 

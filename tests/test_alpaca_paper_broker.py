@@ -20,11 +20,13 @@ class _Account:
 
 
 class _Position:
-    def __init__(self, symbol="AAPL", qty="2", avg_entry_price="180", market_value="360"):
+    def __init__(self, symbol="AAPL", qty="2", avg_entry_price="180", market_value="360", current_price="190", unrealized_pl="20"):
         self.symbol = symbol
         self.qty = qty
         self.avg_entry_price = avg_entry_price
         self.market_value = market_value
+        self.current_price = current_price
+        self.unrealized_pl = unrealized_pl
 
 
 class _Order:
@@ -98,6 +100,18 @@ def test_alpaca_paper_endpoint_is_enforced(monkeypatch):
 
     assert account["paper_endpoint_confirmed"] is True
     assert account["status"] == "ACTIVE"
+
+
+def test_alpaca_positions_include_read_only_dashboard_values(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+    monkeypatch.setenv("ALPACA_PAPER_BASE_URL", ALPACA_PAPER_ENDPOINT)
+
+    broker = AlpacaPaperBroker(mode="PAPER", trading_client=_TradingClient())
+    positions = broker.get_positions()
+
+    assert positions["AAPL"]["current_price"] == 190.0
+    assert positions["AAPL"]["unrealized_pl"] == 20.0
 
 
 def test_alpaca_live_endpoint_is_rejected(monkeypatch):

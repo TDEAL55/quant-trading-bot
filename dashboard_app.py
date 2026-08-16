@@ -1359,6 +1359,7 @@ def build_monitor_status_snapshot(payload, view):
     latest_scanner_run = payload.get("latest_scanner_run") or {}
     recent_orders = payload.get("recent_orders") or []
     scanner_rejections = payload.get("scanner_rejections") or []
+    service_health = payload.get("service_health") or {}
 
     trading_mode = str((latest_run.get("trading_mode") or os.getenv("TRADING_MODE") or "PAPER")).upper()
     dry_run = _as_bool(os.getenv("CONTINUOUS_RUNNER_DRY_RUN", "true"))
@@ -1423,7 +1424,7 @@ def build_monitor_status_snapshot(payload, view):
         scan_duration_seconds = None
 
     return {
-        "bot_service": "RUNNING" if bool(latest_run) and view.get("bot_health", {}).get("style") != "error" else "STOPPED",
+        "bot_service": "RUNNING" if service_health.get("continuous_service_active") or (bool(latest_run) and view.get("bot_health", {}).get("style") != "error") else "STOPPED",
         "dashboard_service": "RUNNING",
         "trading_mode": trading_mode,
         "autonomous_paper_trading": "ENABLED" if autonomous_enabled else "DISABLED",

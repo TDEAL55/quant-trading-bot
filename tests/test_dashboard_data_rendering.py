@@ -1,6 +1,46 @@
 from monitoring_db import MonitoringDatabase
 from monitoring_recorder import MonitoringRecorder
 import dashboard_app
+import dashboard_data
+
+
+class _ReadOnlyPaperBroker:
+    def __init__(self, mode):
+        assert mode == "PAPER"
+
+    def get_account(self):
+        return {
+            "status": "ACTIVE",
+            "portfolio_value": 11000.0,
+            "cash": 9000.0,
+            "buying_power": 10000.0,
+            "paper_endpoint_confirmed": True,
+        }
+
+    def get_positions(self):
+        return {
+            "AAPL": {
+                "quantity": 2.0,
+                "avg_price": 180.0,
+                "current_price": 190.0,
+                "market_value": 380.0,
+                "unrealized_pl": 20.0,
+            }
+        }
+
+    def get_open_orders(self):
+        return []
+
+
+def test_read_only_paper_account_fallback_builds_dashboard_snapshot():
+    snapshot = dashboard_data._fetch_paper_account_snapshot(_ReadOnlyPaperBroker)
+
+    assert snapshot["source"] == "alpaca_paper_read_only"
+    assert snapshot["account_status"] == "ACTIVE"
+    assert snapshot["open_positions"] == 1
+    assert snapshot["unrealized_paper_pl"] == 20.0
+    assert snapshot["pending_orders"] == 0
+    assert snapshot["positions"][0]["symbol"] == "AAPL"
 
 
 def test_dashboard_queries_work_with_sample_sanitized_records(tmp_path):

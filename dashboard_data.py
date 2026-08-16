@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
+import subprocess
+from datetime import datetime, timezone
 from typing import Any
 
+from alpaca_paper_broker import AlpacaPaperBroker
 from monitoring_db import MonitoringDatabase
 from dashboard_models import build_dashboard_dataset
 from evaluation_data import fetch_evaluation_dashboard_payload
@@ -13,12 +17,65 @@ from paper_validation_data import fetch_paper_validation_dashboard_payload
 from portfolio_research_data import fetch_portfolio_research_dashboard_payload
 from quantum_score_data import fetch_quantum_score_dashboard_payload
 from research_data import fetch_research_dashboard_payload
+from scanner_data import fetch_scan_rejection_reasons, fetch_scanner_sector_distribution, fetch_top_ranked_stocks
 from self_improving_data import fetch_self_improving_dashboard_payload
 from strategy_lab_data import fetch_strategy_lab_dashboard_payload
 from walk_forward_data import fetch_walk_forward_dashboard_payload
 
 
-def fetch_dashboard_payload(database_url: str | None, database_factory=MonitoringDatabase) -> dict[str, Any]:
+def _enabled(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _systemd_service_active(service_name: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "--quiet", service_name],
+            check=False,
+            capture_output=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dict[str, Any]:
+    broker = paper_broker_factory(mode="PAPER")
+    account = broker.get_account()
+    positions_by_symbol = broker.get_positions()
+    open_orders = broker.get_open_orders()
+    positions = [
+        {
+            "symbol": symbol,
+            "quantity": details.get("quantity", 0.0),
+            "average_entry_price": details.get("avg_price", 0.0),
+            "current_price": details.get("current_price", 0.0),
+            "market_value": details.get("market_value", 0.0),
+            "unrealized_pl": details.get("unrealized_pl", 0.0),
+        }
+        for symbol, details in sorted(positions_by_symbol.items())
+    ]
+    return {
+        "snapshot_timestamp": datetime.now(timezone.utc).isoformat(),
+        "account_status": account.get("status", "unknown"),
+        "portfolio_value": account.get("portfolio_value", account.get("equity", 0.0)),
+        "cash": account.get("cash", 0.0),
+        "buying_power": account.get("buying_power", 0.0),
+        "open_positions": len(positions),
+        "unrealized_paper_pl": sum(float(item.get("unrealized_pl") or 0.0) for item in positions),
+        "pending_orders": len(open_orders),
+        "positions": positions,
+        "source": "alpaca_paper_read_only",
+    }
+
+
+def fetch_dashboard_payload(
+    database_url: str | None,
+    database_factory=MonitoringDatabase,
+    paper_broker_factory=AlpacaPaperBroker,
+    service_probe=_systemd_service_active,
+) -> dict[str, Any]:
     db = database_factory(database_url=database_url)
     try:
         research_payload = fetch_research_dashboard_payload(database_url, database_factory=MonitoringDatabase)
@@ -207,6 +264,11 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
         "portfolio_history": [],
         "signal_history": [],
         "order_count_by_day": [],
+        "latest_scanner_run": {},
+        "top_scanner_results": [],
+        "scanner_rejections": [],
+        "scanner_sector_distribution": [],
+        "service_health": {},
         "research": research_payload,
     }
     if not db.enabled:
@@ -216,11 +278,51 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
     payload["latest_success"] = db.fetch_latest_successful_run() or {}
     payload["latest_signal"] = db.fetch_latest_signal_snapshot() or {}
     payload["latest_account"] = db.fetch_latest_account_snapshot() or {}
+    if (
+        not payload["latest_account"]
+        and _enabled(os.getenv("DASHBOARD_BROKER_ACCOUNT_FALLBACK_ENABLED", "false"))
+        and str(os.getenv("TRADING_MODE", "PAPER")).strip().upper() == "PAPER"
+    ):
+        try:
+            payload["latest_account"] = _fetch_paper_account_snapshot(paper_broker_factory)
+        except Exception:
+            payload["latest_account"] = {}
     payload["recent_runs"] = db.fetch_recent_runs(limit=80)
     payload["recent_orders"] = db.fetch_recent_order_events(limit=120)
     payload["portfolio_history"] = list(reversed(db.fetch_portfolio_history(limit=500)))
     payload["signal_history"] = list(reversed(db.fetch_signal_history(limit=500)))
     payload["order_count_by_day"] = list(reversed(db.fetch_order_count_by_day(limit=90)))
+    payload["latest_scanner_run"] = db.fetch_latest_scanner_run() or {}
+    payload["top_scanner_results"] = fetch_top_ranked_stocks(database_url, limit=20, database_factory=MonitoringDatabase)
+    payload["scanner_rejections"] = fetch_scan_rejection_reasons(database_url, limit=50, database_factory=MonitoringDatabase)
+    payload["scanner_sector_distribution"] = fetch_scanner_sector_distribution(database_url, database_factory=MonitoringDatabase)
+
+    recent_runs = payload["recent_runs"] or []
+    observed_restarts = 0
+    previous_run_id = None
+    for row in recent_runs:
+        run_id = str((row or {}).get("run_id") or "").strip()
+        if not run_id:
+            continue
+        if previous_run_id is not None and run_id != previous_run_id:
+            observed_restarts += 1
+        previous_run_id = run_id
+    recent_error_count_row = db.query_one(
+        """
+        SELECT COUNT(*) AS error_count
+        FROM bot_runs
+        WHERE bot_status = ?
+          AND run_timestamp >= datetime('now', '-24 hours')
+        """,
+        ("error",),
+    )
+    payload["service_health"] = {
+        "recent_error_count_24h": int((recent_error_count_row or {}).get("error_count") or 0),
+        "observed_runner_restarts_24h": int(observed_restarts),
+        "observed_runner_run_id_transitions": int(observed_restarts),
+        "continuous_service_active": bool(service_probe("quant-bot-continuous.service")),
+    }
+
     dataset = build_dashboard_dataset(payload)
     return {
         "db_connected": dataset.db_connected,
@@ -233,5 +335,10 @@ def fetch_dashboard_payload(database_url: str | None, database_factory=Monitorin
         "portfolio_history": dataset.portfolio_history,
         "signal_history": dataset.signal_history,
         "order_count_by_day": dataset.order_count_by_day,
+        "latest_scanner_run": payload["latest_scanner_run"],
+        "top_scanner_results": payload["top_scanner_results"],
+        "scanner_rejections": payload["scanner_rejections"],
+        "scanner_sector_distribution": payload["scanner_sector_distribution"],
+        "service_health": payload["service_health"],
         "research": payload["research"],
     }

@@ -48,6 +48,7 @@ def test_dashboard_service_targets_streamlit_dashboard():
     assert "Restart=on-failure" in text
     assert "Environment=DASHBOARD_APP_AUTH_ENABLED=false" in text
     assert "Environment=DASHBOARD_EXTERNAL_AUTH_ENABLED=true" in text
+    assert "Environment=DASHBOARD_BROKER_ACCOUNT_FALLBACK_ENABLED=true" in text
 
 
 def test_dashboard_path_is_read_only_for_trading_actions():
