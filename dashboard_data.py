@@ -280,7 +280,7 @@ def fetch_dashboard_payload(
     payload["latest_account"] = db.fetch_latest_account_snapshot() or {}
     if (
         not payload["latest_account"]
-        and _enabled(os.getenv("DASHBOARD_BROKER_ACCOUNT_FALLBACK_ENABLED", "false"))
+        and _enabled(os.getenv("DASHBOARD_BROKER_ACCOUNT_FALLBACK_ENABLED", "true"))
         and str(os.getenv("TRADING_MODE", "PAPER")).strip().upper() == "PAPER"
     ):
         try:

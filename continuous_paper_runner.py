@@ -601,6 +601,11 @@ def run_continuous_paper_runner(
             except RunLockBusyError:
                 stats["lock_skips"] += 1
                 snapshot = _read_lock_snapshot(lock_path)
+                active_age_seconds = snapshot.get("age_seconds")
+                busy_sleep_seconds = float(scan_interval_seconds)
+                if isinstance(active_age_seconds, (int, float)) and active_age_seconds > 0:
+                    # Back off when another cycle is still running to reduce lock-busy churn.
+                    busy_sleep_seconds = min(max(float(active_age_seconds) / 2.0, float(scan_interval_seconds)), 900.0)
                 cycle_key = "|".join(
                     [
                         str(snapshot.get("pid") or 0),
@@ -614,13 +619,20 @@ def run_continuous_paper_runner(
                         run_id=run_id,
                         timestamp=now_eastern.isoformat(),
                         market_date=market_date,
-                        sleep_seconds=scan_interval_seconds,
+                        sleep_seconds=round(float(busy_sleep_seconds), 3),
                         active_run_owner=str(snapshot.get("owner") or "unknown"),
                         active_run_pid=int(snapshot.get("pid") or 0),
                         active_run_acquired_at=str(snapshot.get("acquired_at") or ""),
                         active_run_age_seconds=snapshot.get("age_seconds"),
                     )
                     last_active_cycle_key = cycle_key
+                stats["cycles"] += 1
+                if effective_max_iterations is not None and stats["cycles"] >= int(effective_max_iterations):
+                    break
+                if _sleep_with_stop(sleep_fn, busy_sleep_seconds, stop_event):
+                    _log_event("continuous_runner_shutdown", reason="stop_event_during_sleep", cycles=stats["cycles"])
+                    break
+                continue
             except Exception as exc:
                 stats["scans_failed"] += 1
                 _log_event(

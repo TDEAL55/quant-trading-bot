@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import math
 import random
 import time
@@ -68,6 +69,27 @@ def _memory_snapshot_mb() -> tuple[float, float]:
         return round(float(current) / (1024 * 1024), 4), round(float(peak) / (1024 * 1024), 4)
     except Exception:
         return 0.0, 0.0
+
+
+def _invoke_loader_with_timeout(loader: Callable[..., Any], *args: Any, timeout_seconds: float) -> Any:
+    try:
+        params = inspect.signature(loader).parameters
+    except Exception:
+        params = {}
+
+    if "timeout_seconds" in params:
+        return loader(*args, timeout_seconds=float(timeout_seconds))
+    return loader(*args)
+
+
+def _rotating_budget_window(records: list[dict[str, Any]], limit: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if limit <= 0 or len(records) <= limit:
+        return list(records), []
+    # Rotate the scan window each cycle to preserve broad discovery over time.
+    slot = int(time.time() // 300)
+    offset = slot % len(records)
+    rotated = records[offset:] + records[:offset]
+    return rotated[:limit], rotated[limit:]
 
 
 def _coarse_metrics(symbol: str, history: pd.DataFrame, benchmark_history: pd.DataFrame) -> dict[str, float] | None:
@@ -687,6 +709,8 @@ def scan_universe(
     rate_limit_retries = 0
     cache_stats = {"cache_hits": 0}
     deadline_hit = False
+    budget_deferred_count = 0
+    budget_deferred_symbols: list[str] = []
 
     universe_total_count = len(symbol_records)
 
@@ -723,61 +747,86 @@ def scan_universe(
     start_date, end_date = _history_window(lookback_days=max(1000, int(SCANNER_MIN_HISTORY_DAYS) * 3))
     light_start, light_end = _history_window(lookback_days=max(90, min(180, int(SCANNER_MIN_HISTORY_DAYS))))
     lightweight_history_min = max(40, min(120, int(SCANNER_MIN_HISTORY_DAYS)))
+    lightweight_request_timeout = max(5.0, min(float(request_timeout_seconds), 15.0))
+    full_score_request_timeout = max(5.0, min(float(request_timeout_seconds), 20.0))
     benchmark_history = pd.DataFrame()
     benchmark_light_history = pd.DataFrame()
-    try:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            benchmark_history = executor.submit(data_loader, benchmark_symbol, start_date, end_date).result(
-                timeout=max(float(request_timeout_seconds), 1.0)
-            )
-        benchmark_light_history = benchmark_history.tail(max(40, lightweight_history_min)).copy()
-    except FutureTimeoutError as exc:
-        raise TimeoutError(f"benchmark history timed out after {request_timeout_seconds}s") from exc
+    benchmark_history = _invoke_loader_with_timeout(
+        data_loader,
+        benchmark_symbol,
+        start_date,
+        end_date,
+        timeout_seconds=max(float(request_timeout_seconds), 1.0),
+    )
+    benchmark_light_history = benchmark_history.tail(max(40, lightweight_history_min)).copy()
     stage_timers["benchmark_fetch_seconds"] = round(max(time.perf_counter() - stage_started, 0.0), 4)
 
     lightweight_survivors: list[dict[str, Any]] = []
     lightweight_features: dict[str, dict[str, float]] = {}
     lightweight_processed = 0
 
+    metadata_for_lightweight = list(metadata_pass_records)
+    stage_a_soft_limit = max(int(max(lightweight_batch_size, 1)), int(max(coarse_candidate_limit, 1) * 8))
+    timeout_bound_limit = max(
+        int(max(lightweight_batch_size, 1)),
+        int((max(float(max_scan_seconds), 1.0) / max(lightweight_request_timeout, 1.0)) * max(lightweight_batch_size, 1) * 0.85),
+    )
+    effective_stage_a_limit = min(len(metadata_for_lightweight), stage_a_soft_limit, timeout_bound_limit)
+    metadata_for_lightweight, deferred_records = _rotating_budget_window(metadata_for_lightweight, effective_stage_a_limit)
+    budget_deferred_count = int(len(deferred_records))
+    budget_deferred_symbols = [normalize_symbol(item.get("symbol", "")) for item in deferred_records[:200]]
+    if budget_deferred_count:
+        filtered_count_by_reason["deferred_by_scan_budget_window"] = int(
+            filtered_count_by_reason.get("deferred_by_scan_budget_window", 0)
+        ) + int(budget_deferred_count)
+
     if progress_callback:
         progress_callback(
             {
                 "event": "lightweight_scan_start",
-                "total": int(len(metadata_pass_records)),
+                "total": int(len(metadata_for_lightweight)),
+                "budget_deferred_count": int(budget_deferred_count),
                 "batch_size": int(max(lightweight_batch_size, 1)),
             }
         )
 
     stage_started = time.perf_counter()
-    for batch_start in range(0, len(metadata_pass_records), max(lightweight_batch_size, 1)):
+    for batch_start in range(0, len(metadata_for_lightweight), max(lightweight_batch_size, 1)):
         if time.perf_counter() >= deadline:
             deadline_hit = True
-            for item in metadata_pass_records[batch_start:]:
+            for item in metadata_for_lightweight[batch_start:]:
                 symbol = normalize_symbol(item.get("symbol", ""))
                 timed_out_symbols.append(symbol)
                 scan_results.append(_build_error_result(item, "scan timeout: lightweight stage exceeded SCANNER_MAX_SCAN_SECONDS"))
             break
 
-        batch = metadata_pass_records[batch_start : batch_start + max(lightweight_batch_size, 1)]
+        batch = metadata_for_lightweight[batch_start : batch_start + max(lightweight_batch_size, 1)]
         symbols = [normalize_symbol(item.get("symbol", "")) for item in batch]
         batch_frames: dict[str, pd.DataFrame] = {}
         batch_exception: Exception | None = None
         batch_symbol_errors: dict[str, Exception] = {}
 
-        for attempt in range(max(int(max_retries), 0) + 1):
-            remaining_timeout = _remaining_timeout_seconds(max(float(request_timeout_seconds), 1.0))
+        for attempt in range(min(max(int(max_retries), 0), 1) + 1):
+            remaining_timeout = _remaining_timeout_seconds(lightweight_request_timeout)
             if remaining_timeout <= 0:
                 deadline_hit = True
                 batch_exception = TimeoutError("lightweight stage exceeded SCANNER_MAX_SCAN_SECONDS")
                 break
             try:
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(data_loader_batch, symbols, light_start, light_end)
-                    batch_frames = dict(future.result(timeout=remaining_timeout) or {})
-                    batch_symbol_errors = dict(getattr(data_loader_batch, "_last_errors", {}) or {})
+                batch_frames = dict(
+                    _invoke_loader_with_timeout(
+                        data_loader_batch,
+                        symbols,
+                        light_start,
+                        light_end,
+                        timeout_seconds=remaining_timeout,
+                    )
+                    or {}
+                )
+                batch_symbol_errors = dict(getattr(data_loader_batch, "_last_errors", {}) or {})
                 break
-            except FutureTimeoutError as exc:
-                batch_exception = TimeoutError(f"lightweight batch timeout after {request_timeout_seconds}s")
+            except FutureTimeoutError:
+                batch_exception = TimeoutError(f"lightweight batch timeout after {lightweight_request_timeout:.1f}s")
                 if attempt >= int(max_retries):
                     break
                 retries += 1
@@ -848,21 +897,21 @@ def scan_universe(
             lightweight_processed += 1
             if progress_callback and (
                 lightweight_processed % max(int(progress_every), 1) == 0
-                or lightweight_processed == len(metadata_pass_records)
+                or lightweight_processed == len(metadata_for_lightweight)
             ):
                 progress_callback(
                     {
                         "event": "scan_progress",
                         "stage": "lightweight",
                         "completed": int(lightweight_processed),
-                        "total": int(len(metadata_pass_records)),
+                        "total": int(len(metadata_for_lightweight)),
                         "symbol": symbol,
                         "elapsed_seconds": round(max(time.perf_counter() - started, 0.0), 4),
                     }
                 )
     stage_timers["lightweight_pipeline_seconds"] = round(max(time.perf_counter() - stage_started, 0.0), 4)
     stage_counts["lightweight"] = {
-        "entered": int(len(metadata_pass_records)),
+        "entered": int(len(metadata_for_lightweight)),
         "exited": int(len(lightweight_survivors)),
     }
 
@@ -916,20 +965,27 @@ def scan_universe(
         batch_frames: dict[str, pd.DataFrame] = {}
         batch_exception: Exception | None = None
         batch_symbol_errors: dict[str, Exception] = {}
-        for attempt in range(max(int(max_retries), 0) + 1):
-            remaining_timeout = _remaining_timeout_seconds(max(float(request_timeout_seconds), 1.0))
+        for attempt in range(min(max(int(max_retries), 0), 1) + 1):
+            remaining_timeout = _remaining_timeout_seconds(full_score_request_timeout)
             if remaining_timeout <= 0:
                 deadline_hit = True
                 batch_exception = TimeoutError("full scoring stage exceeded SCANNER_MAX_SCAN_SECONDS")
                 break
             try:
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(data_loader_batch, symbols, start_date, end_date)
-                    batch_frames = dict(future.result(timeout=remaining_timeout) or {})
-                    batch_symbol_errors = dict(getattr(data_loader_batch, "_last_errors", {}) or {})
+                batch_frames = dict(
+                    _invoke_loader_with_timeout(
+                        data_loader_batch,
+                        symbols,
+                        start_date,
+                        end_date,
+                        timeout_seconds=remaining_timeout,
+                    )
+                    or {}
+                )
+                batch_symbol_errors = dict(getattr(data_loader_batch, "_last_errors", {}) or {})
                 break
             except FutureTimeoutError:
-                batch_exception = TimeoutError(f"full scoring batch timeout after {request_timeout_seconds}s")
+                batch_exception = TimeoutError(f"full scoring batch timeout after {full_score_request_timeout:.1f}s")
                 if attempt >= int(max_retries):
                     break
                 retries += 1
@@ -1034,6 +1090,8 @@ def scan_universe(
     summary["max_workers"] = int(max_workers)
     summary["batch_size"] = int(max(batch_size, 1))
     summary["lightweight_batch_size"] = int(max(lightweight_batch_size, 1))
+    summary["lightweight_request_timeout_seconds"] = float(round(lightweight_request_timeout, 3))
+    summary["full_score_request_timeout_seconds"] = float(round(full_score_request_timeout, 3))
     summary["coarse_candidate_limit"] = int(effective_coarse_limit)
     summary["deep_score_limit"] = int(effective_deep_limit)
     summary["max_scan_seconds"] = int(max_scan_seconds)
@@ -1073,6 +1131,9 @@ def scan_universe(
         "partial_success_acceptable": bool(partial_success_acceptable),
     }
     summary["stage_a_total"] = int(universe_total_count)
+    summary["stage_a_budget_window_selected"] = int(len(metadata_for_lightweight))
+    summary["stage_a_budget_window_deferred"] = int(budget_deferred_count)
+    summary["stage_a_budget_deferred_symbols"] = list(dict.fromkeys(budget_deferred_symbols))[:200]
     summary["stage_b_survivors"] = int(stage_b_survivors)
     summary["stage_c_survivors"] = int(stage_c_survivors)
     summary["deep_scored_count"] = int(deep_scored_count)
