@@ -711,6 +711,7 @@ def scan_universe(
     deadline_hit = False
     budget_deferred_count = 0
     budget_deferred_symbols: list[str] = []
+    batch_telemetry = {"attempted": 0, "succeeded": 0, "failed": 0, "timed_out": 0}
 
     universe_total_count = len(symbol_records)
 
@@ -766,7 +767,9 @@ def scan_universe(
     lightweight_processed = 0
 
     metadata_for_lightweight = list(metadata_pass_records)
-    stage_a_soft_limit = max(int(max(lightweight_batch_size, 1)), int(max(coarse_candidate_limit, 1) * 8))
+    # This stage performs network history fetches. Keep it within the configured
+    # coarse budget and rotate the window across cycles for broad coverage.
+    stage_a_soft_limit = max(1, int(max(coarse_candidate_limit, 1)))
     timeout_bound_limit = max(
         int(max(lightweight_batch_size, 1)),
         int((max(float(max_scan_seconds), 1.0) / max(lightweight_request_timeout, 1.0)) * max(lightweight_batch_size, 1) * 0.85),
@@ -813,6 +816,7 @@ def scan_universe(
                 batch_exception = TimeoutError("lightweight stage exceeded SCANNER_MAX_SCAN_SECONDS")
                 break
             try:
+                batch_telemetry["attempted"] += 1
                 batch_frames = dict(
                     _invoke_loader_with_timeout(
                         data_loader_batch,
@@ -824,8 +828,14 @@ def scan_universe(
                     or {}
                 )
                 batch_symbol_errors = dict(getattr(data_loader_batch, "_last_errors", {}) or {})
+                if batch_frames:
+                    batch_telemetry["succeeded"] += 1
+                else:
+                    batch_telemetry["failed"] += 1
                 break
             except FutureTimeoutError:
+                batch_telemetry["failed"] += 1
+                batch_telemetry["timed_out"] += 1
                 batch_exception = TimeoutError(f"lightweight batch timeout after {lightweight_request_timeout:.1f}s")
                 if attempt >= int(max_retries):
                     break
@@ -833,6 +843,7 @@ def scan_universe(
                 timed_out_symbols.extend(symbols)
                 time.sleep((2 ** attempt) * 0.6 + random.uniform(0.0, 0.2))
             except Exception as exc:
+                batch_telemetry["failed"] += 1
                 batch_exception = exc
                 if attempt >= int(max_retries):
                     break
@@ -972,6 +983,7 @@ def scan_universe(
                 batch_exception = TimeoutError("full scoring stage exceeded SCANNER_MAX_SCAN_SECONDS")
                 break
             try:
+                batch_telemetry["attempted"] += 1
                 batch_frames = dict(
                     _invoke_loader_with_timeout(
                         data_loader_batch,
@@ -983,8 +995,14 @@ def scan_universe(
                     or {}
                 )
                 batch_symbol_errors = dict(getattr(data_loader_batch, "_last_errors", {}) or {})
+                if batch_frames:
+                    batch_telemetry["succeeded"] += 1
+                else:
+                    batch_telemetry["failed"] += 1
                 break
             except FutureTimeoutError:
+                batch_telemetry["failed"] += 1
+                batch_telemetry["timed_out"] += 1
                 batch_exception = TimeoutError(f"full scoring batch timeout after {full_score_request_timeout:.1f}s")
                 if attempt >= int(max_retries):
                     break
@@ -992,6 +1010,7 @@ def scan_universe(
                 timed_out_symbols.extend(symbols)
                 time.sleep((2 ** attempt) * 0.6 + random.uniform(0.0, 0.2))
             except Exception as exc:
+                batch_telemetry["failed"] += 1
                 batch_exception = exc
                 if attempt >= int(max_retries):
                     break
@@ -1134,9 +1153,12 @@ def scan_universe(
     summary["stage_a_budget_window_selected"] = int(len(metadata_for_lightweight))
     summary["stage_a_budget_window_deferred"] = int(budget_deferred_count)
     summary["stage_a_budget_deferred_symbols"] = list(dict.fromkeys(budget_deferred_symbols))[:200]
+    summary["batch_count"] = dict(batch_telemetry)
+    summary["symbols_skipped_due_budget"] = int(budget_deferred_count)
     summary["stage_b_survivors"] = int(stage_b_survivors)
     summary["stage_c_survivors"] = int(stage_c_survivors)
     summary["deep_scored_count"] = int(deep_scored_count)
+    summary["partial_scan"] = bool(deadline_hit or budget_deferred_count > 0)
 
     top_ranked = []
     for item in ranked[:10]:
