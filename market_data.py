@@ -2,6 +2,7 @@ import pandas as pd
 import yfinance as yf
 from contextlib import redirect_stderr
 from io import StringIO
+import time
 
 from error_handler import MarketDataError
 
@@ -48,7 +49,7 @@ def download_price_data(ticker, start_date, end_date, timeout_seconds=20):
     return cleaned
 
 
-def download_price_data_batch(tickers, start_date, end_date, timeout_seconds=20, chunk_size=50):
+def download_price_data_batch(tickers, start_date, end_date, timeout_seconds=20, chunk_size=200):
     """Download historical price data for multiple tickers in one request when possible."""
     symbols = [str(ticker).upper().strip() for ticker in list(tickers or []) if str(ticker).strip()]
     if not symbols:
@@ -57,8 +58,14 @@ def download_price_data_batch(tickers, start_date, end_date, timeout_seconds=20,
     unique_symbols = list(dict.fromkeys(symbols))
     result = {}
     timeout = max(float(timeout_seconds), 1.0)
+    deadline = time.monotonic() + timeout
+    errors = {}
 
     for symbol_chunk in _chunked(unique_symbols, chunk_size):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            errors.update({symbol: TimeoutError("batch market-data deadline exhausted") for symbol in symbol_chunk})
+            break
         joined = " ".join(symbol_chunk)
         try:
             with redirect_stderr(StringIO()):
@@ -69,10 +76,12 @@ def download_price_data_batch(tickers, start_date, end_date, timeout_seconds=20,
                     progress=False,
                     group_by="ticker",
                     threads=False,
-                    timeout=timeout,
+                    timeout=max(remaining, 1.0),
                 )
         except Exception as exc:
-            raise MarketDataError(f"Unable to download batch data for {len(symbol_chunk)} tickers: {exc}") from exc
+            # Preserve successful chunks and isolate this failure to its symbols.
+            errors.update({symbol: MarketDataError(f"Unable to download batch data: {exc}") for symbol in symbol_chunk})
+            continue
 
         if raw is None or raw.empty:
             continue
@@ -107,4 +116,5 @@ def download_price_data_batch(tickers, start_date, end_date, timeout_seconds=20,
         if "close" in frame.columns and not frame.empty:
             result[single_symbol] = frame.sort_index()
 
+    download_price_data_batch._last_errors = errors
     return result
