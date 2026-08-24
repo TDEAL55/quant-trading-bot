@@ -1,10 +1,33 @@
 import os
 import math
+import stat
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 
 load_dotenv()
+
+
+def _load_private_runtime_secrets(path=None):
+    """Load a user-owned secrets overlay without weakening system env security."""
+    configured_path = str(os.getenv("QUANT_BOT_SECRET_ENV_PATH", "")).strip()
+    secret_path = Path(path or configured_path or (Path.home() / ".config" / "quant-bot" / "secrets.env")).expanduser()
+    if not secret_path.is_file():
+        return False
+
+    if os.name == "posix":
+        metadata = secret_path.stat()
+        if metadata.st_uid != os.getuid():
+            raise RuntimeError("Private runtime secrets file must be owned by the service user")
+        if stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise RuntimeError("Private runtime secrets file permissions must be 0600")
+
+    load_dotenv(dotenv_path=secret_path, override=True)
+    return True
+
+
+_load_private_runtime_secrets()
 
 
 ROBINHOOD_USERNAME = os.getenv("ROBINHOOD_USERNAME", "")

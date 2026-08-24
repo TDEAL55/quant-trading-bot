@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from alpaca_paper_broker import ALPACA_PAPER_ENDPOINT, AlpacaPaperBroker
+from alpaca_paper_broker import ALPACA_PAPER_ENDPOINT, AlpacaPaperBroker, normalize_alpaca_order
 from sprint_10_2_execution_validation import _client_order_id
 
 
@@ -13,6 +13,7 @@ class _Account:
         self.cash = "9000"
         self.equity = "11000"
         self.portfolio_value = "11000"
+        self.last_equity = "10875"
         self.trading_blocked = False
         self.account_blocked = False
         self.account_number = "PA-123"
@@ -100,6 +101,7 @@ def test_alpaca_paper_endpoint_is_enforced(monkeypatch):
 
     assert account["paper_endpoint_confirmed"] is True
     assert account["status"] == "ACTIVE"
+    assert account["day_pl"] == 125.0
 
 
 def test_alpaca_positions_include_read_only_dashboard_values(monkeypatch):
@@ -191,3 +193,57 @@ def test_submit_order_accepts_execution_path_kwargs(monkeypatch):
     assert order["client_order_id"] == "new-cid"
     assert order["reference_price"] == pytest.approx(199.25, rel=1e-9)
     assert client.submit_calls == 1
+
+
+def test_normalize_alpaca_order_uses_enum_values():
+    class _EnumLike:
+        def __init__(self, value):
+            self.value = value
+
+    order = _Order()
+    order.side = _EnumLike("sell")
+    order.status = _EnumLike("filled")
+    order.order_type = _EnumLike("market")
+    order.time_in_force = _EnumLike("day")
+
+    normalized = normalize_alpaca_order(order)
+
+    assert normalized["side"] == "sell"
+    assert normalized["status"] == "filled"
+    assert normalized["order_type"] == "market"
+    assert normalized["time_in_force"] == "day"
+
+
+def test_sell_orders_cannot_create_or_increase_a_short(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+    monkeypatch.setenv("ALPACA_PAPER_BASE_URL", ALPACA_PAPER_ENDPOINT)
+    monkeypatch.setenv("ALPACA_ORDER_SUBMISSION_ENABLED", "true")
+    client = _TradingClient()
+    broker = AlpacaPaperBroker(mode="PAPER", trading_client=client)
+
+    with pytest.raises(RuntimeError, match="naked short blocked"):
+        broker.submit_order(side="sell", ticker="MSFT", quantity=1, wait_for_fill=False)
+
+    with pytest.raises(RuntimeError, match="oversell blocked"):
+        broker.submit_order(side="sell", ticker="AAPL", quantity=3, wait_for_fill=False)
+
+    assert client.submit_calls == 0
+
+
+def test_order_history_is_normalized_and_sorted(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+    monkeypatch.setenv("ALPACA_PAPER_BASE_URL", ALPACA_PAPER_ENDPOINT)
+    client = _TradingClient()
+    older = _Order(order_id="older")
+    older.updated_at = "2026-08-01T13:00:00Z"
+    newer = _Order(order_id="newer")
+    newer.updated_at = "2026-08-01T14:00:00Z"
+    client.get_orders = lambda filter=None: [older, newer]
+    broker = AlpacaPaperBroker(mode="PAPER", trading_client=client)
+
+    history = broker.get_order_history(limit=10)
+
+    assert [row["order_id"] for row in history] == ["newer", "older"]
+    assert all(row["status"] == "filled" for row in history)

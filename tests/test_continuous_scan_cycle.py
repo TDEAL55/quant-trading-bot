@@ -152,6 +152,54 @@ def test_continuous_scan_cycle_completes_with_one_order(monkeypatch):
     assert repo.closed is True
 
 
+def test_entry_cycle_never_sells_an_unrelated_existing_position(monkeypatch):
+    monkeypatch.setattr("continuous_scan_cycle.PAPER_EXECUTION_ENABLED", True)
+    monkeypatch.setattr("continuous_scan_cycle.CONTROLLED_PAPER_VALIDATION", False)
+    monkeypatch.setattr("continuous_scan_cycle.MAX_VALIDATION_ORDERS", 1)
+    monkeypatch.setattr("continuous_scan_cycle.MAX_VALIDATION_ORDER_NOTIONAL", 5000.0)
+
+    broker = _Broker()
+    broker._positions = {"BBB": {"quantity": 2.0, "avg_price": 90.0}}
+    repo = _Repo()
+
+    result = run_continuous_scan_cycle(
+        database_url="sqlite:///unused.db",
+        config_loader=_config_loader,
+        now_provider=lambda: datetime(2026, 7, 22, 10, 1, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=lambda universe: _scan_payload(symbol="AAA", price=100.0),
+        shortlist_runner=lambda *args, **kwargs: {
+            "selected": [
+                {
+                    "rank": 1,
+                    "symbol": "AAA",
+                    "score": 82.0,
+                    "confidence": 76.0,
+                    "suggested_paper_notional": 500.0,
+                    "suggested_max_allocation_percent": 10.0,
+                }
+            ],
+            "rejected": [],
+            "portfolio_warnings": [],
+            "selection_summary": {"selected_count": 1},
+        },
+        scan_persistor=lambda **kwargs: {"storage": "database", "run_id": kwargs["run_payload"]["run_id"]},
+        execution_repo_factory=lambda **kwargs: repo,
+        positions_loader=_positions_loader,
+        universe_loader=_universe_loader,
+        history_batch_loader=lambda symbols, start_date, end_date: {"BBB": _history_frame(90.0)},
+        history_single_loader=lambda *args, **kwargs: pd.DataFrame(),
+        persist=True,
+    )
+
+    assert result.execution_status == "completed"
+    assert broker.submissions
+    side, symbol, _quantity = broker.submissions[0]
+    assert str(side).lower() == "buy"
+    assert symbol == "AAA"
+    assert broker.get_positions()["BBB"]["quantity"] == 2.0
+
+
 def test_continuous_scan_cycle_returns_no_candidates_without_execution():
     repo = _Repo()
     scan_persist_calls = []

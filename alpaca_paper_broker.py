@@ -54,6 +54,23 @@ def _normalize_account_status(value: Any) -> str:
     return (text or "UNKNOWN").upper()
 
 
+def _normalize_enum_text(value: Any, default: str = "") -> str:
+    """Return Alpaca enum values without leaking strings such as OrderSide.BUY."""
+    if value is None:
+        return str(default or "").strip().lower()
+    enum_value = getattr(value, "value", None)
+    if enum_value is not None:
+        value = enum_value
+    else:
+        enum_name = getattr(value, "name", None)
+        if enum_name is not None:
+            value = enum_name
+    text = str(value or default or "").strip()
+    if "." in text:
+        text = text.split(".")[-1]
+    return text.lower()
+
+
 def _to_decimal(value: Any) -> Decimal:
     return Decimal(str(value))
 
@@ -100,16 +117,16 @@ def normalize_alpaca_order(order: Any) -> dict[str, Any]:
         "order_id": str(getattr(order, "id", "") or ""),
         "client_order_id": str(getattr(order, "client_order_id", "") or ""),
         "symbol": str(getattr(order, "symbol", "") or "").upper(),
-        "side": str(getattr(order, "side", "") or "").lower(),
+        "side": _normalize_enum_text(getattr(order, "side", "")),
         "requested_quantity": _to_float(getattr(order, "qty", 0.0), 0.0),
         "filled_quantity": _to_float(getattr(order, "filled_qty", 0.0), 0.0),
-        "order_type": str(getattr(order, "order_type", "market") or "market").lower(),
-        "time_in_force": str(getattr(order, "time_in_force", "day") or "day").lower(),
+        "order_type": _normalize_enum_text(getattr(order, "order_type", "market"), "market"),
+        "time_in_force": _normalize_enum_text(getattr(order, "time_in_force", "day"), "day"),
         "submitted_at": str(getattr(order, "submitted_at", "") or ""),
         "updated_at": str(getattr(order, "updated_at", "") or ""),
-        "status": str(getattr(order, "status", "unknown") or "unknown").lower(),
+        "status": _normalize_enum_text(getattr(order, "status", "unknown"), "unknown"),
         "average_fill_price": _to_float(getattr(order, "filled_avg_price", 0.0), 0.0),
-        "rejection_reason": str(getattr(order, "failed_at", "") or "") if str(getattr(order, "status", "")).lower() == "rejected" else "",
+        "rejection_reason": str(getattr(order, "failed_at", "") or "") if _normalize_enum_text(getattr(order, "status", "")) == "rejected" else "",
         "broker_backend": "ALPACA",
     }
 
@@ -164,13 +181,17 @@ class AlpacaPaperBroker:
 
     def get_account(self) -> dict[str, Any]:
         account = self._fetch_account()
+        equity = _to_float(getattr(account, "equity", 0.0), 0.0)
+        last_equity = _to_float(getattr(account, "last_equity", equity), equity)
         return {
             "status": _normalize_account_status(getattr(account, "status", "unknown")),
             "account_number": str(getattr(account, "account_number", "") or ""),
             "currency": str(getattr(account, "currency", "USD") or "USD"),
             "buying_power": _to_float(getattr(account, "buying_power", 0.0), 0.0),
             "cash": _to_float(getattr(account, "cash", 0.0), 0.0),
-            "equity": _to_float(getattr(account, "equity", 0.0), 0.0),
+            "equity": equity,
+            "last_equity": last_equity,
+            "day_pl": equity - last_equity,
             "portfolio_value": _to_float(getattr(account, "portfolio_value", getattr(account, "equity", 0.0)), 0.0),
             "trading_blocked": bool(getattr(account, "trading_blocked", False)),
             "account_blocked": bool(getattr(account, "account_blocked", False)),
@@ -216,6 +237,20 @@ class AlpacaPaperBroker:
         else:
             rows = self._trading_client.get_orders()
         return [normalize_alpaca_order(row) for row in rows or []]
+
+    def get_order_history(self, limit: int = 50) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit or 50), 500))
+        if GetOrdersRequest is not None and QueryOrderStatus is not None:
+            request = GetOrdersRequest(status=QueryOrderStatus.ALL, limit=safe_limit)
+            rows = self._trading_client.get_orders(filter=request)
+        else:
+            rows = self._trading_client.get_orders()
+        normalized = [normalize_alpaca_order(row) for row in rows or []]
+        return sorted(
+            normalized,
+            key=lambda row: str(row.get("updated_at") or row.get("submitted_at") or ""),
+            reverse=True,
+        )[:safe_limit]
 
     def get_order_by_id(self, order_id: str) -> dict[str, Any] | None:
         order_id = str(order_id or "").strip()
@@ -269,6 +304,9 @@ class AlpacaPaperBroker:
         symbol = str(ticker or "").strip().upper()
         if not symbol:
             raise RuntimeError("symbol is required")
+        normalized_side = _normalize_enum_text(side)
+        if normalized_side not in {"buy", "sell"}:
+            raise RuntimeError("order side must be BUY or SELL")
         self._validate_quantity(symbol=symbol, quantity=quantity, allow_fractional=allow_fractional)
 
         if not client_order_id:
@@ -294,11 +332,22 @@ class AlpacaPaperBroker:
                 "broker_backend": "ALPACA",
             }
 
+        if normalized_side == "sell":
+            current_position = self.get_positions().get(symbol) or {}
+            held_quantity = _to_float(current_position.get("quantity"), 0.0)
+            requested_quantity = _to_float(quantity, 0.0)
+            if held_quantity <= 0:
+                raise RuntimeError(f"naked short blocked: no long {symbol} position is available to sell")
+            if requested_quantity > held_quantity + 1e-8:
+                raise RuntimeError(
+                    f"oversell blocked: requested {requested_quantity:g} {symbol}, only {held_quantity:g} held"
+                )
+
         order_kind = str(order_type or "market").strip().lower()
         if order_kind != "market":
             raise RuntimeError("only market order type is supported for first PAPER deployment")
 
-        side_value = _order_side(side)
+        side_value = _order_side(normalized_side)
         tif_value = _time_in_force(time_in_force)
         qty_decimal = _to_decimal(quantity)
 

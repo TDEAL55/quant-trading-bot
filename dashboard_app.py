@@ -54,23 +54,31 @@ from walk_forward_data import fetch_walk_forward_dashboard_payload
 
 MAX_DAILY_ORDERS = 3
 MAX_DAILY_SUBMITTED_NOTIONAL = 30.0
-DASHBOARD_VERSION = "v2.2"
-UI_BUILD_LABEL = "DEAL QUANT UI — BUILD 7"
+DASHBOARD_VERSION = "v3.0"
+UI_BUILD_LABEL = "PAPER COMMAND CENTER"
 EASTERN_TZ = ZoneInfo("America/New_York")
 MARKET_OPEN_ET = time(9, 30)
 MARKET_CLOSE_ET = time(16, 0)
 
 STATUS_COLORS = {
-    "healthy": "#21c46b",
-    "warning": "#f1c75b",
-    "error": "#ff5c5c",
-    "neutral": "#44a3ff",
-    "buy": "#21c46b",
-    "hold": "#8a96a8",
-    "sell": "#ff5c5c",
+    "healthy": "#35e6c2",
+    "warning": "#ffc857",
+    "error": "#ff5f8f",
+    "neutral": "#b7a7ff",
+    "buy": "#35e6c2",
+    "hold": "#b8bad0",
+    "sell": "#ff5f8f",
 }
 
 THEMES = {
+    "Aurora": {
+        "bg": "radial-gradient(circle at 8% 0%, #241345 0%, #0e1020 36%, #080a12 100%)",
+        "panel": "linear-gradient(140deg, rgba(29, 28, 54, 0.92), rgba(14, 17, 31, 0.88))",
+        "text": "#f7f4ff",
+        "subtle": "#b8bad0",
+        "accent": "#9a7dff",
+        "grid": "rgba(154, 125, 255, 0.11)",
+    },
     "Midnight Blue": {
         "bg": "radial-gradient(circle at 10% 10%, #1a1e2e 0%, #0e1119 48%, #090c13 100%)",
         "panel": "linear-gradient(130deg, rgba(22, 28, 42, 0.78), rgba(15, 21, 34, 0.66))",
@@ -101,7 +109,7 @@ PRIMARY_PAGE_OPTIONS = ["Command Center", "Portfolio", "Orders", "Risk", "Operat
 PAGE_OPTIONS = ["Command Center", "Portfolio", "Orders", "Risk", "Operations", "Strategy", "Performance", "Alerts", "Research", "LIVE Readiness", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
 NAVIGATION_SCOPE_OPTIONS = ["Essentials", "All pages"]
 MODE_OPTIONS = ["Standard Mode", "Focus Mode", "Presentation Mode"]
-THEME_OPTIONS = ["Midnight Blue", "Black Terminal", "Arctic Glass"]
+THEME_OPTIONS = ["Aurora", "Midnight Blue", "Black Terminal", "Arctic Glass"]
 AUTO_REFRESH_OPTIONS = ["Off", "30 seconds", "60 seconds", "5 minutes"]
 TIMEFRAME_OPTIONS = ["1D", "5D", "1M", "3M"]
 
@@ -113,8 +121,8 @@ def initialize_dashboard_session_state() -> None:
         "dashboard_page_selector": "Command Center",
         "dashboard_navigation_scope": "Essentials",
         "dashboard_navigation_scope_selector": "Essentials",
-        "dashboard_theme": "Midnight Blue",
-        "dashboard_theme_selector": "Midnight Blue",
+        "dashboard_theme": "Aurora",
+        "dashboard_theme_selector": "Aurora",
         "dashboard_mode": "Standard Mode",
         "dashboard_mode_selector": "Standard Mode",
         "dashboard_focus_mode": False,
@@ -141,7 +149,7 @@ def _refresh_mode_flags() -> None:
 
 
 def _theme_palette(theme_name: str):
-    return THEMES.get(theme_name, THEMES["Midnight Blue"])
+    return THEMES.get(theme_name, THEMES["Aurora"])
 
 
 def _is_market_day(dt_et: datetime) -> bool:
@@ -1247,8 +1255,15 @@ def build_dashboard_view_model(payload):
     bot_health_text, bot_health_style = classify_bot_health(latest_run)
     market_text, market_style = classify_market_status(latest_signal)
     signal_text, signal_style = classify_signal(latest_signal.get("generated_signal"))
-    daily_pl, total_pl = calculate_daily_and_total_pl(portfolio_history)
-    previous_portfolio = _as_float(portfolio_history[-2].get("portfolio_value"), 0.0) if len(portfolio_history) >= 2 else None
+    historical_daily_pl, historical_total_pl = calculate_daily_and_total_pl(portfolio_history)
+    broker_day_pl = latest_account.get("day_pl")
+    daily_pl = _as_float(broker_day_pl, historical_daily_pl) if broker_day_pl is not None else historical_daily_pl
+    total_pl = historical_total_pl if portfolio_history else _as_float(latest_account.get("unrealized_paper_pl"), 0.0)
+    previous_portfolio = (
+        _as_float(portfolio_history[-2].get("portfolio_value"), 0.0)
+        if len(portfolio_history) >= 2
+        else _as_float(latest_account.get("last_equity"), None)
+    )
 
     signal_history = payload.get("signal_history") or []
     recent_prices = [
@@ -1268,7 +1283,11 @@ def build_dashboard_view_model(payload):
     submitted_orders = len([o for o in recent_orders if _as_bool(o.get("submitted"))])
     daily_notional_used = _as_float(latest_signal.get("daily_submitted_notional"), 0.0)
     remaining_order_capacity = max(MAX_DAILY_ORDERS - int(latest_signal.get("daily_submitted_order_count") or 0), 0)
-    open_position_value = max(_as_float(latest_account.get("portfolio_value"), 0.0) - _as_float(latest_account.get("cash"), 0.0), 0.0)
+    position_rows = list(latest_account.get("positions") or [])
+    open_position_value = _as_float(
+        latest_account.get("gross_exposure"),
+        sum(abs(_as_float(item.get("market_value"), 0.0)) for item in position_rows),
+    )
 
     return {
         "bot_health": {"label": bot_health_text, "style": bot_health_style},
@@ -1300,6 +1319,8 @@ def build_dashboard_view_model(payload):
         "realized_paper_pl": _as_float(latest_account.get("realized_paper_pl"), 0.0),
         "open_positions": int(latest_account.get("open_positions") or 0),
         "account_status": friendly_status_text(latest_account.get("account_status"), "Unknown"),
+        "account_source": _safe_text(latest_account.get("source"), "monitoring database"),
+        "short_positions": int(latest_account.get("short_positions") or sum(1 for item in position_rows if _as_float(item.get("quantity"), 0.0) < 0)),
         "today_pl": daily_pl,
         "total_pl": total_pl,
         "ma_distance": moving_average_distance(latest_signal.get("short_moving_average"), latest_signal.get("long_moving_average")),
@@ -1480,26 +1501,35 @@ def build_compact_dashboard_summary(payload, view):
 
     position_rows = []
     for position in positions:
+        signed_quantity = _as_float(position.get("quantity"), 0.0)
+        average_entry = _as_float(position.get("average_entry_price"), 0.0)
+        unrealized_pl = _as_float(position.get("unrealized_pl"), 0.0)
+        cost_basis = abs(signed_quantity * average_entry)
         position_rows.append(
             {
                 "Symbol": _safe_text(position.get("symbol"), "N/A"),
-                "Qty": round(_as_float(position.get("quantity"), 0.0), 4),
+                "Direction": "SHORT" if signed_quantity < 0 else "LONG",
+                "Shares": round(abs(signed_quantity), 4),
                 "Avg entry": format_currency(position.get("average_entry_price")),
                 "Last": format_currency(position.get("current_price")),
-                "Value": format_currency(position.get("market_value")),
-                "Unrealized P&L": format_currency(position.get("unrealized_pl")),
+                "Exposure": format_currency(abs(_as_float(position.get("market_value"), 0.0))),
+                "Unrealized P&L": format_currency(unrealized_pl),
+                "Return": format_percent((unrealized_pl / cost_basis) * 100.0 if cost_basis > 0 else 0.0, "0.00%"),
             }
         )
 
     order_rows = []
     for order in recent_orders[:5]:
+        side = str(order.get("side") or order.get("signal") or "").strip().upper()
+        quantity = abs(_as_float(order.get("filled_quantity") or order.get("quantity"), 0.0))
         order_rows.append(
             {
                 "Time": format_timestamp_eastern(order.get("event_timestamp")),
                 "Symbol": _safe_text(order.get("symbol"), "N/A"),
-                "Side": normalize_signal(order.get("signal", "HOLD")),
-                "Status": friendly_status_text(order.get("safe_order_status"), "Unknown"),
-                "Notional": format_currency(order.get("notional")),
+                "Side": side if side in {"BUY", "SELL"} else normalize_signal(side),
+                "Shares": round(quantity, 4),
+                "Fill": format_currency(order.get("average_fill_price")),
+                "Status": friendly_status_text(order.get("safe_order_status") or order.get("status"), "Unknown"),
             }
         )
 
@@ -1517,6 +1547,7 @@ def build_compact_dashboard_summary(payload, view):
         },
         "position_rows": position_rows,
         "order_rows": order_rows,
+        "short_position_count": sum(1 for row in position_rows if row.get("Direction") == "SHORT"),
     }
 
 
@@ -1710,7 +1741,7 @@ def clear_dashboard_cache():
         st.cache_data.clear()
 
 
-def apply_dashboard_css(theme_name="Midnight Blue"):
+def apply_dashboard_css(theme_name="Aurora"):
     palette = build_palette(theme_name)
     st.markdown(
         f"""
@@ -1722,7 +1753,7 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
         .main .block-container {{
             padding-top: 0.7rem;
             padding-bottom: 1.2rem;
-            max-width: 1400px;
+            max-width: 1280px;
         }}
         .dq-build-marker {{
             display: inline-flex;
@@ -1741,10 +1772,10 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
         }}
         .dq-shell-header {{
-            background: linear-gradient(160deg, rgba(18, 27, 44, 0.96), rgba(10, 14, 23, 0.9));
-            border: 1px solid rgba(86, 121, 181, 0.24);
-            border-radius: 12px;
-            padding: 0.48rem 0.7rem;
+            background: linear-gradient(135deg, {palette.elevated_bg}, {palette.panel_bg});
+            border: 1px solid {palette.border};
+            border-radius: 18px;
+            padding: 0.72rem 0.9rem;
             margin-bottom: 0.35rem;
             box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32);
             position: relative;
@@ -1754,7 +1785,7 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             content: "";
             position: absolute;
             inset: 0;
-            background: radial-gradient(circle at top right, rgba(68, 163, 255, 0.18), transparent 28%), radial-gradient(circle at bottom left, rgba(33, 196, 107, 0.12), transparent 34%);
+            background: radial-gradient(circle at top right, {palette.accent_glow}, transparent 34%), radial-gradient(circle at bottom left, rgba(53, 230, 194, 0.10), transparent 38%);
             pointer-events: none;
         }}
         .dq-header-grid {{
@@ -1847,9 +1878,9 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             position: sticky;
             top: 0;
             z-index: 10;
-            background: rgba(9, 13, 21, 0.84);
-            border: 1px solid rgba(86, 121, 181, 0.2);
-            border-radius: 12px;
+            background: {palette.panel_bg};
+            border: 1px solid {palette.border};
+            border-radius: 14px;
             padding: 0.35rem 0.55rem;
             margin-bottom: 0.6rem;
             backdrop-filter: blur(4px);
@@ -1861,8 +1892,8 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
         }}
         .stButton > button {{
             border-radius: 9px;
-            border: 1px solid rgba(86, 121, 181, 0.35);
-            background: linear-gradient(135deg, rgba(14, 22, 35, 0.95), rgba(10, 15, 24, 0.95));
+            border: 1px solid {palette.border};
+            background: linear-gradient(135deg, {palette.elevated_bg}, {palette.panel_bg});
             color: {palette.primary_text};
             font-size: 0.8rem;
             padding: 0.35rem 0.7rem;
@@ -1871,11 +1902,11 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             border-color: rgba(68, 163, 255, 0.55);
         }}
         .dq-metric-card {{
-            background: linear-gradient(145deg, rgba(18, 27, 44, 0.88), rgba(13, 19, 31, 0.8));
-            border: 1px solid rgba(86, 121, 181, 0.24);
-            box-shadow: 0 14px 30px rgba(0, 0, 0, 0.28);
-            border-radius: 11px;
-            padding: 0.55rem 0.65rem;
+            background: linear-gradient(145deg, {palette.elevated_bg}, {palette.panel_bg});
+            border: 1px solid {palette.border};
+            box-shadow: {palette.shadow_soft};
+            border-radius: 15px;
+            padding: 0.7rem 0.78rem;
             margin-bottom: 0.38rem;
             min-height: 78px;
             transition: transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
@@ -1923,8 +1954,8 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             font-size: 0.82rem;
         }}
         .dq-panel {{
-            background: linear-gradient(150deg, rgba(18, 27, 44, 0.9), rgba(12, 16, 25, 0.78));
-            border: 1px solid rgba(86, 121, 181, 0.22);
+            background: linear-gradient(150deg, {palette.elevated_bg}, {palette.panel_bg});
+            border: 1px solid {palette.border};
             border-radius: 14px;
             padding: 1rem 1.05rem;
             box-shadow: 0 14px 32px rgba(0, 0, 0, 0.28);
@@ -2105,15 +2136,15 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
         }}
         .dq-compact-strip {{
             display: grid;
-            grid-template-columns: repeat(5, minmax(0, 1fr));
-            gap: 0.4rem;
-            margin: 0.35rem 0 0.55rem;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 0.5rem;
+            margin: 0.45rem 0 0.75rem;
         }}
         .dq-compact-status {{
-            background: rgba(8, 13, 22, 0.52);
-            border: 1px solid rgba(86, 121, 181, 0.2);
-            border-radius: 9px;
-            padding: 0.42rem 0.52rem;
+            background: {palette.panel_bg};
+            border: 1px solid {palette.border};
+            border-radius: 12px;
+            padding: 0.55rem 0.65rem;
             min-width: 0;
         }}
         .dq-compact-status-label {{
@@ -2133,11 +2164,49 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             white-space: nowrap;
         }}
         .dq-decision-card {{
-            background: rgba(8, 13, 22, 0.46);
-            border: 1px solid rgba(86, 121, 181, 0.2);
-            border-radius: 11px;
-            padding: 0.65rem 0.75rem;
-            margin-bottom: 0.5rem;
+            background: linear-gradient(145deg, {palette.elevated_bg}, {palette.panel_bg});
+            border: 1px solid {palette.border};
+            border-radius: 16px;
+            padding: 0.85rem 0.95rem;
+            margin: 0.35rem 0 0.7rem;
+        }}
+        .dq-source-ribbon {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 0.8rem;
+            margin: 0.35rem 0 0.7rem;
+            padding: 0.58rem 0.75rem;
+            border-radius: 12px;
+            background: linear-gradient(90deg, rgba(53, 230, 194, 0.11), {palette.accent_glow});
+            border: 1px solid {palette.border};
+            color: {palette.primary_text};
+            font-size: 0.78rem;
+        }}
+        .dq-source-ribbon strong {{ color: {palette.positive}; }}
+        .dq-section-heading {{
+            display: flex;
+            justify-content: space-between;
+            align-items: end;
+            gap: 0.8rem;
+            margin: 0.85rem 0 0.4rem;
+        }}
+        .dq-section-heading-title {{
+            color: {palette.primary_text};
+            font-size: 0.88rem;
+            font-weight: 900;
+            letter-spacing: 0.04rem;
+            text-transform: uppercase;
+        }}
+        .dq-section-heading-note {{ color: {palette.secondary_text}; font-size: 0.74rem; }}
+        .dq-short-alert {{
+            border-radius: 12px;
+            border: 1px solid rgba(255, 95, 143, 0.46);
+            background: rgba(255, 95, 143, 0.10);
+            color: #ffdbe7;
+            padding: 0.62rem 0.75rem;
+            margin-bottom: 0.65rem;
+            font-size: 0.82rem;
         }}
         .dq-decision-grid {{
             display: grid;
@@ -2159,8 +2228,10 @@ def apply_dashboard_css(theme_name="Midnight Blue"):
             line-height: 1.35;
         }}
         div[data-testid="stDataFrame"] {{
-            border-radius: 10px;
+            border: 1px solid {palette.border};
+            border-radius: 14px;
             overflow: hidden;
+            box-shadow: {palette.shadow_soft};
         }}
         .dq-empty-state {{
             border-radius: 14px;
@@ -2782,11 +2853,10 @@ def render_command_center_page(payload, view):
     tuning_scorecard = build_paper_tuning_scorecard(payload)
     status = summary["status"]
     status_items = [
-        ("Bot", status.get("bot_service", "STOPPED")),
-        ("Auto PAPER", status.get("autonomous_paper_trading", "DISABLED")),
+        ("Bot status", status.get("bot_service", "STOPPED")),
         ("Market", view.get("market_status", {}).get("label", "Unknown")),
-        ("Signal", view.get("generated_signal", "HOLD")),
-        ("Last scan", status.get("last_scan", "Unknown")),
+        ("Trading", "PAUSED" if status.get("kill_switch") == "ON" else status.get("autonomous_paper_trading", "DISABLED")),
+        ("Broker sync", status.get("last_broker_check", "Unknown")),
     ]
     status_html = "".join(
         f"<div class='dq-compact-status'><div class='dq-compact-status-label'>{_safe_text(label)}</div>"
@@ -2795,63 +2865,60 @@ def render_command_center_page(payload, view):
     )
     st.markdown(f"<div class='dq-compact-strip'>{status_html}</div>", unsafe_allow_html=True)
 
+    account_source = _safe_text(view.get("account_source"), "monitoring database")
+    st.markdown(
+        f"<div class='dq-source-ribbon'><span><strong>Broker source of truth</strong> · positions, orders, and P&amp;L are synced from {_safe_text(account_source)}</span>"
+        f"<span>{int(view.get('open_positions') or 0)} positions · {int((payload.get('latest_account') or {}).get('pending_orders') or 0)} pending</span></div>",
+        unsafe_allow_html=True,
+    )
+
     top = st.columns(4)
     _metric_card(top[0], "PAPER Equity", format_currency(view["portfolio_value"]), "neutral", _direction_arrow(view.get("portfolio_value"), view.get("previous_portfolio_value")))
-    _metric_card(top[1], "Cash", format_currency(view["cash"]), "neutral")
-    _metric_card(top[2], "Open Positions", int(view.get("open_positions") or 0), "neutral")
-    _metric_card(top[3], "Today's P&L", format_currency(view["today_pl"]), "buy" if view["today_pl"] >= 0 else "sell")
-
-    st.markdown("#### PAPER tuning scorecard")
-    tuning_cols = st.columns(6)
-    for column, metric in zip(tuning_cols, tuning_scorecard["metrics"]):
-        _metric_card(column, metric["label"], metric["value"], "neutral")
-    evidence_bits = [tuning_scorecard["evidence_status"]]
-    if tuning_scorecard["win_rate"] is not None:
-        evidence_bits.append(f"win rate {tuning_scorecard['win_rate'] * 100:.1f}%")
-    if tuning_scorecard["expectancy"] is not None:
-        evidence_bits.append(f"expectancy {format_currency(tuning_scorecard['expectancy'])}/closed trade")
-    if tuning_scorecard["sector_coverage"] is not None:
-        evidence_bits.append(f"candidate sector coverage {tuning_scorecard['sector_coverage'] * 100:.0f}%")
-    st.caption(" • ".join(evidence_bits))
+    _metric_card(top[1], "Today's P&L", format_currency(view["today_pl"]), "buy" if view["today_pl"] >= 0 else "sell")
+    _metric_card(top[2], "Unrealized P&L", format_currency(view["unrealized_paper_pl"]), "buy" if view["unrealized_paper_pl"] >= 0 else "sell")
+    _metric_card(top[3], "Cash", format_currency(view["cash"]), "neutral")
 
     render_alert_banner(payload, view)
-    decision, positions = st.columns([1.0, 1.25])
     scan = summary["scan"]
-    with decision:
-        st.markdown(
-            f"""
-            <div class='dq-decision-card'>
-                <div class='dq-panel-title'>LATEST BOT DECISION</div>
-                <div class='dq-panel-subtitle' title='{_safe_text(scan['completed_at'])}'>Last completed scan: {_safe_text(scan['completed_at'])}</div>
-                <div class='dq-decision-grid'>
-                    <div><div class='dq-compact-status-label'>Status</div><div class='dq-decision-value'>{_safe_text(scan['status'])}</div></div>
-                    <div><div class='dq-compact-status-label'>Scanned</div><div class='dq-decision-value'>{scan['symbols']}</div></div>
-                    <div><div class='dq-compact-status-label'>Eligible</div><div class='dq-decision-value'>{scan['eligible']}</div></div>
-                    <div><div class='dq-compact-status-label'>Top</div><div class='dq-decision-value'>{_safe_text(scan['top_candidate'])}</div></div>
-                </div>
-                <div class='dq-decision-outcome'>{_safe_text(scan['outcome'])}</div>
+    st.markdown(
+        f"""
+        <div class='dq-decision-card'>
+            <div class='dq-panel-title'>LATEST BOT DECISION</div>
+            <div class='dq-decision-grid'>
+                <div><div class='dq-compact-status-label'>Scan status</div><div class='dq-decision-value'>{_safe_text(scan['status'])}</div></div>
+                <div><div class='dq-compact-status-label'>Stocks scanned</div><div class='dq-decision-value'>{scan['symbols']}</div></div>
+                <div><div class='dq-compact-status-label'>Passed</div><div class='dq-decision-value'>{scan['eligible']}</div></div>
+                <div><div class='dq-compact-status-label'>Top candidate</div><div class='dq-decision-value'>{_safe_text(scan['top_candidate'])}</div></div>
             </div>
-            """,
+            <div class='dq-decision-outcome'>{_safe_text(scan['outcome'])} · {_safe_text(scan['completed_at'])}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if summary.get("short_position_count"):
+        st.markdown(
+            f"<div class='dq-short-alert'><strong>Attention:</strong> {summary['short_position_count']} PAPER short position(s) exist at Alpaca. "
+            "Shares are shown as positive numbers with Direction = SHORT. New submissions are paused while these are reviewed.</div>",
             unsafe_allow_html=True,
         )
-        if PAPER_TUNING_PROFILE_ENABLED:
-            st.caption(
-                f"PAPER fine-tuning profile: each proposal ≤ {PORTFOLIO_MAX_POSITION_PERCENT:g}% • "
-                f"Unknown-sector exposure ≤ {PORTFOLIO_UNKNOWN_SECTOR_MAX_PERCENT:g}%"
-            )
 
-    with positions:
-        st.markdown("#### Open PAPER positions")
-        if summary["position_rows"]:
-            st.dataframe(summary["position_rows"])
-        else:
-            _empty_state("No open paper positions.")
+    st.markdown("<div class='dq-section-heading'><div class='dq-section-heading-title'>Open positions</div><div class='dq-section-heading-note'>Live Alpaca PAPER holdings</div></div>", unsafe_allow_html=True)
+    if summary["position_rows"]:
+        st.dataframe(summary["position_rows"])
+    else:
+        _empty_state("No open paper positions.")
 
-    st.markdown("#### Recent PAPER orders")
+    st.markdown("<div class='dq-section-heading'><div class='dq-section-heading-title'>Recent orders</div><div class='dq-section-heading-note'>Latest broker-confirmed activity</div></div>", unsafe_allow_html=True)
     if summary["order_rows"]:
         st.dataframe(summary["order_rows"])
     else:
         _empty_state("No paper orders have been recorded yet.")
+
+    st.caption(
+        f"Tuning evidence: {tuning_scorecard['evidence_status']} · "
+        f"{tuning_scorecard['submitted']} submitted · {tuning_scorecard['filled']} filled · {tuning_scorecard['closed_trades']} closed"
+    )
 
 
 def render_sidebar(payload):
@@ -2866,7 +2933,7 @@ def render_sidebar(payload):
         _refresh_mode_flags()
         theme = st.selectbox("Theme", THEME_OPTIONS, key="dashboard_theme_selector")
         if theme not in THEME_OPTIONS:
-            theme = "Midnight Blue"
+            theme = "Aurora"
         st.session_state["dashboard_theme"] = theme
         refresh_choice = st.selectbox("Refresh", AUTO_REFRESH_OPTIONS, key="dashboard_auto_refresh_selector")
         st.session_state["dashboard_auto_refresh"] = refresh_choice
@@ -3015,17 +3082,18 @@ def render_risk_page(payload, view):
 def render_orders_page(payload):
     rows = []
     for order in payload.get("recent_orders") or []:
+        side = str(order.get("side") or order.get("signal") or "").strip().upper()
         rows.append(
             {
                 "timestamp": format_timestamp_eastern(order.get("event_timestamp")),
                 "symbol": order.get("symbol", "SPY"),
-                "side": normalize_signal(order.get("signal", "HOLD")),
-                "quantity_notional": format_currency(order.get("notional"), "$0.00"),
+                "side": side if side in {"BUY", "SELL"} else normalize_signal(side),
+                "shares": round(abs(_as_float(order.get("filled_quantity") or order.get("quantity"), 0.0)), 4),
+                "notional": format_currency(order.get("notional"), "$0.00"),
                 "order_type": order.get("order_type") or "market",
-                "status": friendly_status_text(order.get("safe_order_status"), "unknown"),
+                "status": friendly_status_text(order.get("safe_order_status") or order.get("status"), "unknown"),
                 "average_fill": format_currency(order.get("average_fill_price"), "$0.00"),
-                "strategy": order.get("strategy") or order.get("strategy_id") or "N/A",
-                "source_scan": order.get("source_scan") or order.get("source_scan_run_id") or "N/A",
+                "source": friendly_status_text(order.get("source"), "monitoring database"),
                 "submitted": bool(_as_bool(order.get("submitted"))),
                 "stop_reason": _safe_text(order.get("stop_reason"), "N/A"),
             }
@@ -3034,20 +3102,16 @@ def render_orders_page(payload):
         st.info("No paper orders yet")
         return
 
-    filter_cols = st.columns(4)
+    filter_cols = st.columns(3)
     status_filter = filter_cols[0].selectbox("Status", ["All", "Submitted", "Accepted", "Filled", "Rejected", "Cancelled"], key="orders_status_filter")
     signal_filter = filter_cols[1].selectbox("Side", ["All", "BUY", "HOLD", "SELL"], key="orders_signal_filter")
-    strategy_filter = filter_cols[2].text_input("Strategy contains", "", key="orders_strategy_filter")
-    date_filter = filter_cols[3].text_input("Timestamp contains", "", key="orders_date_filter")
+    date_filter = filter_cols[2].text_input("Date or time contains", "", key="orders_date_filter")
 
     filtered = rows
     if status_filter != "All":
         filtered = [row for row in filtered if str(row.get("status", "")).strip().lower() == status_filter.lower()]
     if signal_filter != "All":
         filtered = [row for row in filtered if row["side"] == signal_filter]
-    if strategy_filter.strip():
-        q = strategy_filter.strip().lower()
-        filtered = [row for row in filtered if q in str(row.get("strategy", "")).lower()]
     if date_filter.strip():
         qd = date_filter.strip().lower()
         filtered = [row for row in filtered if qd in str(row.get("timestamp", "")).lower()]
@@ -4152,7 +4216,7 @@ def render_dashboard(database_url: str | None = None):
     if st.session_state.pop("dashboard_password_clear_requested", False):
         st.session_state.pop("dashboard_password_input", None)
 
-    apply_dashboard_css(st.session_state.get("dashboard_theme", "Midnight Blue"))
+    apply_dashboard_css(st.session_state.get("dashboard_theme", "Aurora"))
 
     if dashboard_app_auth_required():
         expected_password = os.getenv("DASHBOARD_PASSWORD", "")
@@ -4194,7 +4258,7 @@ def render_dashboard(database_url: str | None = None):
     st.session_state["dashboard_research_payload"] = payload.get("research") or {}
     st.session_state["dashboard_root_payload"] = payload
     render_sidebar(payload)
-    apply_dashboard_css(st.session_state.get("dashboard_theme", "Midnight Blue"))
+    apply_dashboard_css(st.session_state.get("dashboard_theme", "Aurora"))
 
     refresh_mapping = {
         "Off": 0,

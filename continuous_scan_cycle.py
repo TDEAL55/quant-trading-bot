@@ -1325,9 +1325,14 @@ def run_continuous_scan_cycle(
             cash_buffer=float(PAPER_VALIDATION_CASH_BUFFER),
         )
         target_weight = min(target_notional / max(float(broker_equity), 1.0), 1.0)
+        # This cycle opens one selected entry; it is not a portfolio rebalance.
+        # Passing every holding here makes the planner create zero-target SELLs for
+        # unrelated symbols, which must never escape through the entry path.
+        selected_position = broker_positions.get(selected_symbol)
+        selected_positions_only = {selected_symbol: selected_position} if selected_position else {}
         planned_orders = plan_paper_orders(
             target_weights={selected_symbol: target_weight},
-            current_positions=broker_positions,
+            current_positions=selected_positions_only,
             reference_prices={selected_symbol: latest_price},
             portfolio_value=max(float(broker_equity), 1.0),
             current_cash=float(broker_cash),
@@ -1376,6 +1381,31 @@ def run_continuous_scan_cycle(
                 scan=scan_result,
                 selection=shortlist_payload,
                 execution={"selected": selected_candidate, "strategy_signals": strategy_signals, "paper_order": {}, "risk_result": {"approved": False, "reason": "planner_rejected"}, "reconciliation": {}},
+                persistence_payload={"scan": {"status": "saved" if persist else "skipped"}, "execution": {"status": "skipped"}},
+            )
+
+        planned_symbol = str(planned_order.get("symbol") or "").strip().upper()
+        planned_side = str(planned_order.get("side") or "").strip().upper()
+        if planned_symbol != selected_symbol or planned_side != "BUY":
+            return _result(
+                status="risk_rejected",
+                execution_status="risk_rejected",
+                confirmed_order_count=0,
+                scan=scan_result,
+                selection=shortlist_payload,
+                execution={
+                    "selected": selected_candidate,
+                    "strategy_signals": strategy_signals,
+                    "paper_order": {},
+                    "risk_result": {
+                        "approved": False,
+                        "reason": "entry_planner_invariant_failed",
+                        "checks": {"existing_position": not bool(selected_position)},
+                        "planned_symbol": planned_symbol,
+                        "planned_side": planned_side,
+                    },
+                    "reconciliation": {},
+                },
                 persistence_payload={"scan": {"status": "saved" if persist else "skipped"}, "execution": {"status": "skipped"}},
             )
 
@@ -1602,8 +1632,8 @@ def run_continuous_scan_cycle(
             )
             order_response = _as_dict(
                 broker.submit_order(
-                    side=str(planned_order.get("side") or "buy").lower(),
-                    ticker=selected_symbol,
+                    side=planned_side.lower(),
+                    ticker=planned_symbol,
                     quantity=float(planned_order.get("quantity") or 0.0),
                     client_order_id=client_order_id,
                     order_type="market",
@@ -1736,11 +1766,12 @@ def run_continuous_scan_cycle(
 
         expected_positions = dict(broker_pre_positions)
         if final_status in {"filled", "partially_filled"} and counted_filled_qty > 0:
-            expected_positions[selected_symbol] = {
-                "quantity": float((expected_positions.get(selected_symbol) or {}).get("quantity") or 0.0) + counted_filled_qty,
+            signed_filled_quantity = counted_filled_qty if planned_side == "BUY" else -counted_filled_qty
+            expected_positions[planned_symbol] = {
+                "quantity": float((expected_positions.get(planned_symbol) or {}).get("quantity") or 0.0) + signed_filled_quantity,
                 "avg_price": fill_price,
             }
-            if float((broker_pre_positions.get(selected_symbol) or {}).get("quantity") or 0.0) <= 0:
+            if planned_side == "BUY" and float((broker_pre_positions.get(planned_symbol) or {}).get("quantity") or 0.0) <= 0:
                 _emit_notification(
                     notification_callback,
                     event_type="position_opened",
@@ -1773,7 +1804,8 @@ def run_continuous_scan_cycle(
             for symbol, payload in broker_post_positions.items()
         }
 
-        expected_cash = round(broker_pre_cash - (counted_filled_qty * fill_price), 6)
+        signed_cash_flow = counted_filled_qty * fill_price * (1.0 if planned_side == "BUY" else -1.0)
+        expected_cash = round(broker_pre_cash - signed_cash_flow, 6)
         actual_buying_power = locals().get("broker_post_buying_power", broker_post_cash)
         reconciliation = reconcile_paper_positions(
             planned_positions=planned_positions,
@@ -1846,8 +1878,8 @@ def run_continuous_scan_cycle(
                     orders=[
                         {
                             "paper_order_id": f"{validation_run_id}-0001",
-                            "symbol": selected_symbol,
-                            "side": str(planned_order.get("side") or "BUY").upper(),
+                            "symbol": planned_symbol,
+                            "side": planned_side,
                             "quantity": float(planned_order.get("quantity") or 0.0),
                             "notional": float(planned_order.get("notional") or 0.0),
                             "target_weight": float(target_weight),
@@ -2014,7 +2046,8 @@ def run_continuous_scan_cycle(
                 "paper_order": {
                     "order_id": paper_order_id,
                     "client_order_id": client_order_id,
-                    "symbol": selected_symbol,
+                    "symbol": planned_symbol,
+                    "side": planned_side,
                     "shares": counted_filled_qty,
                     "requested_quantity": requested_qty,
                     "fill_price": fill_price if counted_filled_qty > 0 else 0.0,

@@ -319,7 +319,10 @@ class DiscordWebhookTransport:
         req = request.Request(
             url=url,
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "DiscordBot (https://github.com/TDEAL55/quant-trading-bot, 1.0)",
+            },
             method="POST",
         )
         with request.urlopen(req, timeout=timeout_seconds) as resp:  # noqa: S310
@@ -401,6 +404,7 @@ class NotificationService:
         history_repo: NotificationHistoryRepository | None = None,
         discord_transport: DiscordWebhookTransport | None = None,
         dry_run_label: str = "PAPER DRY RUN",
+        allowed_event_types: set[str] | None = None,
         output: str | None = None,
         file_path: str | Path | None = None,
     ):
@@ -413,6 +417,7 @@ class NotificationService:
         self.history_repo = history_repo
         self.discord_transport = discord_transport
         self.dry_run_label = str(dry_run_label or "PAPER DRY RUN")
+        self.allowed_event_types = {str(item).strip() for item in (allowed_event_types or set()) if str(item).strip()}
 
     def send(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self._legacy_output != "file" or self._legacy_file_path is None:
@@ -451,6 +456,11 @@ class NotificationService:
         max_retries = _parse_int(os.getenv("NOTIFICATION_MAX_RETRIES", "3"), 3)
         dedup_window_seconds = _parse_int(os.getenv("NOTIFICATION_DEDUP_WINDOW_SECONDS", "300"), 300)
         webhook_url = str(os.getenv("DISCORD_WEBHOOK_URL", "")).strip()
+        allowed_event_types = {
+            item.strip()
+            for item in str(os.getenv("NOTIFICATION_EVENT_ALLOWLIST", "")).split(",")
+            if item.strip()
+        }
 
         history_repo = NotificationHistoryRepository(database_url=database_url)
         transport = None
@@ -469,6 +479,7 @@ class NotificationService:
             dedup_window_seconds=dedup_window_seconds,
             history_repo=history_repo,
             discord_transport=transport,
+            allowed_event_types=allowed_event_types,
         )
 
     def close(self) -> None:
@@ -545,6 +556,8 @@ class NotificationService:
 
         if event_type not in EVENT_TYPES:
             return NotificationResult("skipped_invalid_event", event_type, severity, "none", dedup_key, False, 0, "")
+        if self.allowed_event_types and event_type not in self.allowed_event_types:
+            return NotificationResult("filtered_event", event_type, severity, "none", dedup_key, False, 0, "")
         if severity not in SEVERITY_LEVELS:
             severity = "INFO"
 

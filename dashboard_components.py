@@ -30,6 +30,29 @@ class DashboardPalette:
 
 def build_palette(theme_name: str) -> DashboardPalette:
     theme = theme_name.lower().strip()
+    if theme == "aurora":
+        return DashboardPalette(
+            page_bg="radial-gradient(circle at 8% 0%, #241345 0%, #0e1020 36%, #080a12 100%)",
+            panel_bg="rgba(16, 19, 35, 0.92)",
+            elevated_bg="rgba(27, 30, 53, 0.94)",
+            border="rgba(148, 118, 255, 0.26)",
+            positive="#35e6c2",
+            negative="#ff5f8f",
+            neutral="#b7a7ff",
+            warning="#ffc857",
+            critical="#ff5f8f",
+            muted_text="#8d91aa",
+            primary_text="#f7f4ff",
+            secondary_text="#b8bad0",
+            accent_glow="rgba(123, 92, 255, 0.24)",
+            radius_lg="18px",
+            spacing_sm="0.45rem",
+            spacing_md="0.85rem",
+            spacing_lg="1.25rem",
+            shadow_soft="0 16px 42px rgba(3, 4, 12, 0.42)",
+            chart_bg="#101323",
+            chart_grid="rgba(148, 118, 255, 0.10)",
+        )
     if theme == "black terminal":
         return DashboardPalette(
             page_bg="#050505",

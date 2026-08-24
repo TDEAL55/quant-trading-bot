@@ -40,11 +40,42 @@ def _systemd_service_active(service_name: str) -> bool:
     return result.returncode == 0
 
 
+def _broker_order_to_dashboard_event(order: dict[str, Any]) -> dict[str, Any]:
+    status = str(order.get("status") or "unknown").strip().lower()
+    side = str(order.get("side") or "").strip().upper()
+    timestamp = str(order.get("updated_at") or order.get("submitted_at") or "")
+    requested_quantity = abs(float(order.get("requested_quantity") or 0.0))
+    filled_quantity = abs(float(order.get("filled_quantity") or 0.0))
+    fill_price = float(order.get("average_fill_price") or 0.0)
+    event_quantity = filled_quantity if filled_quantity > 0 else requested_quantity
+    return {
+        "event_timestamp": timestamp,
+        "market_date": timestamp[:10] if len(timestamp) >= 10 else "",
+        "symbol": str(order.get("symbol") or "").upper(),
+        "signal": side,
+        "side": side,
+        "quantity": requested_quantity,
+        "filled_quantity": filled_quantity,
+        "average_fill_price": fill_price,
+        "notional": event_quantity * fill_price,
+        "order_type": str(order.get("order_type") or "market").lower(),
+        "time_in_force": str(order.get("time_in_force") or "day").lower(),
+        "safe_order_status": status,
+        "status": status,
+        "submitted": 1,
+        "broker_order_id": str(order.get("order_id") or ""),
+        "client_order_id": str(order.get("client_order_id") or ""),
+        "stop_reason": str(order.get("rejection_reason") or ""),
+        "source": "alpaca_paper_broker",
+    }
+
+
 def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dict[str, Any]:
     broker = paper_broker_factory(mode="PAPER")
     account = broker.get_account()
     positions_by_symbol = broker.get_positions()
     open_orders = broker.get_open_orders()
+    broker_orders = list(getattr(broker, "get_order_history", lambda limit=50: [])(limit=120) or [])
     positions = [
         {
             "symbol": symbol,
@@ -56,16 +87,25 @@ def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dic
         }
         for symbol, details in sorted(positions_by_symbol.items())
     ]
+    recent_orders = [_broker_order_to_dashboard_event(order) for order in broker_orders]
+    equity = float(account.get("equity") or account.get("portfolio_value") or 0.0)
+    last_equity = float(account.get("last_equity") or equity)
     return {
         "snapshot_timestamp": datetime.now(timezone.utc).isoformat(),
         "account_status": account.get("status", "unknown"),
         "portfolio_value": account.get("portfolio_value", account.get("equity", 0.0)),
+        "equity": equity,
+        "last_equity": last_equity,
+        "day_pl": float(account.get("day_pl") if account.get("day_pl") is not None else equity - last_equity),
         "cash": account.get("cash", 0.0),
         "buying_power": account.get("buying_power", 0.0),
         "open_positions": len(positions),
         "unrealized_paper_pl": sum(float(item.get("unrealized_pl") or 0.0) for item in positions),
         "pending_orders": len(open_orders),
         "positions": positions,
+        "short_positions": sum(1 for item in positions if float(item.get("quantity") or 0.0) < 0),
+        "gross_exposure": sum(abs(float(item.get("market_value") or 0.0)) for item in positions),
+        "recent_orders": recent_orders,
         "source": "alpaca_paper_read_only",
     }
 
@@ -340,18 +380,21 @@ def fetch_dashboard_payload(
     payload["latest_run"] = db.fetch_latest_bot_run() or {}
     payload["latest_success"] = db.fetch_latest_successful_run() or {}
     payload["latest_signal"] = db.fetch_latest_signal_snapshot() or {}
-    payload["latest_account"] = db.fetch_latest_account_snapshot() or {}
+    database_account = db.fetch_latest_account_snapshot() or {}
+    database_orders = db.fetch_recent_order_events(limit=120)
+    payload["latest_account"] = database_account
+    payload["recent_orders"] = database_orders
     if (
-        not payload["latest_account"]
-        and _enabled(os.getenv("DASHBOARD_BROKER_ACCOUNT_FALLBACK_ENABLED", "true"))
+        _enabled(os.getenv("DASHBOARD_BROKER_ACCOUNT_FALLBACK_ENABLED", "true"))
         and str(os.getenv("TRADING_MODE", "PAPER")).strip().upper() == "PAPER"
     ):
         try:
-            payload["latest_account"] = _fetch_paper_account_snapshot(paper_broker_factory)
-        except Exception:
-            payload["latest_account"] = {}
+            broker_snapshot = _fetch_paper_account_snapshot(paper_broker_factory)
+            payload["latest_account"] = broker_snapshot
+            payload["recent_orders"] = list(broker_snapshot.get("recent_orders") or [])
+        except Exception as exc:
+            payload["broker_sync_error"] = type(exc).__name__
     payload["recent_runs"] = db.fetch_recent_runs(limit=80)
-    payload["recent_orders"] = db.fetch_recent_order_events(limit=120)
     payload["portfolio_history"] = list(reversed(db.fetch_portfolio_history(limit=500)))
     payload["signal_history"] = list(reversed(db.fetch_signal_history(limit=500)))
     payload["order_count_by_day"] = list(reversed(db.fetch_order_count_by_day(limit=90)))

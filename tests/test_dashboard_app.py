@@ -182,6 +182,7 @@ def test_monitor_status_reports_autonomous_paper_fields(monkeypatch):
     monkeypatch.setenv("CONTINUOUS_RUNNER_DRY_RUN", "false")
     monkeypatch.setenv("PAPER_EXECUTION_ENABLED", "true")
     monkeypatch.setenv("CONTROLLED_PAPER_VALIDATION", "false")
+    monkeypatch.setenv("KILL_SWITCH", "false")
 
     snapshot = dashboard_app.build_monitor_status_snapshot(
         {

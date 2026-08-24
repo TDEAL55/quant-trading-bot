@@ -12,6 +12,9 @@ class _ReadOnlyPaperBroker:
         return {
             "status": "ACTIVE",
             "portfolio_value": 11000.0,
+            "equity": 11000.0,
+            "last_equity": 10925.0,
+            "day_pl": 75.0,
             "cash": 9000.0,
             "buying_power": 10000.0,
             "paper_endpoint_confirmed": True,
@@ -31,6 +34,23 @@ class _ReadOnlyPaperBroker:
     def get_open_orders(self):
         return []
 
+    def get_order_history(self, limit=50):
+        assert limit == 120
+        return [
+            {
+                "order_id": "broker-1",
+                "client_order_id": "qtb-1",
+                "symbol": "AAPL",
+                "side": "buy",
+                "requested_quantity": 2.0,
+                "filled_quantity": 2.0,
+                "average_fill_price": 190.0,
+                "status": "filled",
+                "submitted_at": "2026-08-24T14:00:00+00:00",
+                "updated_at": "2026-08-24T14:00:01+00:00",
+            }
+        ]
+
 
 def test_read_only_paper_account_fallback_builds_dashboard_snapshot():
     snapshot = dashboard_data._fetch_paper_account_snapshot(_ReadOnlyPaperBroker)
@@ -41,6 +61,53 @@ def test_read_only_paper_account_fallback_builds_dashboard_snapshot():
     assert snapshot["unrealized_paper_pl"] == 20.0
     assert snapshot["pending_orders"] == 0
     assert snapshot["positions"][0]["symbol"] == "AAPL"
+    assert snapshot["day_pl"] == 75.0
+    assert snapshot["recent_orders"][0]["safe_order_status"] == "filled"
+    assert snapshot["recent_orders"][0]["filled_quantity"] == 2.0
+
+
+def test_broker_daily_pl_and_short_positions_render_clearly():
+    payload = {
+        "db_connected": True,
+        "latest_run": {"bot_status": "healthy", "trading_mode": "PAPER"},
+        "latest_success": {},
+        "latest_signal": {"market_open": 1, "generated_signal": "HOLD"},
+        "latest_account": {
+            "portfolio_value": 10075.0,
+            "last_equity": 10000.0,
+            "day_pl": 75.0,
+            "cash": 9000.0,
+            "buying_power": 10000.0,
+            "open_positions": 1,
+            "unrealized_paper_pl": 18.0,
+            "short_positions": 1,
+            "source": "alpaca_paper_read_only",
+            "positions": [
+                {
+                    "symbol": "SBLK",
+                    "quantity": -18.0,
+                    "average_entry_price": 20.0,
+                    "current_price": 19.0,
+                    "market_value": -342.0,
+                    "unrealized_pl": 18.0,
+                }
+            ],
+        },
+        "recent_runs": [],
+        "recent_orders": [],
+        "portfolio_history": [],
+        "signal_history": [],
+        "order_count_by_day": [],
+    }
+
+    view = dashboard_app.build_dashboard_view_model(payload)
+    summary = dashboard_app.build_compact_dashboard_summary(payload, view)
+
+    assert view["today_pl"] == 75.0
+    assert view["short_positions"] == 1
+    assert summary["position_rows"][0]["Direction"] == "SHORT"
+    assert summary["position_rows"][0]["Shares"] == 18.0
+    assert summary["short_position_count"] == 1
 
 
 def test_dashboard_queries_work_with_sample_sanitized_records(tmp_path):

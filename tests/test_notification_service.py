@@ -173,6 +173,40 @@ def test_discord_permanent_403_fails_fast_without_exposing_webhook():
     assert "super-secret-token" not in safe_error
 
 
+def test_discord_http_request_sets_required_user_agent(monkeypatch):
+    captured = {}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return b""
+
+    def _urlopen(req, timeout):
+        captured["request"] = req
+        captured["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setattr("notification_service.request.urlopen", _urlopen)
+    transport = DiscordWebhookTransport(
+        webhook_url="https://discord.com/api/webhooks/123/abc",
+        timeout_seconds=4,
+        max_retries=0,
+    )
+
+    transport._post(transport.webhook_url, {"content": "test"}, 4)
+
+    assert captured["request"].get_header("User-agent") == (
+        "DiscordBot (https://github.com/TDEAL55/quant-trading-bot, 1.0)"
+    )
+    assert captured["request"].get_header("Content-type") == "application/json"
+    assert captured["timeout"] == 4
+
+
 def test_deduplication_suppresses_duplicates(tmp_path):
     poster = _Poster()
     service = _service(tmp_path, poster=poster, enabled=True)
@@ -630,3 +664,20 @@ def test_cancelled_and_partial_fill_events_are_clear(tmp_path):
     assert cancelled.status == "sent"
     assert "Partially Filled" in poster.calls[0]["body"]["content"]
     assert "Cancelled" in poster.calls[1]["body"]["content"]
+
+
+def test_event_allowlist_suppresses_routine_notifications():
+    service = NotificationService(
+        notifications_enabled=True,
+        allowed_event_types={"paper_order_filled", "bot_crashed"},
+    )
+
+    routine = service.notify(
+        event_type="scan_completed",
+        title="Scan complete",
+        message="Routine scan",
+        severity="SUCCESS",
+    )
+
+    assert routine.status == "filtered_event"
+    assert routine.delivered is False
