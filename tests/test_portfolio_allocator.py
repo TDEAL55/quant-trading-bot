@@ -63,6 +63,27 @@ def test_existing_positions_count_toward_exposure_caps():
     assert any("sector" in reason for reason in result.rejected_allocations[0].rejection_reasons)
 
 
+def test_paper_tuning_allows_bounded_unknown_sector_room():
+    existing = [ExistingPosition(symbol="JPM", quantity=75, latest_price=100.0, sector="Unknown", strategy_id="trend_momentum_v1")]
+    result = allocate_portfolio_recommendation(
+        candidates=[_candidate("AAA", 1, sector="Unknown"), _candidate("BBB", 2, sector="Unknown")],
+        existing_positions=existing,
+        account_equity=10000.0,
+        available_cash=2500.0,
+        policy=AllocationPolicy(
+            max_positions=10,
+            max_position_percent=2.0,
+            unknown_sector_max_percent=78.0,
+            max_strategy_percent=100.0,
+        ),
+    )
+
+    assert result.proposed_allocations
+    assert all(item.target_allocation_percent <= 2.0 for item in result.proposed_allocations)
+    unknown = next(row for row in result.sector_exposure_summary if row["sector"] == "Unknown")
+    assert 75.0 < unknown["proposed_exposure_pct"] <= 78.0
+
+
 def test_deterministic_ordering_and_rejections():
     candidates = [_candidate("BBB", 1), _candidate("AAA", 1)]
     first = allocate_portfolio_recommendation(candidates, [], 10000.0, 10000.0)

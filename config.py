@@ -27,6 +27,41 @@ MAX_POSITION_SIZE = float(os.getenv("MAX_POSITION_SIZE", "0.25"))
 MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "500"))
 DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "500"))
 TRADING_MODE = os.getenv("TRADING_MODE", "SIMULATION").upper()
+
+
+def resolve_paper_tuning_profile(env=None):
+    """Return bounded allocation defaults used only for PAPER tuning."""
+    source = os.environ if env is None else env
+    mode = str(source.get("TRADING_MODE", "SIMULATION")).strip().upper()
+    requested = str(source.get("PAPER_TUNING_PROFILE_ENABLED", "true")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    enabled = bool(mode == "PAPER" and requested)
+    if not enabled:
+        return {
+            "enabled": False,
+            "max_position_percent": 10.0,
+            "unknown_sector_max_percent": 10.0,
+        }
+
+    max_position_percent = float(source.get("PAPER_TUNING_MAX_POSITION_PERCENT", "2"))
+    unknown_sector_max_percent = float(source.get("PAPER_TUNING_UNKNOWN_SECTOR_MAX_PERCENT", "78"))
+    if not 0 < max_position_percent <= 5:
+        raise ValueError("PAPER_TUNING_MAX_POSITION_PERCENT must be > 0 and <= 5")
+    if not 10 <= unknown_sector_max_percent <= 100:
+        raise ValueError("PAPER_TUNING_UNKNOWN_SECTOR_MAX_PERCENT must be between 10 and 100")
+    return {
+        "enabled": True,
+        "max_position_percent": max_position_percent,
+        "unknown_sector_max_percent": unknown_sector_max_percent,
+    }
+
+
+PAPER_TUNING_PROFILE = resolve_paper_tuning_profile()
+PAPER_TUNING_PROFILE_ENABLED = bool(PAPER_TUNING_PROFILE["enabled"])
 PAPER_BROKER_BACKEND = os.getenv("PAPER_BROKER_BACKEND", "SIMULATED").strip().upper()
 ALPACA_ORDER_SUBMISSION_ENABLED = str(os.getenv("ALPACA_ORDER_SUBMISSION_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
 PAPER_API_BASE_URL = os.getenv("PAPER_API_BASE_URL", "")
@@ -206,13 +241,23 @@ PORTFOLIO_MAX_SYMBOLS_PER_SECTOR = int(os.getenv("PORTFOLIO_MAX_SYMBOLS_PER_SECT
 PORTFOLIO_MAX_SECTOR_PERCENT = float(os.getenv("PORTFOLIO_MAX_SECTOR_PERCENT", "30"))
 PORTFOLIO_MAX_SYMBOL_PERCENT = float(os.getenv("PORTFOLIO_MAX_SYMBOL_PERCENT", "10"))
 PORTFOLIO_MIN_CASH_RESERVE_PERCENT = float(os.getenv("PORTFOLIO_MIN_CASH_RESERVE_PERCENT", "20"))
-PORTFOLIO_MAX_POSITION_PERCENT = float(os.getenv("PORTFOLIO_MAX_POSITION_PERCENT", str(PORTFOLIO_MAX_SYMBOL_PERCENT)))
+PORTFOLIO_MAX_POSITION_PERCENT = float(
+    os.getenv(
+        "PORTFOLIO_MAX_POSITION_PERCENT",
+        str(PAPER_TUNING_PROFILE["max_position_percent"] if PAPER_TUNING_PROFILE_ENABLED else PORTFOLIO_MAX_SYMBOL_PERCENT),
+    )
+)
 PORTFOLIO_MAX_CORRELATION = float(os.getenv("PORTFOLIO_MAX_CORRELATION", "0.80"))
 PORTFOLIO_MAX_STRATEGY_PERCENT = float(os.getenv("PORTFOLIO_MAX_STRATEGY_PERCENT", "40"))
 PORTFOLIO_MIN_QUANTUM_SCORE = float(os.getenv("PORTFOLIO_MIN_QUANTUM_SCORE", "70"))
 PORTFOLIO_MIN_RISK_REWARD = float(os.getenv("PORTFOLIO_MIN_RISK_REWARD", "1.5"))
 PORTFOLIO_ALLOCATION_MODE = str(os.getenv("PORTFOLIO_ALLOCATION_MODE", "RECOMMENDATION_ONLY")).strip().upper()
-PORTFOLIO_UNKNOWN_SECTOR_MAX_PERCENT = float(os.getenv("PORTFOLIO_UNKNOWN_SECTOR_MAX_PERCENT", "10"))
+PORTFOLIO_UNKNOWN_SECTOR_MAX_PERCENT = float(
+    os.getenv(
+        "PORTFOLIO_UNKNOWN_SECTOR_MAX_PERCENT",
+        str(PAPER_TUNING_PROFILE["unknown_sector_max_percent"]),
+    )
+)
 
 CORRELATION_LOOKBACK_DAYS = int(os.getenv("CORRELATION_LOOKBACK_DAYS", "90"))
 CORRELATION_MIN_OVERLAP_DAYS = int(os.getenv("CORRELATION_MIN_OVERLAP_DAYS", "40"))

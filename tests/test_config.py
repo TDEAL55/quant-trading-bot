@@ -19,3 +19,35 @@ def test_config_handles_missing_alpaca_credentials_safely(monkeypatch):
 
     assert config.ALPACA_API_KEY == ""
     assert config.ALPACA_API_SECRET == ""
+
+
+def test_paper_tuning_profile_opens_small_allocation_room():
+    profile = config.resolve_paper_tuning_profile(
+        {
+            "TRADING_MODE": "PAPER",
+            "PAPER_TUNING_PROFILE_ENABLED": "true",
+        }
+    )
+
+    assert profile == {
+        "enabled": True,
+        "max_position_percent": 2.0,
+        "unknown_sector_max_percent": 78.0,
+    }
+
+
+def test_live_mode_ignores_paper_tuning_profile():
+    profile = config.resolve_paper_tuning_profile(
+        {
+            "TRADING_MODE": "LIVE",
+            "PAPER_TUNING_PROFILE_ENABLED": "true",
+            "PAPER_TUNING_MAX_POSITION_PERCENT": "5",
+            "PAPER_TUNING_UNKNOWN_SECTOR_MAX_PERCENT": "100",
+        }
+    )
+
+    assert profile == {
+        "enabled": False,
+        "max_position_percent": 10.0,
+        "unknown_sector_max_percent": 10.0,
+    }

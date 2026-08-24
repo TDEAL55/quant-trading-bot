@@ -235,6 +235,53 @@ def test_monitor_status_uses_read_only_service_health_probe(monkeypatch):
     assert snapshot["bot_service"] == "RUNNING"
 
 
+def test_compact_dashboard_summary_prioritizes_scan_positions_and_orders(monkeypatch):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("CONTINUOUS_RUNNER_DRY_RUN", "false")
+    monkeypatch.setenv("PAPER_EXECUTION_ENABLED", "true")
+    payload = {
+        "latest_run": {"trading_mode": "PAPER", "run_timestamp": "2026-07-12T15:00:00+00:00"},
+        "latest_signal": {"trade_or_skip_reason": "risk checks completed"},
+        "latest_account": {
+            "positions": [
+                {
+                    "symbol": "JPM",
+                    "quantity": 2,
+                    "average_entry_price": 350,
+                    "current_price": 352,
+                    "market_value": 704,
+                    "unrealized_pl": 4,
+                }
+            ]
+        },
+        "latest_scanner_run": {
+            "status": "success",
+            "symbol_count": 500,
+            "eligible_count": 22,
+            "duration_seconds": 160.7,
+            "completed_at": "2026-07-12T15:00:00+00:00",
+        },
+        "top_scanner_results": [{"symbol": "MSI"}],
+        "recent_orders": [],
+        "recent_runs": [],
+        "scanner_rejections": [],
+        "service_health": {"continuous_service_active": True},
+    }
+    view = {
+        "bot_health": {"style": "healthy"},
+        "latest_safe_error_message": "",
+        "trade_or_skip_reason": "risk checks completed",
+    }
+
+    summary = dashboard_app.build_compact_dashboard_summary(payload, view)
+
+    assert summary["scan"]["symbols"] == 500
+    assert summary["scan"]["eligible"] == 22
+    assert summary["scan"]["top_candidate"] == "MSI"
+    assert "risk checks" in summary["scan"]["outcome"]
+    assert summary["position_rows"][0]["Symbol"] == "JPM"
+
+
 def test_signal_strength_meter_boundaries():
     weak = dashboard_app.build_signal_strength(0.01)
     strong = dashboard_app.build_signal_strength(9.0)
@@ -507,7 +554,7 @@ def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch)
 
     nav_calls = [call for call in fake_st._calls if call[0] == "selectbox" and call[1] == "Navigate"]
     assert nav_calls
-    assert nav_calls[0][2] == ["Command Center", "Strategy", "Risk", "Portfolio", "Orders", "Performance", "Operations", "LIVE Readiness", "Alerts", "Research", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
+    assert nav_calls[0][2] == ["Command Center", "Portfolio", "Orders", "Risk", "Operations"]
     assert all("trade" not in str(page).lower() for page in nav_calls[0][2])
 
     build_markers = [call for call in fake_st._calls if call[0] == "markdown" and dashboard_app.UI_BUILD_LABEL in call[1]]

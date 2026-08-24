@@ -1131,12 +1131,14 @@ def scan_universe(
     deep_threshold = max(1, int(max(stage_c_survivors, 1) * 0.50))
     partial_success_acceptable = bool(ranking_completed and deep_scored_count >= deep_threshold)
 
-    if not ranking_completed or infrastructure_failed:
+    if not ranking_completed:
         summary_status = "failed"
     elif deadline_hit and not partial_success_acceptable:
         summary_status = "timed_out"
     elif deadline_hit and partial_success_acceptable:
         summary_status = "partial_success"
+    elif infrastructure_failed:
+        summary_status = "failed"
     elif int(summary.get("error_count") or 0) > 0 and partial_success_acceptable:
         summary_status = "partial_success"
     elif stage_b_survivors == 0 and universe_total_count > 0:
