@@ -777,6 +777,43 @@ def test_market_hours_bypass_allows_one_cycle_diagnostics(tmp_path):
     assert stats["closed_market_sleeps"] == 0
 
 
+def test_crypto_cycle_runs_while_stock_market_is_closed(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    calls = {"stock": 0, "crypto": 0}
+    sleeps = []
+    monkeypatch.setenv("CRYPTO_TRADING_ENABLED", "true")
+    monkeypatch.setenv("CRYPTO_SCAN_INTERVAL_MINUTES", "15")
+
+    def _stock_runner(**_kwargs):
+        calls["stock"] += 1
+        return _failed_result(status="no_candidates")
+
+    def _crypto_runner(**_kwargs):
+        calls["crypto"] += 1
+        return {
+            "cycle_status": "no_trade",
+            "universe_count": 12,
+            "scanned_count": 12,
+            "confirmed_order_count": 0,
+        }
+
+    stats = run_continuous_paper_runner(
+        config_loader=lambda: cfg,
+        runner=_stock_runner,
+        crypto_runner=_crypto_runner,
+        state_path=_state_path(tmp_path),
+        now_provider=_Clock([datetime(2026, 7, 25, 22, 0, tzinfo=EASTERN_TZ)]),
+        sleep_fn=lambda seconds: sleeps.append(seconds),
+        max_iterations=1,
+    )
+
+    assert calls == {"stock": 0, "crypto": 1}
+    assert stats["crypto_cycles_attempted"] == 1
+    assert stats["crypto_cycles_completed"] == 1
+    assert stats["closed_market_sleeps"] == 1
+    assert sleeps and sleeps[0] == 15 * 60
+
+
 def test_scanner_exception_emits_failure_and_final_exit_event(tmp_path, monkeypatch):
     cfg = _config(tmp_path)
     events = []

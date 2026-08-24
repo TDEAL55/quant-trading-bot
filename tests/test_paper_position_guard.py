@@ -59,3 +59,22 @@ def test_guard_reviews_short_returns_and_uses_buy_to_cover():
     assert by_symbol["SHORT_WIN"]["return_percent"] == 10.0
     assert by_symbol["SHORT_LOSS"]["recommendation"] == "CLOSE_STOP_LOSS"
     assert by_symbol["SHORT_LOSS"]["return_percent"] == -5.0
+
+
+def test_stock_guard_ignores_crypto_positions():
+    result = review_paper_positions(
+        positions={
+            "BTC/USD": {
+                "quantity": 0.5,
+                "avg_price": 100.0,
+                "current_price": 80.0,
+                "market_value": 40.0,
+                "asset_class": "crypto",
+            }
+        },
+        open_orders=[],
+        settings=PositionGuardSettings(stop_loss_percent=4, take_profit_percent=8, max_exits_per_cycle=1),
+    )
+
+    assert result["reviews"] == []
+    assert result["exit_candidates"] == []

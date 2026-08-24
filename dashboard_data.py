@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from alpaca_paper_broker import AlpacaPaperBroker
@@ -52,6 +54,7 @@ def _broker_order_to_dashboard_event(order: dict[str, Any]) -> dict[str, Any]:
         "event_timestamp": timestamp,
         "market_date": timestamp[:10] if len(timestamp) >= 10 else "",
         "symbol": str(order.get("symbol") or "").upper(),
+        "asset_class": str(order.get("asset_class") or "").lower(),
         "signal": side,
         "side": side,
         "quantity": requested_quantity,
@@ -84,6 +87,8 @@ def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dic
             "current_price": details.get("current_price", 0.0),
             "market_value": details.get("market_value", 0.0),
             "unrealized_pl": details.get("unrealized_pl", 0.0),
+            "unrealized_plpc": details.get("unrealized_plpc", 0.0),
+            "asset_class": details.get("asset_class", ""),
         }
         for symbol, details in sorted(positions_by_symbol.items())
     ]
@@ -108,6 +113,47 @@ def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dic
         "recent_orders": recent_orders,
         "source": "alpaca_paper_read_only",
     }
+
+
+def _is_crypto_row(row: dict[str, Any]) -> bool:
+    symbol = str((row or {}).get("symbol") or "").strip().upper()
+    asset_class = str((row or {}).get("asset_class") or "").strip().lower()
+    client_order_id = str((row or {}).get("client_order_id") or "").strip().lower()
+    return bool(asset_class == "crypto" or "/" in symbol or client_order_id.startswith("qtb-crypto-"))
+
+
+def _fetch_crypto_dashboard_snapshot(
+    latest_account: dict[str, Any],
+    recent_orders: list[dict[str, Any]],
+    *,
+    status_path: str | Path | None = None,
+) -> dict[str, Any]:
+    path = Path(status_path or os.getenv("CRYPTO_STATUS_PATH", "/var/lib/quant-bot/crypto-status.json"))
+    status: dict[str, Any] = {
+        "enabled": _enabled(os.getenv("CRYPTO_TRADING_ENABLED", "false")),
+        "market": "24/7",
+        "cycle_status": "waiting",
+        "updated_at": "",
+        "signals": [],
+        "last_order": {},
+    }
+    try:
+        if path.is_file():
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                status.update(loaded)
+    except (OSError, ValueError, TypeError) as exc:
+        status["status_read_error"] = type(exc).__name__
+
+    positions = [dict(row or {}) for row in list((latest_account or {}).get("positions") or []) if _is_crypto_row(dict(row or {}))]
+    crypto_orders = [dict(row or {}) for row in list(recent_orders or []) if _is_crypto_row(dict(row or {}))]
+    status["positions"] = positions
+    status["recent_orders"] = crypto_orders[:20]
+    status["open_position_count"] = len(positions)
+    status["crypto_exposure"] = sum(abs(float(row.get("market_value") or 0.0)) for row in positions)
+    status["unrealized_pl"] = sum(float(row.get("unrealized_pl") or 0.0) for row in positions)
+    status["status_path"] = str(path)
+    return status
 
 
 def _fetch_paper_tuning_snapshot(db: MonitoringDatabase) -> dict[str, Any]:
@@ -372,6 +418,7 @@ def fetch_dashboard_payload(
         "scanner_sector_distribution": [],
         "service_health": {},
         "paper_tuning": {},
+        "crypto": {},
         "research": research_payload,
     }
     if not db.enabled:
@@ -403,6 +450,7 @@ def fetch_dashboard_payload(
     payload["scanner_rejections"] = fetch_scan_rejection_reasons(database_url, limit=50, database_factory=MonitoringDatabase)
     payload["scanner_sector_distribution"] = fetch_scanner_sector_distribution(database_url, database_factory=MonitoringDatabase)
     payload["paper_tuning"] = _fetch_paper_tuning_snapshot(db)
+    payload["crypto"] = _fetch_crypto_dashboard_snapshot(payload["latest_account"], payload["recent_orders"])
 
     recent_runs = payload["recent_runs"] or []
     observed_restarts = 0
@@ -448,5 +496,6 @@ def fetch_dashboard_payload(
         "scanner_sector_distribution": payload["scanner_sector_distribution"],
         "service_health": payload["service_health"],
         "paper_tuning": payload["paper_tuning"],
+        "crypto": payload["crypto"],
         "research": payload["research"],
     }

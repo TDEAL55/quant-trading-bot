@@ -52,6 +52,10 @@ def review_paper_positions(
     for raw_symbol, raw_position in sorted(dict(positions or {}).items()):
         symbol = str(raw_symbol or "").strip().upper()
         position = dict(raw_position or {})
+        asset_class = str(position.get("asset_class") or "").strip().lower()
+        if asset_class == "crypto" or "/" in symbol:
+            # Crypto has a separate 24/7 guard with crypto-specific stop/target settings.
+            continue
         signed_quantity = _as_float(position.get("quantity"), 0.0)
         quantity = abs(signed_quantity)
         position_side = "SHORT" if signed_quantity < 0 else "LONG"

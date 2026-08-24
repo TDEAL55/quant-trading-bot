@@ -105,8 +105,8 @@ THEMES = {
     },
 }
 
-PRIMARY_PAGE_OPTIONS = ["Command Center", "Portfolio", "Orders", "Risk", "Operations"]
-PAGE_OPTIONS = ["Command Center", "Portfolio", "Orders", "Risk", "Operations", "Strategy", "Performance", "Alerts", "Research", "LIVE Readiness", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
+PRIMARY_PAGE_OPTIONS = ["Command Center", "Crypto", "Portfolio", "Orders", "Risk", "Operations"]
+PAGE_OPTIONS = ["Command Center", "Crypto", "Portfolio", "Orders", "Risk", "Operations", "Strategy", "Performance", "Alerts", "Research", "LIVE Readiness", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
 NAVIGATION_SCOPE_OPTIONS = ["Essentials", "All pages"]
 MODE_OPTIONS = ["Standard Mode", "Focus Mode", "Presentation Mode"]
 THEME_OPTIONS = ["Aurora", "Midnight Blue", "Black Terminal", "Arctic Glass"]
@@ -2848,6 +2848,104 @@ def _render_navigation(pages: list[str]) -> str:
     return selected
 
 
+def _render_crypto_dashboard_panel(payload, *, detailed: bool = False) -> None:
+    crypto = dict(payload.get("crypto") or {})
+    top_signal = dict(crypto.get("top_signal") or {})
+    last_order = dict(crypto.get("last_order") or {})
+    enabled = bool(crypto.get("enabled"))
+    cycle_status = friendly_status_text(crypto.get("cycle_status"), "Waiting")
+    signal = str(top_signal.get("signal") or "HOLD").upper()
+    signal_style = "buy" if signal == "BUY" else "sell" if signal == "SELL" else "neutral"
+
+    st.markdown(
+        "<div class='dq-section-heading'><div class='dq-section-heading-title'>Crypto 24/7</div>"
+        "<div class='dq-section-heading-note'>Alpaca PAPER · long entries and sell-to-exit · 10% max per coin</div></div>",
+        unsafe_allow_html=True,
+    )
+    columns = st.columns(5)
+    _metric_card(columns[0], "Runner", "ENABLED" if enabled else "DISABLED", "healthy" if enabled else "warning")
+    _metric_card(columns[1], "Cycle", cycle_status, "neutral")
+    _metric_card(columns[2], "Universe", int(crypto.get("universe_count") or 0), "neutral")
+    _metric_card(columns[3], "Top Signal", f"{_safe_text(top_signal.get('symbol'), 'None')} · {signal}", signal_style)
+    _metric_card(columns[4], "Crypto P&L", format_currency(crypto.get("unrealized_pl")), "buy" if _as_float(crypto.get("unrealized_pl"), 0.0) >= 0 else "sell")
+
+    st.caption(
+        f"Last cycle: {format_timestamp_eastern(crypto.get('updated_at'))} · "
+        f"{int(crypto.get('scanned_count') or 0)} scanned · "
+        f"{int(crypto.get('open_position_count') or 0)} open · "
+        f"{format_currency(crypto.get('crypto_exposure'))} exposure · "
+        f"last action: {_safe_text(crypto.get('action_reason'), 'waiting')}"
+    )
+    if crypto.get("error") or crypto.get("status_read_error"):
+        st.warning(_safe_text(crypto.get("error") or crypto.get("status_read_error"), "Crypto status unavailable"))
+
+    if not detailed:
+        return
+
+    positions = list(crypto.get("positions") or [])
+    position_rows = [
+        {
+            "Symbol": _safe_text(row.get("symbol"), "N/A"),
+            "Units": round(abs(_as_float(row.get("quantity"), 0.0)), 8),
+            "Avg entry": format_currency(row.get("average_entry_price")),
+            "Last": format_currency(row.get("current_price")),
+            "Exposure": format_currency(abs(_as_float(row.get("market_value"), 0.0))),
+            "Unrealized P&L": format_currency(row.get("unrealized_pl")),
+        }
+        for row in positions
+    ]
+    st.markdown("#### Open crypto positions")
+    if position_rows:
+        st.dataframe(position_rows)
+    else:
+        _empty_state("No open crypto PAPER positions yet.")
+
+    signals = list(crypto.get("signals") or [])
+    signal_rows = [
+        {
+            "Symbol": _safe_text(row.get("symbol"), "N/A"),
+            "Signal": _safe_text(row.get("signal"), "HOLD"),
+            "Score": round(_as_float(row.get("score"), 0.0), 2),
+            "Price": format_currency(row.get("latest_price")),
+            "90m": format_percent(row.get("return_90m"), "0.00%"),
+            "6h": format_percent(row.get("return_6h"), "0.00%"),
+            "RSI": round(_as_float(row.get("rsi_14"), 0.0), 1),
+            "Reason": _safe_text(row.get("reason"), "N/A"),
+        }
+        for row in signals[:25]
+    ]
+    st.markdown("#### Latest crypto signals")
+    if signal_rows:
+        st.dataframe(signal_rows)
+    else:
+        _empty_state("The first crypto cycle has not completed yet.")
+
+    orders = list(crypto.get("recent_orders") or [])
+    if last_order and not orders:
+        orders = [last_order]
+    order_rows = [
+        {
+            "Time": format_timestamp_eastern(row.get("event_timestamp") or row.get("updated_at") or row.get("timestamp")),
+            "Symbol": _safe_text(row.get("symbol"), "N/A"),
+            "Side": _safe_text(row.get("side"), "N/A").upper(),
+            "Units": round(abs(_as_float(row.get("filled_quantity") or row.get("quantity"), 0.0)), 8),
+            "Fill": format_currency(row.get("average_fill_price") or row.get("reference_price")),
+            "Status": friendly_status_text(row.get("safe_order_status") or row.get("status"), "Unknown"),
+        }
+        for row in orders[:20]
+    ]
+    st.markdown("#### Recent crypto orders")
+    if order_rows:
+        st.dataframe(order_rows)
+    else:
+        _empty_state("No crypto PAPER orders yet.")
+
+
+def render_crypto_page(payload, view):
+    st.markdown("<div class='dq-section-tag'>CRYPTO</div>", unsafe_allow_html=True)
+    _render_crypto_dashboard_panel(payload, detailed=True)
+
+
 def render_command_center_page(payload, view):
     summary = build_compact_dashboard_summary(payload, view)
     tuning_scorecard = build_paper_tuning_scorecard(payload)
@@ -2896,10 +2994,12 @@ def render_command_center_page(payload, view):
         unsafe_allow_html=True,
     )
 
+    _render_crypto_dashboard_panel(payload, detailed=False)
+
     if summary.get("short_position_count"):
         st.markdown(
             f"<div class='dq-short-alert'><strong>Attention:</strong> {summary['short_position_count']} PAPER short position(s) exist at Alpaca. "
-            "Shares are shown as positive numbers with Direction = SHORT. New submissions are paused while these are reviewed.</div>",
+            "Shares are shown as positive numbers with Direction = SHORT and are managed by the short strategy.</div>",
             unsafe_allow_html=True,
         )
 
@@ -4277,6 +4377,7 @@ def render_dashboard(database_url: str | None = None):
 
     page_renderers = {
         "Command Center": render_overview_page,
+        "Crypto": render_crypto_page,
         "Strategy": render_strategy_page,
         "Risk": render_risk_page,
         "Portfolio": render_account_page,

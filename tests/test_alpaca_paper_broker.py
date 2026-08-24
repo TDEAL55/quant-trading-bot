@@ -52,6 +52,16 @@ class _Asset:
     fractionable = True
 
 
+class _CryptoAsset(_Asset):
+    symbol = "BTC/USD"
+    name = "BTC/USD pair"
+    asset_class = "crypto"
+    status = "active"
+    min_order_size = "0.0001"
+    min_trade_increment = "0.0001"
+    price_increment = "1"
+
+
 class _TradingClient:
     def __init__(self):
         self.submit_calls = 0
@@ -253,6 +263,54 @@ def test_short_flag_never_enables_live_mode(monkeypatch):
 
     with pytest.raises(RuntimeError, match="LIVE mode is blocked"):
         AlpacaPaperBroker(mode="LIVE", trading_client=_TradingClient())
+
+
+def test_crypto_sell_cannot_create_short_even_when_equity_shorts_enabled(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+    monkeypatch.setenv("ALPACA_PAPER_BASE_URL", ALPACA_PAPER_ENDPOINT)
+    monkeypatch.setenv("ALPACA_ORDER_SUBMISSION_ENABLED", "true")
+    monkeypatch.setenv("PAPER_ALLOW_SHORT_SELLING", "true")
+    client = _TradingClient()
+    client.get_asset = lambda _symbol: _CryptoAsset()
+    broker = AlpacaPaperBroker(mode="PAPER", trading_client=client)
+
+    with pytest.raises(RuntimeError, match="crypto sell blocked"):
+        broker.submit_order(
+            side="sell",
+            ticker="BTC/USD",
+            quantity=0.1,
+            time_in_force="gtc",
+            allow_fractional=True,
+            wait_for_fill=False,
+        )
+
+    assert client.submit_calls == 0
+
+
+def test_broker_lists_active_tradable_usd_crypto_assets(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+    monkeypatch.setenv("ALPACA_PAPER_BASE_URL", ALPACA_PAPER_ENDPOINT)
+    client = _TradingClient()
+    client.get_all_assets = lambda _request=None: [_CryptoAsset()]
+    broker = AlpacaPaperBroker(mode="PAPER", trading_client=client)
+
+    rows = broker.get_tradable_crypto_assets()
+
+    assert rows == [
+        {
+            "symbol": "BTC/USD",
+            "name": "BTC/USD pair",
+            "asset_class": "crypto",
+            "status": "active",
+            "tradable": True,
+            "fractionable": True,
+            "min_order_size": 0.0001,
+            "min_trade_increment": 0.0001,
+            "price_increment": 1.0,
+        }
+    ]
 
 
 def test_order_history_is_normalized_and_sorted(monkeypatch):

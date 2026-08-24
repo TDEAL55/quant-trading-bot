@@ -9,13 +9,16 @@ from typing import Any
 
 try:
     from alpaca.trading.client import TradingClient
-    from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
-    from alpaca.trading.requests import GetOrdersRequest, MarketOrderRequest
+    from alpaca.trading.enums import AssetClass, AssetStatus, OrderSide, QueryOrderStatus, TimeInForce
+    from alpaca.trading.requests import GetAssetsRequest, GetOrdersRequest, MarketOrderRequest
 except Exception:  # pragma: no cover - import failures are handled at runtime
     TradingClient = None
+    AssetClass = None
+    AssetStatus = None
     OrderSide = None
     QueryOrderStatus = None
     TimeInForce = None
+    GetAssetsRequest = None
     GetOrdersRequest = None
     MarketOrderRequest = None
 
@@ -85,6 +88,8 @@ def _time_in_force(value: str) -> Any:
         return normalized
     if normalized == "gtc":
         return TimeInForce.GTC
+    if normalized == "ioc":
+        return TimeInForce.IOC
     return TimeInForce.DAY
 
 
@@ -117,6 +122,7 @@ def normalize_alpaca_order(order: Any) -> dict[str, Any]:
         "order_id": str(getattr(order, "id", "") or ""),
         "client_order_id": str(getattr(order, "client_order_id", "") or ""),
         "symbol": str(getattr(order, "symbol", "") or "").upper(),
+        "asset_class": _normalize_enum_text(getattr(order, "asset_class", "")),
         "side": _normalize_enum_text(getattr(order, "side", "")),
         "requested_quantity": _to_float(getattr(order, "qty", 0.0), 0.0),
         "filled_quantity": _to_float(getattr(order, "filled_qty", 0.0), 0.0),
@@ -191,6 +197,10 @@ class AlpacaPaperBroker:
             "account_number": str(getattr(account, "account_number", "") or ""),
             "currency": str(getattr(account, "currency", "USD") or "USD"),
             "buying_power": _to_float(getattr(account, "buying_power", 0.0), 0.0),
+            "non_marginable_buying_power": _to_float(
+                getattr(account, "non_marginable_buying_power", getattr(account, "cash", 0.0)),
+                0.0,
+            ),
             "cash": _to_float(getattr(account, "cash", 0.0), 0.0),
             "equity": equity,
             "last_equity": last_equity,
@@ -231,8 +241,42 @@ class AlpacaPaperBroker:
                 "market_value": _to_float(getattr(position, "market_value", 0.0), 0.0),
                 "unrealized_pl": _to_float(getattr(position, "unrealized_pl", 0.0), 0.0),
                 "unrealized_plpc": _to_float(getattr(position, "unrealized_plpc", 0.0), 0.0),
+                "asset_class": _normalize_enum_text(getattr(position, "asset_class", "")),
             }
         return result
+
+    def get_tradable_crypto_assets(self) -> list[dict[str, Any]]:
+        """Return active Alpaca USD crypto pairs with broker precision metadata."""
+        request = None
+        if GetAssetsRequest is not None and AssetClass is not None:
+            kwargs: dict[str, Any] = {"asset_class": AssetClass.CRYPTO}
+            if AssetStatus is not None:
+                kwargs["status"] = AssetStatus.ACTIVE
+            request = GetAssetsRequest(**kwargs)
+        rows = self._trading_client.get_all_assets(request) if request is not None else self._trading_client.get_all_assets()
+        assets: list[dict[str, Any]] = []
+        for asset in rows or []:
+            symbol = str(getattr(asset, "symbol", "") or "").strip().upper()
+            asset_class = _normalize_enum_text(getattr(asset, "asset_class", getattr(asset, "class", "")))
+            status = _normalize_enum_text(getattr(asset, "status", ""))
+            if asset_class != "crypto" or status not in {"", "active"} or not bool(getattr(asset, "tradable", False)):
+                continue
+            if not symbol.endswith("/USD"):
+                continue
+            assets.append(
+                {
+                    "symbol": symbol,
+                    "name": str(getattr(asset, "name", symbol) or symbol),
+                    "asset_class": "crypto",
+                    "status": status or "active",
+                    "tradable": True,
+                    "fractionable": bool(getattr(asset, "fractionable", True)),
+                    "min_order_size": _to_float(getattr(asset, "min_order_size", 0.0), 0.0),
+                    "min_trade_increment": _to_float(getattr(asset, "min_trade_increment", 0.0), 0.0),
+                    "price_increment": _to_float(getattr(asset, "price_increment", 0.0), 0.0),
+                }
+            )
+        return sorted(assets, key=lambda row: str(row.get("symbol") or ""))
 
     def get_open_orders(self) -> list[dict[str, Any]]:
         if GetOrdersRequest is not None and QueryOrderStatus is not None:
@@ -274,7 +318,7 @@ class AlpacaPaperBroker:
         normalized = normalize_alpaca_order(order)
         return normalized or None
 
-    def _validate_quantity(self, symbol: str, quantity: float, allow_fractional: bool) -> None:
+    def _validate_quantity(self, symbol: str, quantity: float, allow_fractional: bool) -> Any | None:
         qty = _to_float(quantity, 0.0)
         if qty <= 0:
             raise RuntimeError("quantity must be greater than zero")
@@ -283,11 +327,12 @@ class AlpacaPaperBroker:
         try:
             asset = self._trading_client.get_asset(str(symbol).upper())
         except Exception:
-            return
+            return None
         if not bool(getattr(asset, "tradable", True)):
             raise RuntimeError(f"asset is not tradable: {symbol}")
         if abs(qty - round(qty)) > 1e-9 and not bool(getattr(asset, "fractionable", False)):
             raise RuntimeError(f"asset does not support fractional orders: {symbol}")
+        return asset
 
     def submit_order(
         self,
@@ -311,7 +356,7 @@ class AlpacaPaperBroker:
         normalized_side = _normalize_enum_text(side)
         if normalized_side not in {"buy", "sell"}:
             raise RuntimeError("order side must be BUY or SELL")
-        self._validate_quantity(symbol=symbol, quantity=quantity, allow_fractional=allow_fractional)
+        asset = self._validate_quantity(symbol=symbol, quantity=quantity, allow_fractional=allow_fractional)
 
         if not client_order_id:
             client_order_id = _default_client_order_id(symbol=symbol, side=side, quantity=quantity, order_type=order_type, time_in_force=time_in_force)
@@ -336,12 +381,16 @@ class AlpacaPaperBroker:
                 "broker_backend": "ALPACA",
             }
 
-        if normalized_side == "sell" and not self.allow_short_selling:
-            current_position = self.get_positions().get(symbol) or {}
+        asset_class = _normalize_enum_text(getattr(asset, "asset_class", getattr(asset, "class", "")))
+        crypto_asset = bool(asset_class == "crypto" or "/" in symbol)
+        if normalized_side == "sell" and (crypto_asset or not self.allow_short_selling):
+            positions = self.get_positions()
+            current_position = positions.get(symbol) or positions.get(symbol.replace("/", "")) or {}
             held_quantity = _to_float(current_position.get("quantity"), 0.0)
             requested_quantity = _to_float(quantity, 0.0)
             if held_quantity <= 0:
-                raise RuntimeError(f"naked short blocked: no long {symbol} position is available to sell")
+                label = "crypto sell" if crypto_asset else "naked short"
+                raise RuntimeError(f"{label} blocked: no long {symbol} position is available to sell")
             if requested_quantity > held_quantity + 1e-8:
                 raise RuntimeError(
                     f"oversell blocked: requested {requested_quantity:g} {symbol}, only {held_quantity:g} held"

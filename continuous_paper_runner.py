@@ -7,7 +7,7 @@ import signal
 import sys
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -297,6 +297,7 @@ def run_continuous_paper_runner(
     dry_run_override: bool | None = None,
     diagnostic_symbol_limit: int | None = None,
     notifier_factory: Callable[..., NotificationService] | None = None,
+    crypto_runner: Callable[..., Any] | None = None,
 ) -> dict[str, int]:
     run_id = f"continuous-runner-{datetime.now(EASTERN_TZ).strftime('%Y%m%d%H%M%S%f')}-{uuid.uuid4().hex[:8]}"
     _log_event("continuous_runner_starting", run_id=run_id)
@@ -319,6 +320,13 @@ def run_continuous_paper_runner(
     max_daily_orders = configured_max_daily_orders
     scan_only_during_market_hours = bool(getattr(config, "scan_only_during_market_hours", True))
     dry_run = bool(getattr(config, "continuous_runner_dry_run", False)) if dry_run_override is None else bool(dry_run_override)
+    crypto_enabled = str(os.getenv("CRYPTO_TRADING_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    crypto_interval_minutes = max(int(os.getenv("CRYPTO_SCAN_INTERVAL_MINUTES", "15")), 1)
+    crypto_interval_seconds = crypto_interval_minutes * 60
+    if crypto_enabled and crypto_runner is None:
+        from crypto_paper_trader import run_crypto_paper_cycle
+
+        crypto_runner = run_crypto_paper_cycle
     telemetry_callback = _telemetry_callback_factory(run_id=run_id, dry_run=dry_run, trading_mode=str(config.trading_mode))
     notifier_builder = notifier_factory or NotificationService.from_env
     notifier = notifier_builder(database_url=(database_url or config.database_url))
@@ -370,6 +378,9 @@ def run_continuous_paper_runner(
         max_universe_mode=("unlimited" if int(resolved_max_universe_size) <= 0 else "capped"),
         max_universe_source=max_universe_source,
         universe_source="alpaca_assets_api",
+        crypto_trading_enabled=bool(crypto_enabled),
+        crypto_scan_interval_minutes=int(crypto_interval_minutes),
+        crypto_market="24/7",
         diagnostic_symbol_limit=(int(diagnostic_symbol_limit) if diagnostic_symbol_limit is not None else None),
     )
 
@@ -384,8 +395,13 @@ def run_continuous_paper_runner(
         "lock_skips": 0,
         "quota_skips": 0,
         "closed_market_sleeps": 0,
+        "crypto_cycles_attempted": 0,
+        "crypto_cycles_completed": 0,
+        "crypto_cycles_failed": 0,
+        "crypto_orders_submitted": 0,
     }
     last_active_cycle_key: str | None = None
+    last_crypto_cycle_at: datetime | None = None
     daily_summary_enabled = str(os.getenv("NOTIFICATION_DAILY_SUMMARY_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
     weekly_summary_enabled = str(os.getenv("NOTIFICATION_WEEKLY_SUMMARY_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
     daily_summary_hour, daily_summary_minute = _parse_summary_time_et(os.getenv("DAILY_SUMMARY_TIME_ET", "16:15"))
@@ -399,8 +415,59 @@ def run_continuous_paper_runner(
             now_eastern = _to_eastern(now_provider())
             market_date = now_eastern.date().isoformat()
 
+            crypto_due = bool(
+                crypto_enabled
+                and callable(crypto_runner)
+                and (
+                    last_crypto_cycle_at is None
+                    or (now_eastern - last_crypto_cycle_at).total_seconds() >= float(crypto_interval_seconds)
+                )
+            )
+            if crypto_due:
+                stats["crypto_cycles_attempted"] += 1
+                try:
+                    crypto_result = dict(
+                        crypto_runner(
+                            now=now_eastern.astimezone(timezone.utc),
+                            dry_run=bool(
+                                dry_run
+                                or str(os.getenv("CRYPTO_DRY_RUN", "false")).strip().lower()
+                                in {"1", "true", "yes", "on"}
+                            ),
+                        )
+                        or {}
+                    )
+                    confirmed_crypto_orders = int(crypto_result.get("confirmed_order_count") or 0)
+                    stats["crypto_cycles_completed"] += 1
+                    stats["crypto_orders_submitted"] += confirmed_crypto_orders
+                    _log_event(
+                        "crypto_cycle_complete",
+                        run_id=run_id,
+                        timestamp=now_eastern.isoformat(),
+                        cycle_status=str(crypto_result.get("cycle_status") or "unknown"),
+                        universe_count=int(crypto_result.get("universe_count") or 0),
+                        scanned_count=int(crypto_result.get("scanned_count") or 0),
+                        buy_signal_count=int(crypto_result.get("buy_signal_count") or 0),
+                        sell_signal_count=int(crypto_result.get("sell_signal_count") or 0),
+                        confirmed_order_count=confirmed_crypto_orders,
+                        action_reason=str(crypto_result.get("action_reason") or ""),
+                    )
+                except Exception as exc:
+                    stats["crypto_cycles_failed"] += 1
+                    _log_event(
+                        "crypto_cycle_failed",
+                        run_id=run_id,
+                        timestamp=now_eastern.isoformat(),
+                        error_type=type(exc).__name__,
+                        error_message=str(exc),
+                    )
+                finally:
+                    last_crypto_cycle_at = now_eastern
+
             if scan_only_during_market_hours and not _is_market_open(now_eastern):
                 sleep_seconds = _seconds_until_next_market_open(now_eastern)
+                if crypto_enabled:
+                    sleep_seconds = min(float(sleep_seconds), float(crypto_interval_seconds))
                 stats["closed_market_sleeps"] += 1
                 if daily_summary_enabled and ((now_eastern.hour, now_eastern.minute) >= (daily_summary_hour, daily_summary_minute)):
                     summary_message = format_daily_summary_message(
