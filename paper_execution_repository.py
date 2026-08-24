@@ -374,6 +374,30 @@ class MonitoringPaperExecutionRepository:
             result.append(item)
         return result
 
+    def fetch_latest_filled_buy(self, symbol: str) -> dict[str, Any] | None:
+        if not self.db.enabled:
+            return None
+        self.db.ensure_schema()
+        row = self.db.query_one(
+            """
+            SELECT o.*, r.strategy_id, r.strategy_version
+            FROM paper_orders o
+            JOIN paper_validation_runs r ON r.run_id = o.run_id
+            WHERE UPPER(o.symbol) = UPPER(?)
+              AND UPPER(o.side) = 'BUY'
+              AND o.filled_quantity > 0
+              AND LOWER(o.submission_status) IN ('filled', 'partially_filled')
+            ORDER BY COALESCE(o.filled_at, o.submitted_at, o.proposed_at) DESC
+            LIMIT 1
+            """,
+            (str(symbol or "").upper(),),
+        )
+        if not row:
+            return None
+        item = dict(row)
+        item["order_payload"] = _json_load(item.get("order_payload_json"), {})
+        return item
+
     def fetch_position_snapshots_for_run(self, run_id: str) -> list[dict[str, Any]]:
         if not self.db.enabled:
             return []

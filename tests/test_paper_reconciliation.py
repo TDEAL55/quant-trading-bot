@@ -67,3 +67,38 @@ def test_reconciliation_failing_scenario_covers_all_mismatch_types():
     assert result["buying_power_difference"] == -150.0
     assert result["unfilled_order_count"] == 2
     assert result["failed_order_count"] == 1
+
+
+def test_cash_mismatch_fails_closed_instead_of_being_called_tolerated():
+    result = reconcile_paper_positions(
+        planned_positions={"AAA": {"quantity": 10, "weight": 0.2}},
+        actual_positions={"AAA": {"quantity": 10, "weight": 0.2}},
+        expected_cash=1000,
+        actual_cash=999,
+        expected_buying_power=None,
+        actual_buying_power=5000,
+        orders=[],
+        tolerance=0.01,
+    )
+
+    assert result["reconciliation_status"] == "mismatch"
+    assert result["cash_difference"] == -1.0
+    assert result["buying_power_checked"] is False
+    assert result["buying_power_difference"] is None
+    assert "cash_or_buying_power_mismatch_detected" in result["warnings"]
+
+
+def test_broker_accepted_but_unfilled_order_remains_pending():
+    result = reconcile_paper_positions(
+        planned_positions={"AAA": {"quantity": 10, "weight": 0.2}},
+        actual_positions={"AAA": {"quantity": 10, "weight": 0.2}},
+        expected_cash=1000,
+        actual_cash=1000,
+        expected_buying_power=None,
+        actual_buying_power=5000,
+        orders=[{"submission_status": "accepted", "filled_quantity": 0, "quantity": 2}],
+        tolerance=0.01,
+    )
+
+    assert result["reconciliation_status"] == "pending"
+    assert result["unfilled_order_count"] == 1

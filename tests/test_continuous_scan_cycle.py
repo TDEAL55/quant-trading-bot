@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from continuous_scan_cycle import ContinuousScanCycleResult, run_continuous_scan_cycle
+from paper_broker import SimulatedPaperBroker
 from stock_universe import AlpacaAssetUniverseError
 
 
@@ -180,6 +181,49 @@ def test_continuous_scan_cycle_returns_no_candidates_without_execution():
     assert result.execution["paper_order"] == {}
     assert repo.saved is None
     assert scan_persist_calls
+
+
+def test_position_guard_exit_takes_precedence_over_new_entry_scan(monkeypatch):
+    monkeypatch.setattr("continuous_scan_cycle.PAPER_EXECUTION_ENABLED", True)
+
+    class _GuardConfig(_Config):
+        position_guard_enabled = True
+        position_guard_auto_exit_enabled = True
+        position_guard_stop_loss_percent = 4.0
+        position_guard_take_profit_percent = 8.0
+        position_guard_max_exits_per_cycle = 1
+
+    class _GuardBroker(SimulatedPaperBroker):
+        def get_positions(self):
+            positions = super().get_positions()
+            for payload in positions.values():
+                payload["current_price"] = 95.0
+                payload["market_value"] = float(payload["quantity"]) * 95.0
+            return positions
+
+    broker = _GuardBroker(
+        mode="PAPER",
+        buying_power=1000.0,
+        positions={"JPM": {"quantity": 2.0, "avg_price": 100.0}},
+    )
+
+    result = run_continuous_scan_cycle(
+        database_url="sqlite:///unused.db",
+        config_loader=lambda: _GuardConfig(),
+        now_provider=lambda: datetime(2026, 7, 22, 10, 5, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=lambda universe: pytest.fail("scanner must not run before a required risk exit"),
+        execution_repo_factory=lambda **kwargs: _Repo(),
+        positions_loader=_positions_loader,
+        universe_loader=_universe_loader,
+        persist=False,
+    )
+
+    assert result.execution_status == "completed"
+    assert result.confirmed_order_count == 1
+    assert result.execution["paper_order"]["side"] == "SELL"
+    assert result.execution["paper_order"]["exit_reason"] == "stop_loss_threshold_reached"
+    assert broker.get_positions() == {}
 
 
 def test_continuous_scan_cycle_enforces_duplicate_protection():

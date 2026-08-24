@@ -38,6 +38,16 @@ class _RepoStub:
             return [{"submission_status": "filled", "side": "BUY", "filled_quantity": 4.0, "average_fill_price": 100.0, "notional": 400.0, "order_payload": {"hold_days": 1}}]
         return [{"submission_status": "filled", "side": "SELL", "filled_quantity": 1.0, "average_fill_price": 110.0, "notional": 110.0, "order_payload": {"hold_days": 2}}]
 
+    def fetch_closed_trades(self, limit=5000):
+        return [
+            {
+                "symbol": "AAA",
+                "exit_timestamp": "2026-07-18T20:00:00+00:00",
+                "net_pnl": 10.0,
+                "holding_duration_hours": 48.0,
+            }
+        ]
+
     def save_run(self, payload):
         self.saved_payload = payload
         return {"run_id": payload.run.get("run_id"), "metric_rows": len(payload.metrics)}
@@ -60,4 +70,6 @@ def test_run_performance_intelligence_deterministic(monkeypatch):
     assert result["status"] == "completed"
     assert result["source_run_count"] == 2
     assert result["metrics"]["portfolio_value"] == 10150.0
+    assert result["source_trade_count"] == 1
+    assert result["metrics"]["win_rate"] == 1.0
     assert "sharpe_ratio" in result["metrics"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from urllib.error import HTTPError
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -140,6 +141,36 @@ def test_retries_are_bounded(tmp_path):
 
     assert len(poster.calls) == 4
     assert len(sleep.calls) == 3
+
+
+def test_discord_permanent_403_fails_fast_without_exposing_webhook():
+    poster = _Poster(
+        should_fail=True,
+        exc=HTTPError(
+            url="https://discord.com/api/webhooks/123/super-secret-token",
+            code=403,
+            msg="Forbidden",
+            hdrs=None,
+            fp=None,
+        ),
+    )
+    sleep = _NoSleep()
+    transport = DiscordWebhookTransport(
+        webhook_url="https://discord.com/api/webhooks/123/super-secret-token",
+        timeout_seconds=1,
+        max_retries=5,
+        post_fn=poster,
+        sleep_fn=sleep,
+    )
+
+    delivered, retries, safe_error = transport.send("test")
+
+    assert delivered is False
+    assert retries == 0
+    assert len(poster.calls) == 1
+    assert sleep.calls == []
+    assert safe_error == "HTTPError: status=403 permanent_webhook_rejection"
+    assert "super-secret-token" not in safe_error
 
 
 def test_deduplication_suppresses_duplicates(tmp_path):

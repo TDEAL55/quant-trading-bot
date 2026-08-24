@@ -68,6 +68,18 @@ class DeploymentConfig:
     run_minute: int
     scan_interval_minutes: int
     continuous_runner_dry_run: bool
+    sector_enrichment_enabled: bool
+    sector_enrichment_cache_path: str
+    sector_enrichment_max_symbols: int
+    sector_enrichment_timeout_seconds: int
+    sector_enrichment_total_timeout_seconds: int
+    sector_enrichment_max_workers: int
+    sector_enrichment_cache_ttl_days: int
+    position_guard_enabled: bool
+    position_guard_auto_exit_enabled: bool
+    position_guard_stop_loss_percent: float
+    position_guard_take_profit_percent: float
+    position_guard_max_exits_per_cycle: int
     notifications_enabled: bool
     kill_switch: bool
 
@@ -102,6 +114,42 @@ def load_deployment_config(environ: dict[str, str] | None = None) -> DeploymentC
     run_minute = _parse_int("RUN_MINUTE", env.get("RUN_MINUTE", "30"), minimum=0, maximum=59)
     scan_interval_minutes = _parse_int("SCAN_INTERVAL_MINUTES", env.get("SCAN_INTERVAL_MINUTES", "5"), minimum=1)
     continuous_runner_dry_run = _parse_bool(env.get("CONTINUOUS_RUNNER_DRY_RUN"), default=True)
+    sector_enrichment_enabled = _parse_bool(env.get("SECTOR_ENRICHMENT_ENABLED"), default=True)
+    sector_enrichment_cache_path = str(
+        env.get("SECTOR_ENRICHMENT_CACHE_PATH", "/var/lib/quant-bot/sector-cache.json")
+    ).strip() or "/var/lib/quant-bot/sector-cache.json"
+    sector_enrichment_max_symbols = _parse_int(
+        "SECTOR_ENRICHMENT_MAX_SYMBOLS", env.get("SECTOR_ENRICHMENT_MAX_SYMBOLS", "30"), minimum=1, maximum=100
+    )
+    sector_enrichment_timeout_seconds = _parse_int(
+        "SECTOR_ENRICHMENT_TIMEOUT_SECONDS", env.get("SECTOR_ENRICHMENT_TIMEOUT_SECONDS", "6"), minimum=1, maximum=30
+    )
+    sector_enrichment_total_timeout_seconds = _parse_int(
+        "SECTOR_ENRICHMENT_TOTAL_TIMEOUT_SECONDS",
+        env.get("SECTOR_ENRICHMENT_TOTAL_TIMEOUT_SECONDS", "25"),
+        minimum=1,
+        maximum=120,
+    )
+    sector_enrichment_max_workers = _parse_int(
+        "SECTOR_ENRICHMENT_MAX_WORKERS", env.get("SECTOR_ENRICHMENT_MAX_WORKERS", "6"), minimum=1, maximum=20
+    )
+    sector_enrichment_cache_ttl_days = _parse_int(
+        "SECTOR_ENRICHMENT_CACHE_TTL_DAYS", env.get("SECTOR_ENRICHMENT_CACHE_TTL_DAYS", "30"), minimum=1, maximum=365
+    )
+    position_guard_enabled = _parse_bool(env.get("PAPER_POSITION_GUARD_ENABLED"), default=True)
+    position_guard_auto_exit_enabled = _parse_bool(env.get("PAPER_POSITION_AUTO_EXIT_ENABLED"), default=True)
+    position_guard_stop_loss_percent = float(str(env.get("PAPER_POSITION_STOP_LOSS_PERCENT", "4")).strip() or "4")
+    position_guard_take_profit_percent = float(str(env.get("PAPER_POSITION_TAKE_PROFIT_PERCENT", "8")).strip() or "8")
+    position_guard_max_exits_per_cycle = _parse_int(
+        "PAPER_POSITION_GUARD_MAX_EXITS_PER_CYCLE",
+        env.get("PAPER_POSITION_GUARD_MAX_EXITS_PER_CYCLE", "1"),
+        minimum=1,
+        maximum=5,
+    )
+    if not 0 < position_guard_stop_loss_percent <= 25:
+        raise DeploymentConfigError("PAPER_POSITION_STOP_LOSS_PERCENT must be > 0 and <= 25")
+    if not 0 < position_guard_take_profit_percent <= 100:
+        raise DeploymentConfigError("PAPER_POSITION_TAKE_PROFIT_PERCENT must be > 0 and <= 100")
     notifications_enabled = _parse_bool(env.get("NOTIFICATIONS_ENABLED"), default=False)
     kill_switch = _parse_bool(env.get("KILL_SWITCH"), default=False)
 
@@ -149,6 +197,18 @@ def load_deployment_config(environ: dict[str, str] | None = None) -> DeploymentC
         run_minute=run_minute,
         scan_interval_minutes=scan_interval_minutes,
         continuous_runner_dry_run=continuous_runner_dry_run,
+        sector_enrichment_enabled=sector_enrichment_enabled,
+        sector_enrichment_cache_path=sector_enrichment_cache_path,
+        sector_enrichment_max_symbols=sector_enrichment_max_symbols,
+        sector_enrichment_timeout_seconds=sector_enrichment_timeout_seconds,
+        sector_enrichment_total_timeout_seconds=sector_enrichment_total_timeout_seconds,
+        sector_enrichment_max_workers=sector_enrichment_max_workers,
+        sector_enrichment_cache_ttl_days=sector_enrichment_cache_ttl_days,
+        position_guard_enabled=position_guard_enabled,
+        position_guard_auto_exit_enabled=position_guard_auto_exit_enabled,
+        position_guard_stop_loss_percent=position_guard_stop_loss_percent,
+        position_guard_take_profit_percent=position_guard_take_profit_percent,
+        position_guard_max_exits_per_cycle=position_guard_max_exits_per_cycle,
         notifications_enabled=notifications_enabled,
         kill_switch=kill_switch,
     )

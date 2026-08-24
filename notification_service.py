@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
-from urllib import request
+from urllib import error, request
 
 from logger_setup import logger
 from monitoring_db import MonitoringDatabase
@@ -339,7 +339,17 @@ class DiscordWebhookTransport:
                 return True, retries_used, ""
             except Exception as exc:
                 retries_used = attempt
-                last_error = _safe_text(f"{type(exc).__name__}: {exc}", default="send_failed", limit=300)
+                status_code = int(getattr(exc, "code", 0) or 0) if isinstance(exc, error.HTTPError) else 0
+                if 400 <= status_code < 500 and status_code != 429:
+                    # Authentication, permission, and malformed-webhook failures will not
+                    # improve with backoff. Keep the stored error useful without retaining
+                    # the secret webhook URL carried by HTTPError.
+                    last_error = f"HTTPError: status={status_code} permanent_webhook_rejection"
+                    break
+                if status_code:
+                    last_error = f"HTTPError: status={status_code} retryable_delivery_failure"
+                else:
+                    last_error = _safe_text(f"{type(exc).__name__}: {exc}", default="send_failed", limit=300)
                 if attempt + 1 >= max_attempts:
                     break
                 backoff_seconds = min(2 ** attempt, 8)

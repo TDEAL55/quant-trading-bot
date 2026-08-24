@@ -282,6 +282,47 @@ def test_compact_dashboard_summary_prioritizes_scan_positions_and_orders(monkeyp
     assert summary["position_rows"][0]["Symbol"] == "JPM"
 
 
+def test_paper_tuning_scorecard_uses_closed_trades_and_funnel_only():
+    payload = {
+        "latest_scanner_run": {"success_count": 100, "eligible_count": 22},
+        "top_scanner_results": [
+            {"symbol": "JPM", "sector": "Financial Services"},
+            {"symbol": "AAA", "sector": "Unknown"},
+        ],
+        "paper_tuning": {
+            "validation": {
+                "orders_proposed": 10,
+                "orders_submitted": 7,
+                "orders_filled": 6,
+                "reconciliation_failures": 1,
+            },
+            "closed_trades": {
+                "closed_trades": 4,
+                "winning_trades": 3,
+                "net_pnl": 125.0,
+                "expectancy": 31.25,
+            },
+        },
+    }
+
+    scorecard = dashboard_app.build_paper_tuning_scorecard(payload)
+
+    assert [item["value"] for item in scorecard["metrics"]] == [100, 22, 10, 7, 6, 4]
+    assert scorecard["win_rate"] == 0.75
+    assert scorecard["expectancy"] == 31.25
+    assert scorecard["sector_coverage"] == 0.5
+    assert scorecard["evidence_status"] == "Collecting evidence (4/20 closed trades)"
+
+
+def test_paper_tuning_scorecard_does_not_claim_results_without_closed_trades():
+    scorecard = dashboard_app.build_paper_tuning_scorecard({})
+
+    assert scorecard["closed_trades"] == 0
+    assert scorecard["win_rate"] is None
+    assert scorecard["expectancy"] is None
+    assert scorecard["evidence_status"] == "Collecting evidence (0/20 closed trades)"
+
+
 def test_signal_strength_meter_boundaries():
     weak = dashboard_app.build_signal_strength(0.01)
     strong = dashboard_app.build_signal_strength(9.0)

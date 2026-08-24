@@ -54,8 +54,8 @@ from walk_forward_data import fetch_walk_forward_dashboard_payload
 
 MAX_DAILY_ORDERS = 3
 MAX_DAILY_SUBMITTED_NOTIONAL = 30.0
-DASHBOARD_VERSION = "v2.1"
-UI_BUILD_LABEL = "DEAL QUANT UI — BUILD 6"
+DASHBOARD_VERSION = "v2.2"
+UI_BUILD_LABEL = "DEAL QUANT UI — BUILD 7"
 EASTERN_TZ = ZoneInfo("America/New_York")
 MARKET_OPEN_ET = time(9, 30)
 MARKET_CLOSE_ET = time(16, 0)
@@ -1520,6 +1520,65 @@ def build_compact_dashboard_summary(payload, view):
     }
 
 
+def build_paper_tuning_scorecard(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return compact evidence metrics; never infer profitability from open trades."""
+    scanner = dict(payload.get("latest_scanner_run") or {})
+    tuning = dict(payload.get("paper_tuning") or {})
+    validation = dict(tuning.get("validation") or {})
+    closed = dict(tuning.get("closed_trades") or {})
+    top_candidates = list(payload.get("top_scanner_results") or [])
+
+    scanned = _safe_int(scanner.get("symbol_count") or scanner.get("success_count"), 0)
+    eligible = _safe_int(scanner.get("eligible_count"), 0)
+    proposed = _safe_int(validation.get("orders_proposed"), 0)
+    submitted = _safe_int(validation.get("orders_submitted"), 0)
+    filled = _safe_int(validation.get("orders_filled"), 0)
+    closed_count = _safe_int(closed.get("closed_trades"), 0)
+    winners = _safe_int(closed.get("winning_trades"), 0)
+    win_rate = (winners / closed_count) if closed_count > 0 else None
+    expectancy = _as_float(closed.get("expectancy"), 0.0) if closed_count > 0 else None
+    known_sector_count = sum(
+        1
+        for row in top_candidates
+        if str((row or {}).get("sector") or "").strip().lower() not in {"", "unknown", "n/a", "none"}
+    )
+    sector_coverage = (known_sector_count / len(top_candidates)) if top_candidates else None
+
+    minimum_sample = 20
+    if closed_count >= minimum_sample and expectancy is not None:
+        evidence_status = "Positive evidence" if expectancy > 0 else "Needs retuning"
+    elif closed_count > 0:
+        evidence_status = f"Collecting evidence ({closed_count}/{minimum_sample} closed trades)"
+    else:
+        evidence_status = f"Collecting evidence (0/{minimum_sample} closed trades)"
+
+    return {
+        "evidence_status": evidence_status,
+        "minimum_closed_trade_sample": minimum_sample,
+        "metrics": [
+            {"label": "Scanned", "value": scanned},
+            {"label": "Eligible", "value": eligible},
+            {"label": "Proposed", "value": proposed},
+            {"label": "Submitted", "value": submitted},
+            {"label": "Filled", "value": filled},
+            {"label": "Closed", "value": closed_count},
+        ],
+        "scanned": scanned,
+        "eligible": eligible,
+        "proposed": proposed,
+        "submitted": submitted,
+        "filled": filled,
+        "closed_trades": closed_count,
+        "win_rate": win_rate,
+        "expectancy": expectancy,
+        "net_pnl": _as_float(closed.get("net_pnl"), 0.0),
+        "sector_coverage": sector_coverage,
+        "reconciliation_failures": _safe_int(validation.get("reconciliation_failures"), 0),
+        "latest_position_reviews": list(tuning.get("latest_position_reviews") or []),
+        "latest_notification": dict(tuning.get("latest_notification") or {}),
+    }
+
+
 def build_service_health_telemetry(payload, view):
     latest_run = payload.get("latest_run") or {}
     latest_scanner_run = payload.get("latest_scanner_run") or {}
@@ -1616,6 +1675,7 @@ def _fetch_payload_uncached(database_url: str | None):
             "portfolio_history": [],
             "signal_history": [],
             "order_count_by_day": [],
+            "paper_tuning": {},
             "research": {
                 "db_connected": False,
                 "latest_research_run": {},
@@ -2719,6 +2779,7 @@ def _render_navigation(pages: list[str]) -> str:
 
 def render_command_center_page(payload, view):
     summary = build_compact_dashboard_summary(payload, view)
+    tuning_scorecard = build_paper_tuning_scorecard(payload)
     status = summary["status"]
     status_items = [
         ("Bot", status.get("bot_service", "STOPPED")),
@@ -2739,6 +2800,19 @@ def render_command_center_page(payload, view):
     _metric_card(top[1], "Cash", format_currency(view["cash"]), "neutral")
     _metric_card(top[2], "Open Positions", int(view.get("open_positions") or 0), "neutral")
     _metric_card(top[3], "Today's P&L", format_currency(view["today_pl"]), "buy" if view["today_pl"] >= 0 else "sell")
+
+    st.markdown("#### PAPER tuning scorecard")
+    tuning_cols = st.columns(6)
+    for column, metric in zip(tuning_cols, tuning_scorecard["metrics"]):
+        _metric_card(column, metric["label"], metric["value"], "neutral")
+    evidence_bits = [tuning_scorecard["evidence_status"]]
+    if tuning_scorecard["win_rate"] is not None:
+        evidence_bits.append(f"win rate {tuning_scorecard['win_rate'] * 100:.1f}%")
+    if tuning_scorecard["expectancy"] is not None:
+        evidence_bits.append(f"expectancy {format_currency(tuning_scorecard['expectancy'])}/closed trade")
+    if tuning_scorecard["sector_coverage"] is not None:
+        evidence_bits.append(f"candidate sector coverage {tuning_scorecard['sector_coverage'] * 100:.0f}%")
+    st.caption(" • ".join(evidence_bits))
 
     render_alert_banner(payload, view)
     decision, positions = st.columns([1.0, 1.25])
@@ -2986,6 +3060,13 @@ def render_orders_page(payload):
 
 
 def render_performance_page(payload):
+    tuning_scorecard = build_paper_tuning_scorecard(payload)
+    st.markdown("### PAPER EVIDENCE SCORECARD")
+    tuning_cols = st.columns(6)
+    for column, metric in zip(tuning_cols, tuning_scorecard["metrics"]):
+        _metric_card(column, metric["label"], metric["value"], "neutral")
+    st.caption(tuning_scorecard["evidence_status"])
+
     research_payload = st.session_state.get("dashboard_research_payload") or {}
     perf_payload = research_payload.get("performance_intelligence") or {}
     latest_perf_run = perf_payload.get("latest_run") or {}

@@ -50,13 +50,16 @@ from deployment_config import load_deployment_config
 from order_lifecycle import track_order_lifecycle
 from paper_broker import create_paper_broker
 from paper_execution_repository import MonitoringPaperExecutionRepository, PaperValidationRunPayload
+from paper_exit_execution import execute_guard_exit
 from paper_order_planner import OrderPlannerSettings, plan_paper_orders
+from paper_position_guard import PositionGuardSettings, review_paper_positions
 from paper_reconciliation import reconcile_paper_positions
 from portfolio_allocator import AllocationPolicy
 from portfolio_intelligence import run_portfolio_intelligence
 from risk_manager import RiskManager
 from scanner_repository import save_scan_results
 from scanner_runner import SAMPLE_SYMBOLS, _load_paper_positions, _symbol_records_from_list, run_scan, run_shortlist_only
+from sector_enrichment import enrich_sector_records
 from sector_manager import SectorPolicy
 from self_improving_repository import SelfImprovingRepository
 from sprint_10_2_execution_validation import _execution_fingerprint
@@ -386,6 +389,7 @@ def run_continuous_scan_cycle(
     symbol_records_builder: Callable[[list[str]], list[dict[str, Any]]] = _symbol_records_from_list,
     history_batch_loader: Callable[[list[str], str, str], dict[str, Any]] = download_price_data_batch,
     history_single_loader: Callable[[str, str, str], Any] = download_price_data,
+    sector_enricher: Callable[..., tuple[list[dict[str, Any]], dict[str, Any]]] = enrich_sector_records,
     sample_symbols: list[str] | None = None,
     symbols: list[str] | None = None,
     persist: bool = True,
@@ -641,6 +645,108 @@ def run_continuous_scan_cycle(
         broker_buying_power = float(loaded_cash)
         broker_equity = float(loaded_equity)
 
+    position_guard_payload: dict[str, Any] = {"reviews": [], "exit_candidates": [], "summary": {"enabled": False}}
+    if bool(getattr(config, "position_guard_enabled", False)):
+        position_guard_payload = review_paper_positions(
+            positions=broker_positions,
+            open_orders=broker_open_orders,
+            settings=PositionGuardSettings(
+                stop_loss_percent=float(getattr(config, "position_guard_stop_loss_percent", 4.0)),
+                take_profit_percent=float(getattr(config, "position_guard_take_profit_percent", 8.0)),
+                max_exits_per_cycle=int(getattr(config, "position_guard_max_exits_per_cycle", 1)),
+            ),
+        )
+        position_guard_payload.setdefault("summary", {})["enabled"] = True
+        _emit_telemetry(
+            telemetry_callback,
+            "paper_position_guard_complete",
+            run_id=cycle_run_id,
+            dry_run=bool(dry_run),
+            **dict(position_guard_payload.get("summary") or {}),
+        )
+
+        exit_candidates = list(position_guard_payload.get("exit_candidates") or [])
+        if exit_candidates:
+            selected_exit = dict(exit_candidates[0])
+            execution_repo = execution_repo_factory(database_url=database_url or getattr(config, "database_url", None))
+            try:
+                exit_execution = execute_guard_exit(
+                    selected_exit,
+                    broker=broker,
+                    broker_positions=broker_positions,
+                    broker_cash=broker_cash,
+                    broker_buying_power=broker_buying_power,
+                    broker_equity=broker_equity,
+                    execution_repo=execution_repo,
+                    cycle_run_id=cycle_run_id,
+                    started_at=started_at,
+                    dry_run=bool(dry_run),
+                    paper_execution_enabled=bool(PAPER_EXECUTION_ENABLED)
+                    and bool(getattr(config, "position_guard_auto_exit_enabled", False)),
+                    allow_fractional=bool(PAPER_VALIDATION_ALLOW_FRACTIONAL),
+                    reconciliation_tolerance=float(PAPER_VALIDATION_RECONCILIATION_TOLERANCE),
+                    persist=bool(persist),
+                )
+            finally:
+                execution_repo.close()
+
+            exit_status = str(exit_execution.get("status") or "failed")
+            exit_order = dict(exit_execution.get("paper_order") or {})
+            if exit_status == "completed":
+                _emit_notification(
+                    notification_callback,
+                    event_type="position_closed",
+                    title="Paper Position Closed",
+                    message="Position guard completed a PAPER exit.",
+                    severity="SUCCESS",
+                    metadata={
+                        "run_id": cycle_run_id,
+                        "dry_run": bool(dry_run),
+                        "symbol": selected_exit.get("symbol"),
+                        "reason": selected_exit.get("exit_reason"),
+                        "status": "position_closed",
+                        "orders_recommended": 1,
+                        "orders_submission_requested": 1,
+                        "orders_submitted": int((exit_execution.get("execution_counters") or {}).get("orders_submitted") or 0),
+                        "orders_filled": int((exit_execution.get("execution_counters") or {}).get("orders_filled") or 0),
+                        "orders_rejected": int((exit_execution.get("execution_counters") or {}).get("orders_rejected") or 0),
+                    },
+                    deduplication_key=f"position_closed:{cycle_run_id}:{selected_exit.get('symbol')}:{exit_order.get('order_id')}",
+                )
+            elif exit_status in {"duplicate_rejected", "risk_rejected", "failed"}:
+                _emit_notification(
+                    notification_callback,
+                    event_type="risk_limit_triggered",
+                    title="Position Exit Blocked",
+                    message="A position-guard exit was blocked or failed safe.",
+                    severity="WARNING",
+                    metadata={
+                        "run_id": cycle_run_id,
+                        "dry_run": bool(dry_run),
+                        "symbol": selected_exit.get("symbol"),
+                        "reason": exit_status,
+                        "status": exit_status,
+                    },
+                    deduplication_key=f"position_guard_exit:{cycle_run_id}:{selected_exit.get('symbol')}:{exit_status}",
+                )
+
+            return _result(
+                status=f"position_guard_{exit_status}",
+                execution_status=exit_status,
+                confirmed_order_count=int(exit_execution.get("confirmed_order_count") or 0),
+                scan={
+                    "scan_payload": {
+                        "summary": {"status": "position_guard_exit", "position_guard": position_guard_payload.get("summary") or {}},
+                        "ranked_candidates": [],
+                        "scan_results": [],
+                    },
+                    "scan_run": {},
+                },
+                selection={"selected": [], "position_reviews": position_guard_payload.get("reviews") or []},
+                execution={**exit_execution, "selected": selected_exit, "position_reviews": position_guard_payload.get("reviews") or []},
+                persistence_payload={"scan": {"status": "skipped_for_position_exit"}, "execution": {"status": exit_status}},
+            )
+
     def _scan_progress_telemetry(payload: dict[str, Any]) -> None:
         payload_dict = dict(payload or {})
         event_name = str(payload_dict.pop("event", "scan_progress") or "scan_progress")
@@ -667,6 +773,77 @@ def run_continuous_scan_cycle(
     scan_payload["summary"] = summary
 
     shortlist_positions = _positions_list(broker_positions)
+    sector_enrichment_metadata: dict[str, Any] = {
+        "enabled": bool(getattr(config, "sector_enrichment_enabled", False)),
+        "status": "disabled",
+    }
+    if bool(getattr(config, "sector_enrichment_enabled", False)):
+        sector_enrichment_started = _utc_now()
+        original_ranked = [dict(item or {}) for item in list(scan_payload.get("ranked_candidates") or [])]
+        combined_records = [
+            *[{**item, "_sector_record_group": "position"} for item in shortlist_positions],
+            *[{**item, "_sector_record_group": "candidate"} for item in original_ranked],
+        ]
+        try:
+            enriched_records, sector_enrichment_metadata = sector_enricher(
+                combined_records,
+                cache_path=str(getattr(config, "sector_enrichment_cache_path", "sector-cache.json")),
+                max_symbols=int(getattr(config, "sector_enrichment_max_symbols", 30)),
+                timeout_seconds=float(getattr(config, "sector_enrichment_timeout_seconds", 6)),
+                total_timeout_seconds=float(getattr(config, "sector_enrichment_total_timeout_seconds", 25)),
+                max_workers=int(getattr(config, "sector_enrichment_max_workers", 6)),
+                cache_ttl_days=int(getattr(config, "sector_enrichment_cache_ttl_days", 30)),
+            )
+            sector_enrichment_metadata = dict(sector_enrichment_metadata or {})
+            sector_enrichment_metadata["status"] = "completed"
+            shortlist_positions = []
+            enriched_ranked: list[dict[str, Any]] = []
+            for enriched in enriched_records:
+                normalized = dict(enriched or {})
+                group = str(normalized.pop("_sector_record_group", "") or "")
+                if group == "position":
+                    shortlist_positions.append(normalized)
+                elif group == "candidate":
+                    enriched_ranked.append(normalized)
+            scan_payload["ranked_candidates"] = enriched_ranked
+
+            sector_by_symbol = {
+                str(item.get("symbol") or "").strip().upper(): {
+                    "sector": item.get("sector"),
+                    "industry": item.get("industry"),
+                    "sector_source": item.get("sector_source"),
+                }
+                for item in enriched_ranked
+                if str(item.get("symbol") or "").strip()
+            }
+            enriched_scan_results = []
+            for raw_row in list(scan_payload.get("scan_results") or []):
+                row = dict(raw_row or {})
+                metadata = sector_by_symbol.get(str(row.get("symbol") or "").strip().upper())
+                if metadata and str(metadata.get("sector") or "").strip().lower() not in {"", "unknown"}:
+                    row.update(metadata)
+                enriched_scan_results.append(row)
+            scan_payload["scan_results"] = enriched_scan_results
+        except Exception as exc:
+            sector_enrichment_metadata = {
+                "enabled": True,
+                "status": "failed_safe",
+                "error_type": type(exc).__name__,
+                "safe_error_message": str(exc)[:300],
+            }
+        sector_enrichment_metadata["elapsed_seconds"] = round(
+            max((_utc_now() - sector_enrichment_started).total_seconds(), 0.0), 4
+        )
+        _emit_telemetry(
+            telemetry_callback,
+            "sector_enrichment_complete",
+            run_id=cycle_run_id,
+            **sector_enrichment_metadata,
+        )
+
+    summary = dict(scan_payload.get("summary") or {})
+    summary["sector_enrichment"] = sector_enrichment_metadata
+    scan_payload["summary"] = summary
     shortlist_payload = dict(shortlist_runner(scan_payload, shortlist_positions, broker_cash, broker_equity) or {})
     portfolio_intelligence_payload: dict[str, Any] = {}
     portfolio_started = _utc_now()
@@ -880,7 +1057,7 @@ def run_continuous_scan_cycle(
             run_payload=scan_run_payload,
             scan_results=list(scan_payload.get("scan_results") or []),
             candidates=selected_candidates,
-            position_reviews=[],
+            position_reviews=list(position_guard_payload.get("reviews") or []),
             database_url=database_url or getattr(config, "database_url", None),
         )
 
@@ -1558,7 +1735,7 @@ def run_continuous_scan_cycle(
         counted_filled_qty = filled_qty if final_status in {"filled", "partially_filled"} else 0.0
 
         expected_positions = dict(broker_pre_positions)
-        if final_status == "filled" and counted_filled_qty > 0:
+        if final_status in {"filled", "partially_filled"} and counted_filled_qty > 0:
             expected_positions[selected_symbol] = {
                 "quantity": float((expected_positions.get(selected_symbol) or {}).get("quantity") or 0.0) + counted_filled_qty,
                 "avg_price": fill_price,
@@ -1603,7 +1780,10 @@ def run_continuous_scan_cycle(
             actual_positions=actual_positions,
             expected_cash=expected_cash,
             actual_cash=broker_post_cash,
-            expected_buying_power=expected_cash,
+            # Margin buying power does not move dollar-for-dollar with cash. Position
+            # quantity and settled cash remain hard reconciliation gates; buying power
+            # is captured as diagnostic account state instead of guessed here.
+            expected_buying_power=None,
             actual_buying_power=actual_buying_power,
             orders=[
                 {

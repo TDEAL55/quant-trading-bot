@@ -70,6 +70,68 @@ def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dic
     }
 
 
+def _fetch_paper_tuning_snapshot(db: MonitoringDatabase) -> dict[str, Any]:
+    validation = db.query_one(
+        """
+        SELECT
+            COUNT(*) AS validation_runs,
+            COALESCE(SUM(proposed_order_count), 0) AS orders_proposed,
+            COALESCE(SUM(approved_order_count), 0) AS orders_approved,
+            COALESCE(SUM(submitted_order_count), 0) AS orders_submitted,
+            COALESCE(SUM(filled_order_count), 0) AS orders_filled,
+            COALESCE(SUM(failed_order_count), 0) AS orders_failed,
+            COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS reconciliation_failures
+        FROM paper_validation_runs
+        WHERE dry_run = 0
+        """
+    ) or {}
+    closed_trades = db.query_one(
+        """
+        SELECT
+            COUNT(*) AS closed_trades,
+            COALESCE(SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END), 0) AS winning_trades,
+            COALESCE(SUM(CASE WHEN net_pnl < 0 THEN 1 ELSE 0 END), 0) AS losing_trades,
+            COALESCE(SUM(net_pnl), 0) AS net_pnl,
+            COALESCE(AVG(net_pnl), 0) AS expectancy,
+            COALESCE(AVG(percentage_return), 0) AS average_return
+        FROM strategy_closed_trades
+        """
+    ) or {}
+    order_statuses = db.query_all(
+        """
+        SELECT LOWER(submission_status) AS status, COUNT(*) AS count
+        FROM paper_orders
+        GROUP BY LOWER(submission_status)
+        ORDER BY count DESC, status ASC
+        """
+    )
+    notification_statuses = db.query_all(
+        """
+        SELECT delivery_status AS status, COUNT(*) AS count
+        FROM notification_history
+        GROUP BY delivery_status
+        ORDER BY count DESC, delivery_status ASC
+        """
+    )
+    latest_notification = db.query_one(
+        """
+        SELECT timestamp, provider, delivery_status, retry_count, safe_error_message
+        FROM notification_history
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """
+    ) or {}
+    latest_position_reviews = db.fetch_latest_position_reviews(limit=25)
+    return {
+        "validation": dict(validation),
+        "closed_trades": dict(closed_trades),
+        "order_statuses": list(order_statuses or []),
+        "notification_statuses": list(notification_statuses or []),
+        "latest_notification": dict(latest_notification),
+        "latest_position_reviews": list(latest_position_reviews or []),
+    }
+
+
 def fetch_dashboard_payload(
     database_url: str | None,
     database_factory=MonitoringDatabase,
@@ -269,6 +331,7 @@ def fetch_dashboard_payload(
         "scanner_rejections": [],
         "scanner_sector_distribution": [],
         "service_health": {},
+        "paper_tuning": {},
         "research": research_payload,
     }
     if not db.enabled:
@@ -296,6 +359,7 @@ def fetch_dashboard_payload(
     payload["top_scanner_results"] = fetch_top_ranked_stocks(database_url, limit=20, database_factory=MonitoringDatabase)
     payload["scanner_rejections"] = fetch_scan_rejection_reasons(database_url, limit=50, database_factory=MonitoringDatabase)
     payload["scanner_sector_distribution"] = fetch_scanner_sector_distribution(database_url, database_factory=MonitoringDatabase)
+    payload["paper_tuning"] = _fetch_paper_tuning_snapshot(db)
 
     recent_runs = payload["recent_runs"] or []
     observed_restarts = 0
@@ -340,5 +404,6 @@ def fetch_dashboard_payload(
         "scanner_rejections": payload["scanner_rejections"],
         "scanner_sector_distribution": payload["scanner_sector_distribution"],
         "service_health": payload["service_health"],
+        "paper_tuning": payload["paper_tuning"],
         "research": payload["research"],
     }

@@ -97,6 +97,15 @@ class PerformanceRepository:
             result.append(item)
         return result
 
+    def fetch_closed_trades(self, limit: int = 5000) -> list[dict[str, Any]]:
+        if not self.db.enabled:
+            return []
+        self.db.ensure_schema()
+        return self.db.query_all(
+            "SELECT * FROM strategy_closed_trades ORDER BY exit_timestamp ASC LIMIT ?",
+            (int(limit),),
+        )
+
     def save_run(self, payload: PerformanceRunPayload) -> dict[str, Any]:
         if not self.db.enabled:
             raise RuntimeError("Database is not enabled for performance persistence")

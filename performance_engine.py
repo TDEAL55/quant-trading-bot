@@ -154,8 +154,14 @@ def run_performance_intelligence(database_url: str | None, benchmark_symbol: str
         equity_metrics = build_equity_curve_metrics(daily_rows)
         portfolio_returns = list(equity_metrics.get("daily_returns") or [])[1:]
 
-        trade_pnl: list[float] = []
-        hold_days: list[float] = []
+        fetch_closed_trades = getattr(repository, "fetch_closed_trades", None)
+        closed_trades = list(fetch_closed_trades(limit=5000) or []) if callable(fetch_closed_trades) else []
+        trade_pnl: list[float] = [_safe_float(item.get("net_pnl"), 0.0) for item in closed_trades]
+        hold_days: list[float] = [
+            _safe_float(item.get("holding_duration_hours"), 0.0) / 24.0
+            for item in closed_trades
+            if _safe_float(item.get("holding_duration_hours"), 0.0) > 0
+        ]
         turnover_total = 0.0
         total_portfolio_reference = 0.0
 
@@ -176,23 +182,15 @@ def run_performance_intelligence(database_url: str | None, benchmark_symbol: str
             turnover_total += turnover
             total_portfolio_reference += max(portfolio_value, 0.0)
 
-            row_trade_pnl = []
-            row_hold_days = []
-            for order in orders:
-                side = str(order.get("side") or "").upper()
-                status = str(order.get("submission_status") or "")
-                qty = _safe_float(order.get("filled_quantity") or order.get("quantity"), 0.0)
-                fill_price = _safe_float(order.get("average_fill_price") or order.get("reference_price"), 0.0)
-                if status not in {"filled", "submitted", "partially_filled", "pending"}:
-                    continue
-                signed = (qty * fill_price) if side == "SELL" else -(qty * fill_price)
-                row_trade_pnl.append(signed)
-                hold_hint = _safe_float((order.get("order_payload") or {}).get("hold_days"), 0.0)
-                if hold_hint > 0:
-                    row_hold_days.append(hold_hint)
-
-            trade_pnl.extend(row_trade_pnl)
-            hold_days.extend(row_hold_days)
+            row_closed_trades = [
+                item for item in closed_trades if _parse_date(item.get("exit_timestamp")) == run_date
+            ]
+            row_trade_pnl = [_safe_float(item.get("net_pnl"), 0.0) for item in row_closed_trades]
+            row_hold_days = [
+                _safe_float(item.get("holding_duration_hours"), 0.0) / 24.0
+                for item in row_closed_trades
+                if _safe_float(item.get("holding_duration_hours"), 0.0) > 0
+            ]
             row_stats = build_trade_statistics(row_trade_pnl, row_hold_days)
             trade_stats_rows.append(
                 {
@@ -332,7 +330,7 @@ def run_performance_intelligence(database_url: str | None, benchmark_symbol: str
             "analysis_end_date": daily_rows[-1].get("equity_date") if daily_rows else None,
             "benchmark_symbol": benchmark_symbol,
             "configuration": {"benchmark_symbol": benchmark_symbol},
-            "warnings": [],
+            "warnings": [] if closed_trades else ["no closed paper trades available; trade statistics remain empty"],
             "error_message": None,
             "created_at": started_at,
             "updated_at": _utc_iso(),

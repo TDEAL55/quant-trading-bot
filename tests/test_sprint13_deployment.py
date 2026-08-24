@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import socket
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -152,6 +154,25 @@ def test_run_lock_releases_and_recovers_stale_lock(tmp_path):
     lock_path.write_text(json.dumps({"owner": "stale", "acquired_at": "2020-01-01T00:00:00+00:00", "pid": 1}), encoding="utf-8")
     recovered = DailyRunLock(lock_path, stale_after_seconds=1, owner="recovered").acquire()
     assert recovered.owner == "recovered"
+
+
+def test_run_lock_recovers_immediately_when_prior_process_is_dead(tmp_path):
+    lock_path = tmp_path / "dead-process.lock"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "owner": "continuous-paper-runner",
+                "acquired_at": datetime.now(timezone.utc).isoformat(),
+                "pid": 99999999,
+                "host": socket.gethostname(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    recovered = DailyRunLock(lock_path, stale_after_seconds=7200, owner="restart").acquire()
+
+    assert recovered.owner == "restart"
 
 
 def test_unattended_runner_blocks_kill_switch(tmp_path):

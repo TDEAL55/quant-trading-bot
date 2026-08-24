@@ -32,7 +32,7 @@ def test_paper_tuning_profile_opens_small_allocation_room():
     assert profile == {
         "enabled": True,
         "max_position_percent": 2.0,
-        "unknown_sector_max_percent": 78.0,
+        "unknown_sector_max_percent": 20.0,
     }
 
 

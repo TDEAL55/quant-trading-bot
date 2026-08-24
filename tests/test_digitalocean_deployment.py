@@ -82,6 +82,9 @@ def test_paper_and_dry_run_defaults(monkeypatch):
     cfg = load_deployment_config()
     assert cfg.trading_mode == "PAPER"
     assert cfg.continuous_runner_dry_run is True
+    assert cfg.sector_enrichment_enabled is True
+    assert cfg.sector_enrichment_max_symbols == 30
+    assert cfg.sector_enrichment_total_timeout_seconds == 25
 
 
 def test_live_mode_remains_hard_blocked(monkeypatch):

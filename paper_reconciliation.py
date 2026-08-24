@@ -37,7 +37,7 @@ def reconcile_paper_positions(
     actual_positions: dict[str, dict[str, float]] | list[dict[str, Any]],
     expected_cash: float,
     actual_cash: float,
-    expected_buying_power: float,
+    expected_buying_power: float | None,
     actual_buying_power: float,
     orders: list[dict[str, Any]],
     tolerance: float,
@@ -73,10 +73,31 @@ def reconcile_paper_positions(
         )
 
     cash_diff = round(_as_float(actual_cash, 0.0) - _as_float(expected_cash, 0.0), 6)
-    buying_power_diff = round(_as_float(actual_buying_power, 0.0) - _as_float(expected_buying_power, 0.0), 6)
+    buying_power_checked = expected_buying_power is not None
+    buying_power_diff = (
+        round(_as_float(actual_buying_power, 0.0) - _as_float(expected_buying_power, 0.0), 6)
+        if buying_power_checked
+        else None
+    )
 
-    unfilled_count = len([item for item in orders if str(item.get("submission_status") or "") in {"submitted", "pending"} and _as_float(item.get("filled_quantity"), 0.0) < _as_float(item.get("quantity"), 0.0)])
-    failed_count = len([item for item in orders if str(item.get("submission_status") or "") in {"failed"}])
+    pending_statuses = {"new", "accepted", "submitted", "pending", "pending_new", "partially_filled"}
+    failed_statuses = {"failed", "rejected", "expired", "canceled", "cancelled", "submission_blocked_by_config"}
+    unfilled_count = len(
+        [
+            item
+            for item in orders
+            if str(item.get("submission_status") or "").strip().lower() in pending_statuses
+            and _as_float(item.get("filled_quantity"), 0.0) < _as_float(item.get("quantity"), 0.0)
+        ]
+    )
+    failed_count = len(
+        [
+            item
+            for item in orders
+            if str(item.get("submission_status") or "").strip().lower() in failed_statuses
+            and str(item.get("risk_status") or "").strip().lower() != "rejected"
+        ]
+    )
 
     status = "matched"
     warnings: list[str] = []
@@ -89,15 +110,16 @@ def reconcile_paper_positions(
     elif mismatch_count > 0:
         status = "mismatch"
         warnings.append("position_mismatch_detected")
-    elif abs(cash_diff) > tolerance or abs(buying_power_diff) > tolerance:
-        status = "matched_with_tolerance"
-        warnings.append("cash_or_buying_power_difference_within_tolerance_only")
+    elif abs(cash_diff) > tolerance or (buying_power_checked and abs(float(buying_power_diff or 0.0)) > tolerance):
+        status = "mismatch"
+        warnings.append("cash_or_buying_power_mismatch_detected")
 
     return {
         "position_rows": position_rows,
         "position_mismatch_count": mismatch_count,
         "cash_difference": cash_diff,
         "buying_power_difference": buying_power_diff,
+        "buying_power_checked": buying_power_checked,
         "unfilled_order_count": unfilled_count,
         "failed_order_count": failed_count,
         "reconciliation_status": status,

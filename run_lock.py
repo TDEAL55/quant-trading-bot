@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import socket
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -39,6 +40,7 @@ class RunLockState:
     owner: str
     acquired_at: str
     pid: int
+    host: str = ""
 
 
 class DailyRunLock:
@@ -57,6 +59,7 @@ class DailyRunLock:
                 owner=str(payload.get("owner") or ""),
                 acquired_at=str(payload.get("acquired_at") or ""),
                 pid=int(payload.get("pid") or 0),
+                host=str(payload.get("host") or ""),
             )
         except Exception:
             return None
@@ -64,6 +67,16 @@ class DailyRunLock:
     def _is_stale(self, state: RunLockState | None) -> bool:
         if state is None:
             return False
+        local_host = socket.gethostname()
+        if state.pid > 0 and (not state.host or state.host == local_host):
+            try:
+                os.kill(state.pid, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                pass
+            except OSError:
+                return True
         acquired_at = _parse_iso(state.acquired_at)
         if acquired_at is None:
             return True
@@ -79,8 +92,13 @@ class DailyRunLock:
             with contextlib.suppress(Exception):
                 self.lock_path.unlink()
 
-        new_state = RunLockState(owner=self.owner, acquired_at=_utc_iso(), pid=os.getpid())
-        payload = {"owner": new_state.owner, "acquired_at": new_state.acquired_at, "pid": new_state.pid}
+        new_state = RunLockState(owner=self.owner, acquired_at=_utc_iso(), pid=os.getpid(), host=socket.gethostname())
+        payload = {
+            "owner": new_state.owner,
+            "acquired_at": new_state.acquired_at,
+            "pid": new_state.pid,
+            "host": new_state.host,
+        }
         try:
             fd = os.open(self.lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         except FileExistsError as exc:

@@ -48,7 +48,7 @@ def resolve_paper_tuning_profile(env=None):
         }
 
     max_position_percent = float(source.get("PAPER_TUNING_MAX_POSITION_PERCENT", "2"))
-    unknown_sector_max_percent = float(source.get("PAPER_TUNING_UNKNOWN_SECTOR_MAX_PERCENT", "78"))
+    unknown_sector_max_percent = float(source.get("PAPER_TUNING_UNKNOWN_SECTOR_MAX_PERCENT", "20"))
     if not 0 < max_position_percent <= 5:
         raise ValueError("PAPER_TUNING_MAX_POSITION_PERCENT must be > 0 and <= 5")
     if not 10 <= unknown_sector_max_percent <= 100:
