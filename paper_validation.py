@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -117,7 +118,8 @@ def _attempt_fingerprint(execution_fingerprint: str, dry_run: bool, execute: boo
 
 def _build_run_id(dry_run: bool, execute: bool) -> str:
     suffix = "dry" if dry_run or not execute else "exec"
-    return f"paper-validation-{_utc_now().strftime('%Y%m%d%H%M%S%f')}-{suffix}"
+    nonce = uuid.uuid4().hex[:8]
+    return f"paper-validation-{_utc_now().strftime('%Y%m%d%H%M%S%f')}-{nonce}-{suffix}"
 
 
 def _normalize_positions(raw: Any) -> dict[str, dict[str, float]]:
