@@ -105,8 +105,8 @@ THEMES = {
     },
 }
 
-PRIMARY_PAGE_OPTIONS = ["Command Center", "Crypto", "Portfolio", "Orders", "Risk", "Operations"]
-PAGE_OPTIONS = ["Command Center", "Crypto", "Portfolio", "Orders", "Risk", "Operations", "Strategy", "Performance", "Alerts", "Research", "LIVE Readiness", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
+PRIMARY_PAGE_OPTIONS = ["Command Center", "Crypto", "Options", "Portfolio", "Orders", "Risk", "Operations"]
+PAGE_OPTIONS = ["Command Center", "Crypto", "Options", "Portfolio", "Orders", "Risk", "Operations", "Strategy", "Performance", "Alerts", "Research", "LIVE Readiness", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
 NAVIGATION_SCOPE_OPTIONS = ["Essentials", "All pages"]
 MODE_OPTIONS = ["Standard Mode", "Focus Mode", "Presentation Mode"]
 THEME_OPTIONS = ["Aurora", "Midnight Blue", "Black Terminal", "Arctic Glass"]
@@ -2946,6 +2946,104 @@ def render_crypto_page(payload, view):
     _render_crypto_dashboard_panel(payload, detailed=True)
 
 
+def _render_options_dashboard_panel(payload, *, detailed: bool = False) -> None:
+    options = dict(payload.get("options") or {})
+    top_signal = dict(options.get("top_signal") or {})
+    last_order = dict(options.get("last_order") or {})
+    enabled = bool(options.get("enabled"))
+    cycle_status = friendly_status_text(options.get("cycle_status"), "Waiting")
+    signal = str(top_signal.get("signal") or "HOLD").upper()
+    signal_style = "buy" if signal == "CALL" else "sell" if signal == "PUT" else "neutral"
+
+    st.markdown(
+        "<div class='dq-section-heading'><div class='dq-section-heading-title'>Options</div>"
+        "<div class='dq-section-heading-note'>Alpaca PAPER · long calls/puts · defined premium risk · 10% max per position</div></div>",
+        unsafe_allow_html=True,
+    )
+    columns = st.columns(5)
+    _metric_card(columns[0], "Runner", "ENABLED" if enabled else "DISABLED", "healthy" if enabled else "warning")
+    _metric_card(columns[1], "Cycle", cycle_status, "neutral")
+    _metric_card(columns[2], "Underlyings", int(options.get("underlying_count") or 0), "neutral")
+    _metric_card(columns[3], "Top Signal", f"{_safe_text(top_signal.get('symbol'), 'None')} · {signal}", signal_style)
+    _metric_card(columns[4], "Options P&L", format_currency(options.get("unrealized_pl")), "buy" if _as_float(options.get("unrealized_pl"), 0.0) >= 0 else "sell")
+    st.caption(
+        f"Last cycle: {format_timestamp_eastern(options.get('updated_at'))} · "
+        f"{int(options.get('scanned_count') or 0)} scanned · "
+        f"{int(options.get('call_signal_count') or 0)} calls / {int(options.get('put_signal_count') or 0)} puts · "
+        f"{int(options.get('open_position_count') or 0)} open · "
+        f"{format_currency(options.get('options_exposure'))} exposure · "
+        f"last action: {_safe_text(options.get('action_reason'), 'waiting')}"
+    )
+    if options.get("error") or options.get("status_read_error"):
+        st.warning(_safe_text(options.get("error") or options.get("status_read_error"), "Options status unavailable"))
+    if not detailed:
+        return
+
+    positions = list(options.get("positions") or [])
+    position_rows = [
+        {
+            "Contract": _safe_text(row.get("symbol"), "N/A"),
+            "Contracts": int(abs(_as_float(row.get("quantity"), 0.0))),
+            "Avg premium": format_currency(row.get("average_entry_price")),
+            "Last premium": format_currency(row.get("current_price")),
+            "Market value": format_currency(abs(_as_float(row.get("market_value"), 0.0))),
+            "Unrealized P&L": format_currency(row.get("unrealized_pl")),
+        }
+        for row in positions
+    ]
+    st.markdown("#### Open option positions")
+    if position_rows:
+        st.dataframe(position_rows)
+    else:
+        _empty_state("No open options PAPER positions yet.")
+
+    signals = list(options.get("signals") or [])
+    signal_rows = [
+        {
+            "Underlying": _safe_text(row.get("symbol"), "N/A"),
+            "Signal": _safe_text(row.get("signal"), "HOLD"),
+            "Score": round(_as_float(row.get("score"), 50.0), 2),
+            "Confidence": format_percent(row.get("confidence"), "0.00%"),
+            "Price": format_currency(row.get("latest_price")),
+            "90m": format_percent(row.get("return_90m"), "0.00%"),
+            "6h": format_percent(row.get("return_6h"), "0.00%"),
+            "Reason": _safe_text(row.get("reason"), "N/A"),
+        }
+        for row in signals[:25]
+    ]
+    st.markdown("#### Underlying signals")
+    if signal_rows:
+        st.dataframe(signal_rows)
+    else:
+        _empty_state("The first market-hours options cycle has not completed yet.")
+
+    orders = list(options.get("recent_orders") or [])
+    if last_order and not orders:
+        orders = [last_order]
+    order_rows = [
+        {
+            "Time": format_timestamp_eastern(row.get("event_timestamp") or row.get("updated_at") or row.get("timestamp")),
+            "Contract": _safe_text(row.get("symbol"), "N/A"),
+            "Side": _safe_text(row.get("side"), "N/A").upper(),
+            "Intent": _safe_text(row.get("position_intent"), "N/A"),
+            "Contracts": int(abs(_as_float(row.get("filled_quantity") or row.get("quantity"), 0.0))),
+            "Price": format_currency(row.get("average_fill_price") or row.get("limit_price")),
+            "Status": friendly_status_text(row.get("safe_order_status") or row.get("status"), "Unknown"),
+        }
+        for row in orders[:20]
+    ]
+    st.markdown("#### Recent option orders")
+    if order_rows:
+        st.dataframe(order_rows)
+    else:
+        _empty_state("No options PAPER orders yet.")
+
+
+def render_options_page(payload, view):
+    st.markdown("<div class='dq-section-tag'>OPTIONS</div>", unsafe_allow_html=True)
+    _render_options_dashboard_panel(payload, detailed=True)
+
+
 def render_command_center_page(payload, view):
     summary = build_compact_dashboard_summary(payload, view)
     tuning_scorecard = build_paper_tuning_scorecard(payload)
@@ -2995,6 +3093,7 @@ def render_command_center_page(payload, view):
     )
 
     _render_crypto_dashboard_panel(payload, detailed=False)
+    _render_options_dashboard_panel(payload, detailed=False)
 
     if summary.get("short_position_count"):
         st.markdown(
@@ -4378,6 +4477,7 @@ def render_dashboard(database_url: str | None = None):
     page_renderers = {
         "Command Center": render_overview_page,
         "Crypto": render_crypto_page,
+        "Options": render_options_page,
         "Strategy": render_strategy_page,
         "Risk": render_risk_page,
         "Portfolio": render_account_page,

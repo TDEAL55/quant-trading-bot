@@ -9,17 +9,35 @@ from typing import Any
 
 try:
     from alpaca.trading.client import TradingClient
-    from alpaca.trading.enums import AssetClass, AssetStatus, OrderSide, QueryOrderStatus, TimeInForce
-    from alpaca.trading.requests import GetAssetsRequest, GetOrdersRequest, MarketOrderRequest
+    from alpaca.trading.enums import (
+        AssetClass,
+        AssetStatus,
+        ContractType,
+        OrderSide,
+        PositionIntent,
+        QueryOrderStatus,
+        TimeInForce,
+    )
+    from alpaca.trading.requests import (
+        GetAssetsRequest,
+        GetOptionContractsRequest,
+        GetOrdersRequest,
+        LimitOrderRequest,
+        MarketOrderRequest,
+    )
 except Exception:  # pragma: no cover - import failures are handled at runtime
     TradingClient = None
     AssetClass = None
     AssetStatus = None
+    ContractType = None
     OrderSide = None
+    PositionIntent = None
     QueryOrderStatus = None
     TimeInForce = None
     GetAssetsRequest = None
+    GetOptionContractsRequest = None
     GetOrdersRequest = None
+    LimitOrderRequest = None
     MarketOrderRequest = None
 
 
@@ -132,6 +150,8 @@ def normalize_alpaca_order(order: Any) -> dict[str, Any]:
         "updated_at": str(getattr(order, "updated_at", "") or ""),
         "status": _normalize_enum_text(getattr(order, "status", "unknown"), "unknown"),
         "average_fill_price": _to_float(getattr(order, "filled_avg_price", 0.0), 0.0),
+        "limit_price": _to_float(getattr(order, "limit_price", 0.0), 0.0),
+        "position_intent": _normalize_enum_text(getattr(order, "position_intent", "")),
         "rejection_reason": str(getattr(order, "failed_at", "") or "") if _normalize_enum_text(getattr(order, "status", "")) == "rejected" else "",
         "broker_backend": "ALPACA",
     }
@@ -197,6 +217,12 @@ class AlpacaPaperBroker:
             "account_number": str(getattr(account, "account_number", "") or ""),
             "currency": str(getattr(account, "currency", "USD") or "USD"),
             "buying_power": _to_float(getattr(account, "buying_power", 0.0), 0.0),
+            "options_buying_power": _to_float(
+                getattr(account, "options_buying_power", getattr(account, "buying_power", 0.0)),
+                0.0,
+            ),
+            "options_approved_level": int(_to_float(getattr(account, "options_approved_level", 0), 0.0)),
+            "options_trading_level": int(_to_float(getattr(account, "options_trading_level", 0), 0.0)),
             "non_marginable_buying_power": _to_float(
                 getattr(account, "non_marginable_buying_power", getattr(account, "cash", 0.0)),
                 0.0,
@@ -277,6 +303,173 @@ class AlpacaPaperBroker:
                 }
             )
         return sorted(assets, key=lambda row: str(row.get("symbol") or ""))
+
+    def get_option_contracts(
+        self,
+        underlying_symbol: str,
+        *,
+        expiration_date_gte: Any,
+        expiration_date_lte: Any,
+        contract_type: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Return active tradable standard option contracts for one underlying."""
+        if GetOptionContractsRequest is None:
+            raise RuntimeError("alpaca-py option contract support is required")
+        symbol = str(underlying_symbol or "").strip().upper()
+        if not symbol:
+            return []
+        type_value = None
+        normalized_type = str(contract_type or "").strip().lower()
+        if normalized_type and ContractType is not None:
+            if normalized_type not in {"call", "put"}:
+                raise RuntimeError("option contract type must be call or put")
+            type_value = ContractType.CALL if normalized_type == "call" else ContractType.PUT
+
+        page_token = None
+        rows: list[Any] = []
+        remaining = max(1, min(int(limit or 1000), 10000))
+        while remaining > 0:
+            request = GetOptionContractsRequest(
+                underlying_symbols=[symbol],
+                status=AssetStatus.ACTIVE if AssetStatus is not None else None,
+                expiration_date_gte=expiration_date_gte,
+                expiration_date_lte=expiration_date_lte,
+                type=type_value,
+                limit=min(remaining, 1000),
+                page_token=page_token,
+            )
+            response = self._trading_client.get_option_contracts(request)
+            if isinstance(response, dict):
+                page = list(response.get("option_contracts") or [])
+            else:
+                page = list(getattr(response, "option_contracts", None) or [])
+            rows.extend(page)
+            remaining -= len(page)
+            page_token = getattr(response, "next_page_token", None)
+            if isinstance(response, dict):
+                page_token = response.get("next_page_token")
+            if not page_token or not page:
+                break
+
+        contracts: list[dict[str, Any]] = []
+        for contract in rows:
+            status = _normalize_enum_text(getattr(contract, "status", ""))
+            item_type = _normalize_enum_text(getattr(contract, "type", ""))
+            if status not in {"", "active"} or not bool(getattr(contract, "tradable", False)):
+                continue
+            if normalized_type and item_type != normalized_type:
+                continue
+            contracts.append(
+                {
+                    "id": str(getattr(contract, "id", "") or ""),
+                    "symbol": str(getattr(contract, "symbol", "") or "").strip().upper(),
+                    "name": str(getattr(contract, "name", "") or ""),
+                    "status": status or "active",
+                    "tradable": True,
+                    "expiration_date": str(getattr(contract, "expiration_date", "") or ""),
+                    "underlying_symbol": str(getattr(contract, "underlying_symbol", symbol) or symbol).upper(),
+                    "type": item_type,
+                    "style": _normalize_enum_text(getattr(contract, "style", "")),
+                    "strike_price": _to_float(getattr(contract, "strike_price", 0.0), 0.0),
+                    "size": int(_to_float(getattr(contract, "size", 100), 100.0)),
+                    "open_interest": int(_to_float(getattr(contract, "open_interest", 0), 0.0)),
+                    "close_price": _to_float(getattr(contract, "close_price", 0.0), 0.0),
+                }
+            )
+        return [row for row in contracts if row.get("symbol") and int(row.get("size") or 0) == 100]
+
+    def submit_option_order(
+        self,
+        side: str,
+        ticker: str,
+        quantity: int,
+        *,
+        limit_price: float | None = None,
+        client_order_id: str = "",
+        wait_for_fill: bool = False,
+        poll_seconds: float = 1.0,
+        max_wait_seconds: float = 45.0,
+    ) -> dict[str, Any]:
+        """Submit a long-premium option order; naked option shorts are never allowed."""
+        symbol = str(ticker or "").strip().upper()
+        normalized_side = _normalize_enum_text(side)
+        qty = _to_float(quantity, 0.0)
+        if not symbol:
+            raise RuntimeError("option symbol is required")
+        if normalized_side not in {"buy", "sell"}:
+            raise RuntimeError("option order side must be BUY or SELL")
+        if qty <= 0 or abs(qty - round(qty)) > 1e-9:
+            raise RuntimeError("option quantity must be a positive whole number")
+
+        contract = self._trading_client.get_option_contract(symbol)
+        if not bool(getattr(contract, "tradable", False)):
+            raise RuntimeError(f"option contract is not tradable: {symbol}")
+        if _normalize_enum_text(getattr(contract, "status", "")) not in {"", "active"}:
+            raise RuntimeError(f"option contract is not active: {symbol}")
+
+        intent_text = "buy_to_open" if normalized_side == "buy" else "sell_to_close"
+        if normalized_side == "sell":
+            position = self.get_positions().get(symbol) or {}
+            held_quantity = _to_float(position.get("quantity"), 0.0)
+            if held_quantity <= 0:
+                raise RuntimeError(f"naked option short blocked: no long {symbol} position is available to close")
+            if qty > held_quantity + 1e-9:
+                raise RuntimeError(f"option oversell blocked: requested {qty:g}, only {held_quantity:g} held")
+
+        cid = str(client_order_id or "").strip() or _default_client_order_id(
+            symbol=symbol,
+            side=normalized_side,
+            quantity=qty,
+            order_type=("limit" if _to_float(limit_price, 0.0) > 0 else "market"),
+            time_in_force="day",
+        )
+        existing = self.get_order_by_client_order_id(cid)
+        if existing:
+            existing["recovered_existing"] = True
+            return existing
+        if not self.order_submission_enabled:
+            return {
+                "status": "submission_blocked_by_config",
+                "symbol": symbol,
+                "side": normalized_side,
+                "requested_quantity": int(round(qty)),
+                "client_order_id": cid,
+                "position_intent": intent_text,
+                "broker_backend": "ALPACA",
+            }
+
+        side_value = _order_side(normalized_side)
+        intent_value = intent_text
+        if PositionIntent is not None:
+            intent_value = PositionIntent.BUY_TO_OPEN if normalized_side == "buy" else PositionIntent.SELL_TO_CLOSE
+        price = _to_float(limit_price, 0.0)
+        request_kwargs = {
+            "symbol": symbol,
+            "qty": int(round(qty)),
+            "side": side_value,
+            "time_in_force": _time_in_force("day"),
+            "client_order_id": cid,
+            "position_intent": intent_value,
+        }
+        try:
+            if price > 0:
+                if LimitOrderRequest is None:
+                    raise RuntimeError("alpaca-py limit order support is required")
+                order_request = LimitOrderRequest(limit_price=round(price, 2), **request_kwargs)
+            else:
+                order_request = MarketOrderRequest(**request_kwargs)
+            submitted = self._trading_client.submit_order(order_data=order_request)
+            normalized = normalize_alpaca_order(submitted)
+        except Exception:
+            recovered = self.get_order_by_client_order_id(cid)
+            if not recovered:
+                raise
+            normalized = recovered
+            normalized["recovered_existing"] = True
+        if wait_for_fill:
+            return self.wait_for_order(client_order_id=cid, poll_seconds=poll_seconds, max_wait_seconds=max_wait_seconds)
+        return normalized
 
     def get_open_orders(self) -> list[dict[str, Any]]:
         if GetOrdersRequest is not None and QueryOrderStatus is not None:

@@ -156,6 +156,47 @@ def _fetch_crypto_dashboard_snapshot(
     return status
 
 
+def _is_option_row(row: dict[str, Any]) -> bool:
+    asset_class = str((row or {}).get("asset_class") or "").strip().lower()
+    client_order_id = str((row or {}).get("client_order_id") or "").strip().lower()
+    return bool(asset_class in {"us_option", "option"} or client_order_id.startswith("qtb-option-"))
+
+
+def _fetch_options_dashboard_snapshot(
+    latest_account: dict[str, Any],
+    recent_orders: list[dict[str, Any]],
+    *,
+    status_path: str | Path | None = None,
+) -> dict[str, Any]:
+    path = Path(status_path or os.getenv("OPTIONS_STATUS_PATH", "/var/lib/quant-bot/options-status.json"))
+    status: dict[str, Any] = {
+        "enabled": _enabled(os.getenv("OPTIONS_TRADING_ENABLED", "false")),
+        "market": "US regular hours",
+        "strategy_scope": "long calls and long puts",
+        "cycle_status": "waiting",
+        "updated_at": "",
+        "signals": [],
+        "last_order": {},
+    }
+    try:
+        if path.is_file():
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                status.update(loaded)
+    except (OSError, ValueError, TypeError) as exc:
+        status["status_read_error"] = type(exc).__name__
+
+    positions = [dict(row or {}) for row in list((latest_account or {}).get("positions") or []) if _is_option_row(dict(row or {}))]
+    option_orders = [dict(row or {}) for row in list(recent_orders or []) if _is_option_row(dict(row or {}))]
+    status["positions"] = positions
+    status["recent_orders"] = option_orders[:20]
+    status["open_position_count"] = len(positions)
+    status["options_exposure"] = sum(abs(float(row.get("market_value") or 0.0)) for row in positions)
+    status["unrealized_pl"] = sum(float(row.get("unrealized_pl") or 0.0) for row in positions)
+    status["status_path"] = str(path)
+    return status
+
+
 def _fetch_paper_tuning_snapshot(db: MonitoringDatabase) -> dict[str, Any]:
     validation = db.query_one(
         """
@@ -419,6 +460,7 @@ def fetch_dashboard_payload(
         "service_health": {},
         "paper_tuning": {},
         "crypto": {},
+        "options": {},
         "research": research_payload,
     }
     if not db.enabled:
@@ -451,6 +493,7 @@ def fetch_dashboard_payload(
     payload["scanner_sector_distribution"] = fetch_scanner_sector_distribution(database_url, database_factory=MonitoringDatabase)
     payload["paper_tuning"] = _fetch_paper_tuning_snapshot(db)
     payload["crypto"] = _fetch_crypto_dashboard_snapshot(payload["latest_account"], payload["recent_orders"])
+    payload["options"] = _fetch_options_dashboard_snapshot(payload["latest_account"], payload["recent_orders"])
 
     recent_runs = payload["recent_runs"] or []
     observed_restarts = 0
@@ -497,5 +540,6 @@ def fetch_dashboard_payload(
         "service_health": payload["service_health"],
         "paper_tuning": payload["paper_tuning"],
         "crypto": payload["crypto"],
+        "options": payload["options"],
         "research": payload["research"],
     }

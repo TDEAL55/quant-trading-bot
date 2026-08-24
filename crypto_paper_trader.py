@@ -146,7 +146,7 @@ def run_crypto_paper_cycle(
     resolved_status_path = Path(status_path or os.getenv("CRYPTO_STATUS_PATH", "/var/lib/quant-bot/crypto-status.json"))
     resolved_trades_path = Path(trades_path or os.getenv("CRYPTO_TRADES_LOG_PATH", "/var/lib/quant-bot/crypto-trades.jsonl"))
     resolved_dry_run = _enabled(os.getenv("CRYPTO_DRY_RUN"), default=False) if dry_run is None else bool(dry_run)
-    interval_minutes = max(int(os.getenv("CRYPTO_SCAN_INTERVAL_MINUTES", "15")), 1)
+    interval_minutes = max(int(os.getenv("CRYPTO_SCAN_INTERVAL_MINUTES", "1")), 1)
     buy_score = _as_float(os.getenv("CRYPTO_BUY_SCORE", "60"), 60.0)
     exit_score = _as_float(os.getenv("CRYPTO_EXIT_SCORE", "40"), 40.0)
     stop_loss_percent = max(_as_float(os.getenv("CRYPTO_STOP_LOSS_PERCENT", "8"), 8.0), 0.1)
@@ -328,4 +328,3 @@ def run_crypto_paper_cycle(
     if order:
         _append_jsonl(resolved_trades_path, {"timestamp": _utc_iso(cycle_now), **order})
     return status
-

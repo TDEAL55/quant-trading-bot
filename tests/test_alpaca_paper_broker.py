@@ -62,6 +62,22 @@ class _CryptoAsset(_Asset):
     price_increment = "1"
 
 
+class _OptionContract:
+    id = "option-id"
+    symbol = "SPY260918C00600000"
+    name = "SPY Sep 18 2026 600 Call"
+    status = "active"
+    tradable = True
+    expiration_date = "2026-09-18"
+    underlying_symbol = "SPY"
+    type = "call"
+    style = "american"
+    strike_price = "600"
+    size = "100"
+    open_interest = "250"
+    close_price = "5.00"
+
+
 class _TradingClient:
     def __init__(self):
         self.submit_calls = 0
@@ -329,3 +345,56 @@ def test_order_history_is_normalized_and_sorted(monkeypatch):
 
     assert [row["order_id"] for row in history] == ["newer", "older"]
     assert all(row["status"] == "filled" for row in history)
+
+
+def test_option_orders_allow_long_open_and_block_naked_close(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+    monkeypatch.setenv("ALPACA_PAPER_BASE_URL", ALPACA_PAPER_ENDPOINT)
+    monkeypatch.setenv("ALPACA_ORDER_SUBMISSION_ENABLED", "true")
+    client = _TradingClient()
+    client.get_option_contract = lambda _symbol: _OptionContract()
+    broker = AlpacaPaperBroker(mode="PAPER", trading_client=client)
+
+    opened = broker.submit_option_order(
+        side="buy",
+        ticker="SPY260918C00600000",
+        quantity=1,
+        limit_price=5.0,
+        client_order_id="option-buy-cid",
+    )
+
+    assert opened["status"] == "filled"
+    assert client.submit_calls == 1
+    with pytest.raises(RuntimeError, match="naked option short blocked"):
+        broker.submit_option_order(
+            side="sell",
+            ticker="SPY260918C00600000",
+            quantity=1,
+            limit_price=4.9,
+            client_order_id="option-sell-cid",
+        )
+
+
+def test_broker_lists_standard_option_contracts(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+    monkeypatch.setenv("ALPACA_PAPER_BASE_URL", ALPACA_PAPER_ENDPOINT)
+    client = _TradingClient()
+    client.get_option_contracts = lambda _request: type(
+        "Response",
+        (),
+        {"option_contracts": [_OptionContract()], "next_page_token": None},
+    )()
+    broker = AlpacaPaperBroker(mode="PAPER", trading_client=client)
+
+    rows = broker.get_option_contracts(
+        "SPY",
+        expiration_date_gte="2026-09-01",
+        expiration_date_lte="2026-10-01",
+        contract_type="call",
+    )
+
+    assert rows[0]["symbol"] == "SPY260918C00600000"
+    assert rows[0]["strike_price"] == 600.0
+    assert rows[0]["open_interest"] == 250

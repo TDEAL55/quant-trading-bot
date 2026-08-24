@@ -56,6 +56,9 @@ def review_paper_positions(
         if asset_class == "crypto" or "/" in symbol:
             # Crypto has a separate 24/7 guard with crypto-specific stop/target settings.
             continue
+        if asset_class in {"us_option", "option"}:
+            # Options have a separate expiry/Greeks-aware guard and must not be treated as shares.
+            continue
         signed_quantity = _as_float(position.get("quantity"), 0.0)
         quantity = abs(signed_quantity)
         position_side = "SHORT" if signed_quantity < 0 else "LONG"

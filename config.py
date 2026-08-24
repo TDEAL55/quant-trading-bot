@@ -96,7 +96,8 @@ CRYPTO_TRADING_ENABLED = bool(
     and str(os.getenv("CRYPTO_TRADING_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
 )
 CRYPTO_DRY_RUN = str(os.getenv("CRYPTO_DRY_RUN", "true")).strip().lower() in {"1", "true", "yes", "on"}
-CRYPTO_SCAN_INTERVAL_MINUTES = max(int(os.getenv("CRYPTO_SCAN_INTERVAL_MINUTES", "15")), 1)
+CRYPTO_SCAN_INTERVAL_MINUTES = max(int(os.getenv("CRYPTO_SCAN_INTERVAL_MINUTES", "1")), 1)
+CRYPTO_SCAN_INTERVAL_SECONDS = max(int(os.getenv("CRYPTO_SCAN_INTERVAL_SECONDS", "10")), 10)
 CRYPTO_BAR_TIMEFRAME_MINUTES = max(min(int(os.getenv("CRYPTO_BAR_TIMEFRAME_MINUTES", "15")), 59), 1)
 CRYPTO_LOOKBACK_BARS = max(int(os.getenv("CRYPTO_LOOKBACK_BARS", "240")), 60)
 CRYPTO_BUY_SCORE = float(os.getenv("CRYPTO_BUY_SCORE", "60"))
@@ -107,7 +108,22 @@ CRYPTO_MAX_POSITION_EQUITY_PERCENT = min(
 )
 CRYPTO_STOP_LOSS_PERCENT = max(float(os.getenv("CRYPTO_STOP_LOSS_PERCENT", "8")), 0.1)
 CRYPTO_TAKE_PROFIT_PERCENT = max(float(os.getenv("CRYPTO_TAKE_PROFIT_PERCENT", "15")), 0.1)
-CRYPTO_MAX_UNIVERSE_SIZE = max(int(os.getenv("CRYPTO_MAX_UNIVERSE_SIZE", "50")), 0)
+CRYPTO_MAX_UNIVERSE_SIZE = max(int(os.getenv("CRYPTO_MAX_UNIVERSE_SIZE", "0")), 0)
+OPTIONS_TRADING_ENABLED = bool(
+    TRADING_MODE == "PAPER"
+    and str(os.getenv("OPTIONS_TRADING_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
+)
+OPTIONS_DRY_RUN = str(os.getenv("OPTIONS_DRY_RUN", "true")).strip().lower() in {"1", "true", "yes", "on"}
+OPTIONS_SCAN_INTERVAL_MINUTES = max(int(os.getenv("OPTIONS_SCAN_INTERVAL_MINUTES", "15")), 1)
+OPTIONS_MAX_POSITION_EQUITY_PERCENT = min(
+    max(float(os.getenv("OPTIONS_MAX_POSITION_EQUITY_PERCENT", "10")), 0.1),
+    10.0,
+)
+OPTIONS_MIN_DTE = max(int(os.getenv("OPTIONS_MIN_DTE", "14")), 1)
+OPTIONS_MAX_DTE = max(int(os.getenv("OPTIONS_MAX_DTE", "45")), OPTIONS_MIN_DTE)
+OPTIONS_EXIT_DTE = max(int(os.getenv("OPTIONS_EXIT_DTE", "5")), 0)
+OPTIONS_STOP_LOSS_PERCENT = max(float(os.getenv("OPTIONS_STOP_LOSS_PERCENT", "35")), 0.1)
+OPTIONS_TAKE_PROFIT_PERCENT = max(float(os.getenv("OPTIONS_TAKE_PROFIT_PERCENT", "60")), 0.1)
 PAPER_API_BASE_URL = os.getenv("PAPER_API_BASE_URL", "")
 PAPER_API_USERNAME = os.getenv("PAPER_API_USERNAME", "")
 PAPER_API_PASSWORD = os.getenv("PAPER_API_PASSWORD", "")

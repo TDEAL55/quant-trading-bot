@@ -814,6 +814,43 @@ def test_crypto_cycle_runs_while_stock_market_is_closed(tmp_path, monkeypatch):
     assert sleeps and sleeps[0] == 15 * 60
 
 
+def test_options_cycle_runs_during_regular_market_hours(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    calls = {"stock": 0, "options": 0}
+    monkeypatch.setenv("OPTIONS_TRADING_ENABLED", "true")
+    monkeypatch.setenv("OPTIONS_SCAN_INTERVAL_MINUTES", "15")
+
+    def _stock_runner(**_kwargs):
+        calls["stock"] += 1
+        return _failed_result(status="no_candidates")
+
+    def _options_runner(**_kwargs):
+        calls["options"] += 1
+        return {
+            "cycle_status": "no_trade",
+            "underlying_count": 10,
+            "scanned_count": 10,
+            "call_signal_count": 1,
+            "put_signal_count": 1,
+            "confirmed_order_count": 0,
+        }
+
+    stats = run_continuous_paper_runner(
+        config_loader=lambda: cfg,
+        runner=_stock_runner,
+        options_runner=_options_runner,
+        state_path=_state_path(tmp_path),
+        now_provider=_Clock([datetime(2026, 7, 22, 10, 0, tzinfo=EASTERN_TZ)]),
+        sleep_fn=lambda _seconds: None,
+        max_iterations=1,
+    )
+
+    assert calls == {"stock": 1, "options": 1}
+    assert stats["options_cycles_attempted"] == 1
+    assert stats["options_cycles_completed"] == 1
+    assert stats["options_cycles_failed"] == 0
+
+
 def test_scanner_exception_emits_failure_and_final_exit_event(tmp_path, monkeypatch):
     cfg = _config(tmp_path)
     events = []

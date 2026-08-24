@@ -52,7 +52,7 @@ def build_crypto_universe(
     *,
     included_symbols: set[str] | None = None,
     excluded_symbols: set[str] | None = None,
-    maximum_symbols: int = 50,
+    maximum_symbols: int = 0,
 ) -> list[dict[str, Any]]:
     include = {canonical_crypto_symbol(item) for item in set(included_symbols or set()) if canonical_crypto_symbol(item)}
     exclude = {canonical_crypto_symbol(item) for item in set(excluded_symbols or set()) if canonical_crypto_symbol(item)}
@@ -94,7 +94,7 @@ def load_crypto_universe(
 ) -> list[dict[str, Any]]:
     requested = _csv_symbols(os.getenv("CRYPTO_SYMBOLS"))
     excluded = _csv_symbols(os.getenv("CRYPTO_EXCLUDE_SYMBOLS", "USDC/USD,USDT/USD"))
-    resolved_limit = int(maximum_symbols if maximum_symbols is not None else os.getenv("CRYPTO_MAX_UNIVERSE_SIZE", "50"))
+    resolved_limit = int(maximum_symbols if maximum_symbols is not None else os.getenv("CRYPTO_MAX_UNIVERSE_SIZE", "0"))
     try:
         broker = broker_factory(mode="PAPER")
         assets = list(broker.get_tradable_crypto_assets() or [])
@@ -109,4 +109,3 @@ def load_crypto_universe(
     if not universe:
         raise CryptoUniverseError("Alpaca returned no active tradable USD crypto pairs")
     return universe
-

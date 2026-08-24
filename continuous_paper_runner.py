@@ -298,6 +298,7 @@ def run_continuous_paper_runner(
     diagnostic_symbol_limit: int | None = None,
     notifier_factory: Callable[..., NotificationService] | None = None,
     crypto_runner: Callable[..., Any] | None = None,
+    options_runner: Callable[..., Any] | None = None,
 ) -> dict[str, int]:
     run_id = f"continuous-runner-{datetime.now(EASTERN_TZ).strftime('%Y%m%d%H%M%S%f')}-{uuid.uuid4().hex[:8]}"
     _log_event("continuous_runner_starting", run_id=run_id)
@@ -321,12 +322,22 @@ def run_continuous_paper_runner(
     scan_only_during_market_hours = bool(getattr(config, "scan_only_during_market_hours", True))
     dry_run = bool(getattr(config, "continuous_runner_dry_run", False)) if dry_run_override is None else bool(dry_run_override)
     crypto_enabled = str(os.getenv("CRYPTO_TRADING_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
-    crypto_interval_minutes = max(int(os.getenv("CRYPTO_SCAN_INTERVAL_MINUTES", "15")), 1)
-    crypto_interval_seconds = crypto_interval_minutes * 60
+    crypto_interval_minutes = max(int(os.getenv("CRYPTO_SCAN_INTERVAL_MINUTES", "1")), 1)
+    crypto_interval_seconds = max(
+        int(os.getenv("CRYPTO_SCAN_INTERVAL_SECONDS", str(crypto_interval_minutes * 60))),
+        10,
+    )
     if crypto_enabled and crypto_runner is None:
         from crypto_paper_trader import run_crypto_paper_cycle
 
         crypto_runner = run_crypto_paper_cycle
+    options_enabled = str(os.getenv("OPTIONS_TRADING_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    options_interval_minutes = max(int(os.getenv("OPTIONS_SCAN_INTERVAL_MINUTES", "15")), 1)
+    options_interval_seconds = options_interval_minutes * 60
+    if options_enabled and options_runner is None:
+        from options_paper_trader import run_options_paper_cycle
+
+        options_runner = run_options_paper_cycle
     telemetry_callback = _telemetry_callback_factory(run_id=run_id, dry_run=dry_run, trading_mode=str(config.trading_mode))
     notifier_builder = notifier_factory or NotificationService.from_env
     notifier = notifier_builder(database_url=(database_url or config.database_url))
@@ -380,7 +391,11 @@ def run_continuous_paper_runner(
         universe_source="alpaca_assets_api",
         crypto_trading_enabled=bool(crypto_enabled),
         crypto_scan_interval_minutes=int(crypto_interval_minutes),
+        crypto_scan_interval_seconds=int(crypto_interval_seconds),
         crypto_market="24/7",
+        options_trading_enabled=bool(options_enabled),
+        options_scan_interval_minutes=int(options_interval_minutes),
+        options_market="US regular hours",
         diagnostic_symbol_limit=(int(diagnostic_symbol_limit) if diagnostic_symbol_limit is not None else None),
     )
 
@@ -399,9 +414,14 @@ def run_continuous_paper_runner(
         "crypto_cycles_completed": 0,
         "crypto_cycles_failed": 0,
         "crypto_orders_submitted": 0,
+        "options_cycles_attempted": 0,
+        "options_cycles_completed": 0,
+        "options_cycles_failed": 0,
+        "options_orders_submitted": 0,
     }
     last_active_cycle_key: str | None = None
     last_crypto_cycle_at: datetime | None = None
+    last_options_cycle_at: datetime | None = None
     daily_summary_enabled = str(os.getenv("NOTIFICATION_DAILY_SUMMARY_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
     weekly_summary_enabled = str(os.getenv("NOTIFICATION_WEEKLY_SUMMARY_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
     daily_summary_hour, daily_summary_minute = _parse_summary_time_et(os.getenv("DAILY_SUMMARY_TIME_ET", "16:15"))
@@ -543,6 +563,55 @@ def run_continuous_paper_runner(
                     _log_event("continuous_runner_shutdown", reason="stop_event_during_sleep", cycles=stats["cycles"])
                     break
                 continue
+
+            options_due = bool(
+                options_enabled
+                and callable(options_runner)
+                and (
+                    last_options_cycle_at is None
+                    or (now_eastern - last_options_cycle_at).total_seconds() >= float(options_interval_seconds)
+                )
+            )
+            if options_due:
+                stats["options_cycles_attempted"] += 1
+                try:
+                    options_result = dict(
+                        options_runner(
+                            now=now_eastern.astimezone(timezone.utc),
+                            dry_run=bool(
+                                dry_run
+                                or str(os.getenv("OPTIONS_DRY_RUN", "true")).strip().lower()
+                                in {"1", "true", "yes", "on"}
+                            ),
+                        )
+                        or {}
+                    )
+                    confirmed_options_orders = int(options_result.get("confirmed_order_count") or 0)
+                    stats["options_cycles_completed"] += 1
+                    stats["options_orders_submitted"] += confirmed_options_orders
+                    _log_event(
+                        "options_cycle_complete",
+                        run_id=run_id,
+                        timestamp=now_eastern.isoformat(),
+                        cycle_status=str(options_result.get("cycle_status") or "unknown"),
+                        underlying_count=int(options_result.get("underlying_count") or 0),
+                        scanned_count=int(options_result.get("scanned_count") or 0),
+                        call_signal_count=int(options_result.get("call_signal_count") or 0),
+                        put_signal_count=int(options_result.get("put_signal_count") or 0),
+                        confirmed_order_count=confirmed_options_orders,
+                        action_reason=str(options_result.get("action_reason") or ""),
+                    )
+                except Exception as exc:
+                    stats["options_cycles_failed"] += 1
+                    _log_event(
+                        "options_cycle_failed",
+                        run_id=run_id,
+                        timestamp=now_eastern.isoformat(),
+                        error_type=type(exc).__name__,
+                        error_message=str(exc),
+                    )
+                finally:
+                    last_options_cycle_at = now_eastern
 
             state = _normalize_daily_state(_load_daily_state(resolved_state_path), market_date)
             if int(state.get("orders_submitted") or 0) >= max_daily_orders:
