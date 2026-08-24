@@ -491,6 +491,31 @@ def test_lightweight_batch_size_is_respected(monkeypatch):
     assert payload["summary"]["lightweight_batch_size"] == 4
 
 
+def test_expensive_lightweight_window_is_capped_by_coarse_limit(monkeypatch):
+    batch_sizes = []
+
+    def _batch_loader(symbols, start, end):
+        batch_sizes.append(len(symbols))
+        return {symbol: _frame() for symbol in symbols}
+
+    payload = market_scanner.scan_universe(
+        [{"symbol": f"C{i:04d}", "status": "ACTIVE", "tradable": True} for i in range(1_200)],
+        benchmark_symbol="SPY",
+        data_loader=lambda *args, **kwargs: _frame(),
+        data_loader_batch=_batch_loader,
+        lightweight_batch_size=200,
+        coarse_candidate_limit=500,
+        deep_score_limit=0,
+        max_retries=0,
+    )
+
+    assert sum(batch_sizes) <= 500
+    assert payload["summary"]["stage_a_budget_window_selected"] == 500
+    assert payload["summary"]["symbols_skipped_due_budget"] == 700
+    assert payload["summary"]["partial_scan"] is True
+    assert payload["summary"]["batch_count"]["attempted"] == len(batch_sizes)
+
+
 def test_scan_always_emits_final_completion_event(monkeypatch):
     events = []
     monkeypatch.setattr(market_scanner, "generate_strategy_result", lambda **kwargs: {
