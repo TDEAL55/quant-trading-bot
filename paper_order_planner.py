@@ -26,6 +26,7 @@ class OrderPlannerSettings:
     rebalance_tolerance: float
     maximum_orders: int
     cash_buffer: float
+    allow_short: bool = False
 
 
 def _normalize_positions(positions: Any) -> dict[str, dict[str, float]]:
@@ -70,7 +71,11 @@ def plan_paper_orders(
     rejections: list[dict[str, Any]] = []
 
     for symbol in symbols:
-        target_weight = max(_as_float(target_weights.get(symbol), 0.0), 0.0)
+        requested_target_weight = _as_float(target_weights.get(symbol), 0.0)
+        if requested_target_weight < 0.0 and not bool(settings.allow_short):
+            rejections.append({"symbol": symbol, "reason": "short_target_not_allowed", "side": "SELL"})
+            continue
+        target_weight = requested_target_weight if bool(settings.allow_short) else max(requested_target_weight, 0.0)
         position = positions.get(symbol) or {"quantity": 0.0, "avg_price": 0.0}
         quantity_now = _as_float(position.get("quantity"), 0.0)
 
@@ -114,7 +119,21 @@ def plan_paper_orders(
                 "current_weight": round(current_notional / portfolio_value, 10) if portfolio_value > 0 else 0.0,
                 "weight_delta": round(weight_delta, 10),
                 "reference_price": round(reference_price, 10),
-                "action": "increase" if side == "BUY" and current_notional > 0 else "buy" if side == "BUY" else "close" if target_weight <= 0 else "reduce",
+                "action": (
+                    "cover"
+                    if side == "BUY" and current_notional < 0
+                    else "increase"
+                    if side == "BUY" and current_notional > 0
+                    else "buy"
+                    if side == "BUY"
+                    else "increase_short"
+                    if current_notional < 0 and target_notional < current_notional
+                    else "short"
+                    if target_weight < 0
+                    else "close"
+                    if target_weight == 0
+                    else "reduce"
+                ),
             }
         )
 
@@ -150,7 +169,7 @@ def plan_paper_orders(
         "holds": sorted(holds, key=lambda item: item.get("symbol") or ""),
         "rejections": sorted(rejected_orders, key=lambda item: (str(item.get("side") or ""), str(item.get("symbol") or ""))),
         "summary": {
-            "target_holding_count": len([symbol for symbol, weight in target_weights.items() if _as_float(weight, 0.0) > 0]),
+            "target_holding_count": len([symbol for symbol, weight in target_weights.items() if abs(_as_float(weight, 0.0)) > 0]),
             "proposed_order_count": len(ordered) + len(rejected_orders),
             "approved_order_count": len(ordered),
             "rejected_order_count": len(rejected_orders),

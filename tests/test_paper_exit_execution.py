@@ -134,3 +134,41 @@ def test_guard_exit_dry_run_is_recommendation_only():
     assert result["status"] == "exit_recommended"
     assert result["paper_order"]["submission_status"] == "not_submitted"
     assert broker.get_positions()["JPM"]["quantity"] == 2.0
+
+
+def test_guard_exit_buys_to_cover_short_and_records_short_pnl():
+    broker = SimulatedPaperBroker(
+        mode="PAPER",
+        buying_power=1200.0,
+        positions={"BEAR": {"quantity": -2.0, "avg_price": 100.0}},
+    )
+    repo = _Repo()
+    candidate = {
+        "symbol": "BEAR",
+        "quantity": 2.0,
+        "current_market_price": 90.0,
+        "return_percent": 10.0,
+        "exit_reason": "take_profit_threshold_reached",
+    }
+
+    result = execute_guard_exit(
+        candidate,
+        broker=broker,
+        broker_positions={"BEAR": {"quantity": -2.0, "avg_price": 100.0, "current_price": 90.0}},
+        broker_cash=1200.0,
+        broker_buying_power=1200.0,
+        broker_equity=1000.0,
+        execution_repo=repo,
+        cycle_run_id="cycle-short",
+        started_at="2026-08-23T15:00:00+00:00",
+        dry_run=False,
+        paper_execution_enabled=True,
+        allow_fractional=True,
+        reconciliation_tolerance=0.000001,
+        persist=True,
+    )
+
+    assert result["status"] == "completed"
+    assert result["paper_order"]["side"] == "BUY"
+    assert broker.get_positions() == {}
+    assert repo.closed_trade["realized_gross_pnl"] == 20.0

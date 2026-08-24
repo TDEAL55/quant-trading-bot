@@ -18,6 +18,10 @@ class SimulatedPaperBroker:
             raise RuntimeError("LIVE mode is blocked for simulated paper broker")
         self.mode = selected_mode
         self.backend = "SIMULATED"
+        self.allow_short_selling = bool(
+            self.mode == "PAPER"
+            and str(os.getenv("PAPER_ALLOW_SHORT_SELLING", "false")).strip().lower() in {"1", "true", "yes", "on"}
+        )
         self._buying_power = float(buying_power)
         default_positions = positions
         if default_positions is None:
@@ -127,17 +131,24 @@ class SimulatedPaperBroker:
             raise RuntimeError("invalid simulated order")
 
         position = self._positions.setdefault(symbol, {"quantity": 0.0, "avg_price": fill_price})
+        old_quantity = float(position.get("quantity") or 0.0)
         if normalized_side == "buy":
-            position["quantity"] = float(position.get("quantity") or 0.0) + qty
-            position["avg_price"] = fill_price
+            position["quantity"] = old_quantity + qty
+            if old_quantity <= 0 <= position["quantity"] or old_quantity == 0:
+                position["avg_price"] = fill_price
             self._buying_power -= qty * fill_price
         elif normalized_side == "sell":
-            position["quantity"] = max(float(position.get("quantity") or 0.0) - qty, 0.0)
+            if not self.allow_short_selling and qty > max(old_quantity, 0.0) + 1e-8:
+                raise RuntimeError("simulated short selling is disabled")
+            position["quantity"] = old_quantity - qty
+            if old_quantity >= 0 >= position["quantity"] or old_quantity == 0:
+                position["avg_price"] = fill_price
             self._buying_power += qty * fill_price
-            if position["quantity"] <= 0:
-                self._positions.pop(symbol, None)
         else:
             raise RuntimeError("invalid side")
+
+        if abs(float(position.get("quantity") or 0.0)) <= 1e-8:
+            self._positions.pop(symbol, None)
 
         order_id = f"sim-{symbol}-{int(time.time() * 1000)}"
         payload = {

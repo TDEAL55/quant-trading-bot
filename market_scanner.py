@@ -14,6 +14,7 @@ import pandas as pd
 
 from config import (
     BENCHMARK_SYMBOL,
+    PAPER_ALLOW_SHORT_SELLING,
     SCANNER_ALLOWED_SIGNALS,
     SCANNER_BATCH_SIZE,
     SCANNER_BLOCKED_REGIMES,
@@ -34,6 +35,9 @@ from config import (
     SCANNER_MIN_RISK_QUALITY,
     SCANNER_MIN_SCORE,
     SCANNER_MIN_VOLATILITY_SCORE,
+    SCANNER_SHORT_ALLOWED_SIGNALS,
+    SCANNER_SHORT_MAX_SCORE,
+    SCANNER_SHORT_MIN_CONFIDENCE,
     SCANNER_RANK_WEIGHT_CONFIDENCE,
     SCANNER_RANK_WEIGHT_LIQUIDITY,
     SCANNER_RANK_WEIGHT_OVERALL,
@@ -120,9 +124,18 @@ def _coarse_metrics(symbol: str, history: pd.DataFrame, benchmark_history: pd.Da
         + (max(0.0, 1.0 - min(abs(distance_from_recent_high), 0.30) / 0.30) * 100.0) * 0.10
         - (min(max(volatility, 0.0), 1.0) * 10.0)
     )
+    bearish_coarse_score = (
+        (-ret5 * 100.0) * 0.20
+        + (-ret20 * 100.0) * 0.35
+        + (-rel_strength * 100.0) * 0.25
+        + (min(max(volume_ratio, 0.0), 3.0) * 10.0) * 0.10
+        + (min(abs(distance_from_recent_high), 0.30) / 0.30 * 100.0) * 0.10
+        - (min(max(volatility, 0.0), 1.0) * 10.0)
+    )
     return {
         "symbol": str(symbol),
         "coarse_score": float(round(coarse_score, 6)),
+        "bearish_coarse_score": float(round(bearish_coarse_score, 6)),
         "ret5": float(round(ret5, 6)),
         "ret20": float(round(ret20, 6)),
         "rel_strength_vs_spy": float(round(rel_strength, 6)),
@@ -367,17 +380,34 @@ def _eligible_reasons(
     if not filter_result.get("passed"):
         reasons.extend(filter_result.get("reasons", []))
     signal = str(signal_result.get("signal", "HOLD")).upper()
-    if signal not in {value.upper() for value in allowed_signals}:
-        reasons.append("signal is not in allowed scanner signals")
+    entry_signal = str(signal_result.get("entry_signal") or signal).upper()
+    trade_side = str(signal_result.get("trade_side") or "BUY").upper()
     score = float(signal_result.get("overall_score") or 0.0)
-    if score < min_score:
-        reasons.append(f"overall score below minimum ({score:.2f} < {min_score:.2f})")
+    directional_score = float(signal_result.get("directional_score") or score)
     confidence = float(signal_result.get("confidence") or 0.0)
-    if confidence < min_confidence:
-        reasons.append(f"confidence below minimum ({confidence:.2f} < {min_confidence:.2f})")
     regime = str(signal_result.get("regime") or "unknown").lower()
-    if regime in {value.lower() for value in blocked_regimes}:
-        reasons.append(f"blocked market regime: {regime}")
+    if trade_side == "SELL":
+        if not PAPER_ALLOW_SHORT_SELLING:
+            reasons.append("paper short selling is disabled")
+        if signal not in {value.upper() for value in SCANNER_SHORT_ALLOWED_SIGNALS}:
+            reasons.append("signal is not in allowed short-entry signals")
+        if entry_signal != "SELL":
+            reasons.append("short entry signal is not SELL")
+        if score > float(SCANNER_SHORT_MAX_SCORE):
+            reasons.append(f"bullish score above short maximum ({score:.2f} > {SCANNER_SHORT_MAX_SCORE:.2f})")
+        if directional_score < min_score:
+            reasons.append(f"short conviction below minimum ({directional_score:.2f} < {min_score:.2f})")
+        if confidence < float(SCANNER_SHORT_MIN_CONFIDENCE):
+            reasons.append(f"short confidence below minimum ({confidence:.2f} < {SCANNER_SHORT_MIN_CONFIDENCE:.2f})")
+    else:
+        if entry_signal not in {value.upper() for value in allowed_signals}:
+            reasons.append("signal is not in allowed scanner signals")
+        if directional_score < min_score:
+            reasons.append(f"overall score below minimum ({directional_score:.2f} < {min_score:.2f})")
+        if confidence < min_confidence:
+            reasons.append(f"confidence below minimum ({confidence:.2f} < {min_confidence:.2f})")
+        if regime in {value.lower() for value in blocked_regimes}:
+            reasons.append(f"blocked market regime: {regime}")
     components = signal_result.get("component_scores") or {}
     risk_quality = float(components.get("risk_quality", components.get("risk_reward_quality", 0.0)) or 0.0)
     if risk_quality < min_risk_quality:
@@ -388,13 +418,14 @@ def _eligible_reasons(
     if not bool((signal_result.get("data_quality") or {}).get("history_sufficient", True)):
         reasons.append("factor-engine history quality check failed")
     for reason in list((signal_result.get("quantum_score") or {}).get("rejection_reasons") or []):
-        if reason in {
+        guarded_reasons = {
             "stale_data",
             "minimum_price_check_failed",
             "average_dollar_volume_below_minimum",
-            "invalid_reward_risk_structure",
-            "reward_risk_below_minimum",
-        }:
+        }
+        if trade_side != "SELL":
+            guarded_reasons.update({"invalid_reward_risk_structure", "reward_risk_below_minimum"})
+        if reason in guarded_reasons:
             reasons.append(f"quantum guardrail: {reason}")
     return reasons
 
@@ -466,6 +497,23 @@ def scan_symbol(
             benchmark_prices=benchmark_history,
         )
         strategy_specific_scores = compute_strategy_specific_scores(quantum_score)
+        raw_signal = str(strategy_result.get("signal") or "HOLD").strip().upper()
+        raw_score = float(quantum_score.get("final_score") or 0.0)
+        long_signal_score = float(strategy_result.get("overall_score") or raw_score)
+        short_payload = dict(strategy_specific_scores.get("bearish_trend_short_v1") or {})
+        short_requested = bool(
+            PAPER_ALLOW_SHORT_SELLING
+            and raw_signal in {value.upper() for value in SCANNER_SHORT_ALLOWED_SIGNALS}
+            and raw_score <= float(SCANNER_SHORT_MAX_SCORE)
+            and bool(short_payload.get("eligible", False))
+        )
+        trade_side = "SELL" if short_requested else "BUY"
+        entry_signal = "SELL" if short_requested else raw_signal
+        directional_score = (
+            float(short_payload.get("strategy_score") or (100.0 - raw_score))
+            if short_requested
+            else long_signal_score
+        )
         quantum_components = dict(quantum_score.get("normalized_component_scores") or {})
         strategy_components = dict(strategy_result.get("component_scores") or {})
         compatibility_components = {
@@ -479,9 +527,12 @@ def scan_symbol(
         }
         result.update(
             {
-                "overall_score": float(quantum_score.get("final_score") or 0.0),
+                "overall_score": raw_score,
+                "directional_score": directional_score,
                 "confidence": float(strategy_result.get("confidence") or 0.0),
-                "signal": str(strategy_result.get("signal") or "HOLD"),
+                "signal": raw_signal,
+                "entry_signal": entry_signal,
+                "trade_side": trade_side,
                 "regime": str(quantum_score.get("market_regime") or strategy_result.get("regime") or "unknown"),
                 "component_scores": compatibility_components,
                 "reasons": list(strategy_result.get("reasons") or []),
@@ -499,7 +550,14 @@ def scan_symbol(
         }
 
         rejection_reasons = _eligible_reasons(
-            {**strategy_result, "component_scores": compatibility_components, "quantum_score": quantum_score},
+            {
+                **strategy_result,
+                "entry_signal": entry_signal,
+                "trade_side": trade_side,
+                "directional_score": directional_score,
+                "component_scores": compatibility_components,
+                "quantum_score": quantum_score,
+            },
             selected_filter,
             min_score=min_score,
             min_confidence=min_confidence,
@@ -586,13 +644,19 @@ def rank_scan_results(
     for item in eligible:
         components = item.get("component_scores") or {}
         risk_quality = float(components.get("risk_reward_quality", components.get("risk_quality", 0.0)) or 0.0)
-        trend = float(components.get("trend_strength", components.get("trend", 0.0)) or 0.0)
+        short_payload = dict((item.get("strategy_specific_scores") or {}).get("bearish_trend_short_v1") or {})
+        short_components = dict(short_payload.get("component_scores") or {})
+        trend = (
+            float(short_components.get("trend_weakness") or 0.0)
+            if str(item.get("trade_side") or "BUY").upper() == "SELL"
+            else float(components.get("trend_strength", components.get("trend", 0.0)) or 0.0)
+        )
         liquidity = _liquidity_score(float(item.get("average_dollar_volume") or 0.0))
         extension_penalty = _extension_penalty(item)
         sector = str(item.get("sector") or "Unknown")
         diversification_penalty = max(sector_counts.get(sector, 0) - 2, 0) * 0.5
         ranking_score = (
-            float(item.get("overall_score") or 0.0) * weight_overall
+            float(item.get("directional_score") or item.get("overall_score") or 0.0) * weight_overall
             + float(item.get("confidence") or 0.0) * weight_confidence
             + risk_quality * weight_risk_quality
             + trend * weight_trend
@@ -930,7 +994,12 @@ def scan_universe(
     coarse_ranked = sorted(
         lightweight_survivors,
         key=lambda item: (
-            -float((lightweight_features.get(normalize_symbol(item.get("symbol", ""))) or {}).get("coarse_score") or 0.0),
+            -max(
+                float((lightweight_features.get(normalize_symbol(item.get("symbol", ""))) or {}).get("coarse_score") or 0.0),
+                float((lightweight_features.get(normalize_symbol(item.get("symbol", ""))) or {}).get("bearish_coarse_score") or 0.0)
+                if PAPER_ALLOW_SHORT_SELLING
+                else float("-inf"),
+            ),
             normalize_symbol(item.get("symbol", "")),
         ),
     )

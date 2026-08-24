@@ -374,29 +374,35 @@ class MonitoringPaperExecutionRepository:
             result.append(item)
         return result
 
-    def fetch_latest_filled_buy(self, symbol: str) -> dict[str, Any] | None:
+    def fetch_latest_filled_entry(self, symbol: str, side: str = "BUY") -> dict[str, Any] | None:
         if not self.db.enabled:
             return None
         self.db.ensure_schema()
+        normalized_side = str(side or "BUY").strip().upper()
+        if normalized_side not in {"BUY", "SELL"}:
+            raise ValueError("entry side must be BUY or SELL")
         row = self.db.query_one(
             """
             SELECT o.*, r.strategy_id, r.strategy_version
             FROM paper_orders o
             JOIN paper_validation_runs r ON r.run_id = o.run_id
             WHERE UPPER(o.symbol) = UPPER(?)
-              AND UPPER(o.side) = 'BUY'
+              AND UPPER(o.side) = ?
               AND o.filled_quantity > 0
               AND LOWER(o.submission_status) IN ('filled', 'partially_filled')
             ORDER BY COALESCE(o.filled_at, o.submitted_at, o.proposed_at) DESC
             LIMIT 1
             """,
-            (str(symbol or "").upper(),),
+            (str(symbol or "").upper(), normalized_side),
         )
         if not row:
             return None
         item = dict(row)
         item["order_payload"] = _json_load(item.get("order_payload_json"), {})
         return item
+
+    def fetch_latest_filled_buy(self, symbol: str) -> dict[str, Any] | None:
+        return self.fetch_latest_filled_entry(symbol, "BUY")
 
     def fetch_position_snapshots_for_run(self, run_id: str) -> list[dict[str, Any]]:
         if not self.db.enabled:

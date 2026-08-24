@@ -147,6 +147,9 @@ class AlpacaPaperBroker:
         self.api_secret = str(os.getenv("ALPACA_API_SECRET", "")).strip()
         self.base_url = str(os.getenv("ALPACA_PAPER_BASE_URL", ALPACA_PAPER_ENDPOINT)).strip() or ALPACA_PAPER_ENDPOINT
         self.order_submission_enabled = _is_true(os.getenv("ALPACA_ORDER_SUBMISSION_ENABLED", "false"))
+        self.allow_short_selling = bool(
+            self.mode == "PAPER" and _is_true(os.getenv("PAPER_ALLOW_SHORT_SELLING", "false"))
+        )
 
         if _normalize_url(self.base_url) != _normalize_url(ALPACA_PAPER_ENDPOINT):
             raise RuntimeError("ALPACA_PAPER_BASE_URL must be https://paper-api.alpaca.markets")
@@ -227,6 +230,7 @@ class AlpacaPaperBroker:
                 "current_price": _to_float(getattr(position, "current_price", 0.0), 0.0),
                 "market_value": _to_float(getattr(position, "market_value", 0.0), 0.0),
                 "unrealized_pl": _to_float(getattr(position, "unrealized_pl", 0.0), 0.0),
+                "unrealized_plpc": _to_float(getattr(position, "unrealized_plpc", 0.0), 0.0),
             }
         return result
 
@@ -332,7 +336,7 @@ class AlpacaPaperBroker:
                 "broker_backend": "ALPACA",
             }
 
-        if normalized_side == "sell":
+        if normalized_side == "sell" and not self.allow_short_selling:
             current_position = self.get_positions().get(symbol) or {}
             held_quantity = _to_float(current_position.get("quantity"), 0.0)
             requested_quantity = _to_float(quantity, 0.0)

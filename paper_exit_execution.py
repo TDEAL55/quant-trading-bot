@@ -34,7 +34,7 @@ def _position_weights(positions: dict[str, dict[str, Any]], equity: float) -> di
             ),
         }
         for symbol, payload in dict(positions or {}).items()
-        if _as_float((payload or {}).get("quantity"), 0.0) > 0
+        if abs(_as_float((payload or {}).get("quantity"), 0.0)) > 1e-8
     }
 
 
@@ -59,16 +59,19 @@ def execute_guard_exit(
     symbol = str(exit_candidate.get("symbol") or "").strip().upper()
     reason = str(exit_candidate.get("exit_reason") or "position_guard_exit").strip()
     position = dict((broker_positions or {}).get(symbol) or {})
+    signed_position_quantity = _as_float(position.get("quantity"), 0.0)
+    position_side = "SHORT" if signed_position_quantity < 0 else "LONG"
+    close_side = "BUY" if position_side == "SHORT" else "SELL"
     quantity = min(
         max(_as_float(exit_candidate.get("quantity"), 0.0), 0.0),
-        max(_as_float(position.get("quantity"), 0.0), 0.0),
+        abs(signed_position_quantity),
     )
     reference_price = _as_float(exit_candidate.get("current_market_price"), 0.0)
     if not symbol or quantity <= 0 or reference_price <= 0:
         return {
             "status": "risk_rejected",
             "confirmed_order_count": 0,
-            "paper_order": {"symbol": symbol, "side": "SELL", "quantity": quantity},
+            "paper_order": {"symbol": symbol, "side": close_side, "quantity": quantity},
             "risk_result": {"approved": False, "checks": {"position_exists": quantity > 0, "current_price": reference_price > 0}},
             "reconciliation": {},
             "execution_counters": {
@@ -81,13 +84,13 @@ def execute_guard_exit(
         }
 
     trade_date = str(started_at or _utc_iso())[:10]
-    execution_fingerprint = _execution_fingerprint(symbol, quantity, f"PAPER_EXIT:{reason}:{trade_date}")
+    execution_fingerprint = _execution_fingerprint(symbol, quantity, f"PAPER_EXIT:{close_side}:{reason}:{trade_date}")
     existing = execution_repo.fetch_latest_submitting_run_by_execution_fingerprint(execution_fingerprint)
     if existing is not None:
         return {
             "status": "duplicate_rejected",
             "confirmed_order_count": 0,
-            "paper_order": {"symbol": symbol, "side": "SELL", "quantity": quantity, "submission_status": "duplicate_rejected"},
+            "paper_order": {"symbol": symbol, "side": close_side, "quantity": quantity, "submission_status": "duplicate_rejected"},
             "risk_result": {"approved": False, "checks": {"duplicate_protection": False}, "duplicate_run": existing},
             "reconciliation": {},
             "execution_counters": {
@@ -106,7 +109,7 @@ def execute_guard_exit(
             "confirmed_order_count": 0,
             "paper_order": {
                 "symbol": symbol,
-                "side": "SELL",
+                "side": close_side,
                 "quantity": quantity,
                 "notional": round(quantity * reference_price, 6),
                 "submission_status": "not_submitted",
@@ -129,7 +132,7 @@ def execute_guard_exit(
     client_order_id = f"qtb-exit-{execution_fingerprint[:32]}"
     response = dict(
         broker.submit_order(
-            side="sell",
+            side=close_side.lower(),
             ticker=symbol,
             quantity=quantity,
             client_order_id=client_order_id,
@@ -174,13 +177,15 @@ def execute_guard_exit(
 
     expected_positions = {key: dict(value or {}) for key, value in dict(broker_positions or {}).items()}
     if counted_quantity > 0:
-        expected_remaining = max(_as_float(position.get("quantity"), 0.0) - counted_quantity, 0.0)
-        if expected_remaining > 0:
+        signed_fill = counted_quantity if close_side == "BUY" else -counted_quantity
+        expected_remaining = signed_position_quantity + signed_fill
+        if abs(expected_remaining) > float(reconciliation_tolerance):
             expected_positions[symbol] = {**position, "quantity": expected_remaining}
         else:
             expected_positions.pop(symbol, None)
 
-    expected_cash = round(float(broker_cash) + (counted_quantity * fill_price), 6)
+    signed_cash_flow = counted_quantity * fill_price * (1.0 if close_side == "BUY" else -1.0)
+    expected_cash = round(float(broker_cash) - signed_cash_flow, 6)
     reconciliation = reconcile_paper_positions(
         planned_positions=_position_weights(expected_positions, broker_equity),
         actual_positions=_position_weights(post_positions, broker_equity),
@@ -207,8 +212,12 @@ def execute_guard_exit(
     validation_run_id = f"{cycle_run_id}-exit-{symbol.lower()}"
     paper_order_id = str(final_order.get("order_id") or final_order.get("id") or f"{validation_run_id}-0001")
     if persist:
-        entry_lookup = getattr(execution_repo, "fetch_latest_filled_buy", None)
-        entry_order = dict(entry_lookup(symbol) or {}) if callable(entry_lookup) else {}
+        entry_lookup = getattr(execution_repo, "fetch_latest_filled_entry", None)
+        if callable(entry_lookup):
+            entry_order = dict(entry_lookup(symbol, "SELL" if position_side == "SHORT" else "BUY") or {})
+        else:
+            legacy_lookup = getattr(execution_repo, "fetch_latest_filled_buy", None)
+            entry_order = dict(legacy_lookup(symbol) or {}) if callable(legacy_lookup) and position_side == "LONG" else {}
         execution_repo.save_validation_run(
             PaperValidationRunPayload(
                 run={
@@ -247,12 +256,12 @@ def execute_guard_exit(
                     {
                         "paper_order_id": f"{validation_run_id}-0001",
                         "symbol": symbol,
-                        "side": "SELL",
+                        "side": close_side,
                         "quantity": quantity,
                         "notional": round(quantity * reference_price, 6),
                         "target_weight": 0.0,
-                        "current_weight": round(quantity * reference_price / max(float(broker_equity), 1.0), 10),
-                        "weight_delta": round(-(quantity * reference_price / max(float(broker_equity), 1.0)), 10),
+                        "current_weight": round(signed_position_quantity * reference_price / max(float(broker_equity), 1.0), 10),
+                        "weight_delta": round(-(signed_position_quantity * reference_price / max(float(broker_equity), 1.0)), 10),
                         "reference_price": reference_price,
                         "proposed_at": started_at,
                         "risk_status": "approved",
@@ -320,10 +329,14 @@ def execute_guard_exit(
             )
 
         post_quantity = _as_float((post_positions.get(symbol) or {}).get("quantity"), 0.0)
-        if completed and post_quantity <= float(reconciliation_tolerance):
+        if completed and abs(post_quantity) <= float(reconciliation_tolerance):
             entry_price = _as_float(entry_order.get("average_fill_price") or position.get("avg_price"), fill_price)
             closed_quantity = min(quantity, counted_quantity)
-            gross_pnl = (fill_price - entry_price) * closed_quantity
+            gross_pnl = (
+                (entry_price - fill_price) * closed_quantity
+                if position_side == "SHORT"
+                else (fill_price - entry_price) * closed_quantity
+            )
             estimated_slippage = abs(
                 float(os.getenv("ESTIMATED_SLIPPAGE_BPS", "5")) / 10000.0 * fill_price * closed_quantity
             )
@@ -362,7 +375,7 @@ def execute_guard_exit(
             **final_order,
             "order_id": paper_order_id,
             "symbol": symbol,
-            "side": "SELL",
+            "side": close_side,
             "quantity": quantity,
             "notional": round(quantity * reference_price, 6),
             "submission_status": final_status,

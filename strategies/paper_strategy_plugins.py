@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Any
 
 from quantum_score_engine import compute_strategy_specific_scores
@@ -90,6 +91,13 @@ def _rr(candidate: dict[str, Any]) -> float:
     quantum = dict(candidate.get("quantum_score") or {})
     risk_reward = dict(quantum.get("risk_reward") or {})
     return _safe_float(risk_reward.get("reward_risk_ratio"), 0.0)
+
+
+def _paper_short_enabled() -> bool:
+    return bool(
+        str(os.getenv("TRADING_MODE", "SIMULATION")).strip().upper() == "PAPER"
+        and str(os.getenv("PAPER_ALLOW_SHORT_SELLING", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    )
 
 
 def _trend_momentum(symbol: str, price: float, score: float, confidence: float, regime: str, candidate: dict[str, Any]) -> StrategySignal:
@@ -193,6 +201,31 @@ def _breakout_volume(symbol: str, price: float, score: float, confidence: float,
     )
 
 
+def _bearish_trend_short(symbol: str, price: float, score: float, confidence: float, regime: str, candidate: dict[str, Any]) -> StrategySignal:
+    payload = _strategy_payload(candidate, "bearish_trend_short_v1")
+    strategy_score = _safe_float(payload.get("strategy_score"), 0.0)
+    requested_short = str(candidate.get("trade_side") or "").strip().upper() == "SELL"
+    signal = "SELL" if (_paper_short_enabled() and requested_short and bool(payload.get("eligible", False))) else "HOLD"
+    return StrategySignal(
+        symbol=symbol,
+        signal=signal,
+        entry_reason="bearish trend, momentum weakness, and liquidity confirmation",
+        proposed_entry=price,
+        stop=round(price * 1.03, 6),
+        target_or_exit_rule="buy to cover on a 6% decline, bearish-trend reversal, or stop 3% above entry",
+        confidence=_clip(_safe_float(payload.get("confidence"), ((100.0 - score) + confidence) / 2.0), 0.0, 100.0),
+        strategy_id="bearish_trend_short_v1",
+        strategy_version="1.0.0",
+        market_regime=regime,
+        requested_risk_allocation=0.20,
+        quantum_score=score,
+        strategy_score=strategy_score,
+        expected_reward_risk=2.0,
+        supporting_factors=_supporting(candidate),
+        data_quality_status=str((candidate.get("quantum_score") or {}).get("data_quality_status") or "warn"),
+    )
+
+
 def evaluate_all_strategies(candidate: dict[str, Any]) -> list[dict[str, Any]]:
     symbol = str(candidate.get("symbol") or "").upper()
     if not symbol:
@@ -210,5 +243,6 @@ def evaluate_all_strategies(candidate: dict[str, Any]) -> list[dict[str, Any]]:
         _moving_average_trend(symbol, price, score, confidence, regime, candidate),
         _mean_reversion(symbol, price, score, confidence, regime, candidate),
         _breakout_volume(symbol, price, score, confidence, regime, candidate),
+        _bearish_trend_short(symbol, price, score, confidence, regime, candidate),
     ]
     return [item.to_dict() for item in signals]

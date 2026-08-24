@@ -118,6 +118,7 @@ def test_strategy_specific_scores_remain_separate():
         "moving_average_trend_v1",
         "short_term_mean_reversion_v1",
         "volume_breakout_v1",
+        "bearish_trend_short_v1",
     }
     values = [float(item["strategy_score"]) for item in strategy_scores.values()]
     assert len(set(values)) >= 2

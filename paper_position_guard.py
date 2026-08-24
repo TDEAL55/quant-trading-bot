@@ -11,12 +11,13 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return float(default)
 
 
-def _has_open_sell(open_orders: list[dict[str, Any]], symbol: str) -> bool:
+def _has_open_close(open_orders: list[dict[str, Any]], symbol: str, close_side: str) -> bool:
     final_statuses = {"filled", "canceled", "cancelled", "rejected", "expired", "done_for_day"}
+    expected_side = str(close_side or "").strip().lower()
     for order in list(open_orders or []):
         if str((order or {}).get("symbol") or "").strip().upper() != symbol:
             continue
-        if str((order or {}).get("side") or "").strip().lower() != "sell":
+        if str((order or {}).get("side") or "").strip().lower() != expected_side:
             continue
         if str((order or {}).get("status") or "").strip().lower() not in final_statuses:
             return True
@@ -51,24 +52,34 @@ def review_paper_positions(
     for raw_symbol, raw_position in sorted(dict(positions or {}).items()):
         symbol = str(raw_symbol or "").strip().upper()
         position = dict(raw_position or {})
-        quantity = max(_as_float(position.get("quantity"), 0.0), 0.0)
+        signed_quantity = _as_float(position.get("quantity"), 0.0)
+        quantity = abs(signed_quantity)
+        position_side = "SHORT" if signed_quantity < 0 else "LONG"
+        close_side = "BUY" if position_side == "SHORT" else "SELL"
         entry_price = _as_float(position.get("avg_price"), 0.0)
         current_price = _as_float(position.get("current_price"), 0.0)
         if current_price <= 0 and quantity > 0:
-            current_price = _as_float(position.get("market_value"), 0.0) / quantity
+            current_price = abs(_as_float(position.get("market_value"), 0.0)) / quantity
 
         if not symbol or quantity <= 0:
             continue
 
-        return_percent = ((current_price / entry_price) - 1.0) * 100.0 if entry_price > 0 and current_price > 0 else None
+        if entry_price > 0 and current_price > 0:
+            return_percent = (
+                ((entry_price - current_price) / entry_price) * 100.0
+                if position_side == "SHORT"
+                else ((current_price / entry_price) - 1.0) * 100.0
+            )
+        else:
+            return_percent = None
         recommendation = "HOLD"
         reason = "inside_exit_bands"
         warnings: list[str] = []
         priority = 99
 
-        if _has_open_sell(list(open_orders or []), symbol):
+        if _has_open_close(list(open_orders or []), symbol, close_side):
             recommendation = "EXIT_PENDING"
-            reason = "open_sell_order_exists"
+            reason = "open_close_order_exists"
         elif entry_price <= 0 or current_price <= 0:
             recommendation = "REVIEW_REQUIRED"
             reason = "missing_entry_or_current_price"
@@ -84,7 +95,9 @@ def review_paper_positions(
 
         review = {
             "symbol": symbol,
-            "current_quantity": round(quantity, 8),
+            "current_quantity": round(signed_quantity, 8),
+            "position_side": position_side,
+            "close_side": close_side,
             "current_entry_price": round(entry_price, 8),
             "current_market_price": round(current_price, 8),
             "return_percent": round(float(return_percent), 6) if return_percent is not None else None,

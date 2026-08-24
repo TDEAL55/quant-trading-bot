@@ -19,6 +19,7 @@ from config import (
     MAX_POSITION_SIZE,
     MAX_VALIDATION_ORDERS,
     MAX_VALIDATION_ORDER_NOTIONAL,
+    PAPER_ALLOW_SHORT_SELLING,
     PAPER_VALIDATION_ALLOW_FRACTIONAL,
     PAPER_VALIDATION_CASH_BUFFER,
     PAPER_VALIDATION_DUPLICATE_RUN_PROTECTION,
@@ -175,18 +176,19 @@ def _position_count(positions: dict[str, dict[str, float]]) -> int:
             qty = float((payload or {}).get("quantity") or 0.0)
         except (TypeError, ValueError):
             qty = 0.0
-        if qty > 0:
+        if abs(qty) > 1e-8:
             count += 1
     return count
 
 
-def _has_open_entry_order(open_orders: list[dict[str, Any]], symbol: str) -> bool:
+def _has_open_entry_order(open_orders: list[dict[str, Any]], symbol: str, side: str = "BUY") -> bool:
+    expected_side = str(side or "BUY").strip().lower()
     for row in open_orders or []:
         if str(row.get("symbol") or "").upper() != str(symbol).upper():
             continue
         side = str(row.get("side") or "").lower()
         status = str(row.get("status") or "").lower()
-        if side == "buy" and status not in {"filled", "canceled", "cancelled", "rejected", "expired", "done_for_day"}:
+        if side == expected_side and status not in {"filled", "canceled", "cancelled", "rejected", "expired", "done_for_day"}:
             return True
     return False
 
@@ -1089,6 +1091,9 @@ def run_continuous_scan_cycle(
         )
 
     selected_symbol = str(selected_candidate.get("symbol") or "").upper()
+    requested_entry_side = str(selected_candidate.get("trade_side") or "BUY").strip().upper()
+    if requested_entry_side == "SELL" and not bool(PAPER_ALLOW_SHORT_SELLING):
+        requested_entry_side = "BUY"
     _emit_notification(
         notification_callback,
         event_type="candidate_selected",
@@ -1191,14 +1196,18 @@ def run_continuous_scan_cycle(
             row["requested_risk_allocation"] = float(allocations.get(sid, row.get("requested_risk_allocation") or 0.0))
             row["paused"] = sid in paused
 
-        tradable_signals = [row for row in strategy_signals if str(row.get("signal") or "").upper() == "BUY" and not bool(row.get("paused"))]
+        tradable_signals = [
+            row
+            for row in strategy_signals
+            if str(row.get("signal") or "").upper() == requested_entry_side and not bool(row.get("paused"))
+        ]
         if not tradable_signals:
             if dry_run:
                 _emit_telemetry(
                     telemetry_callback,
                     "dry_run_execution_skipped",
                     run_id=cycle_run_id,
-                    reason="no_active_buy_signals",
+                    reason="no_active_entry_signals",
                     orders_recommended=0,
                     orders_submission_requested=0,
                     orders_attempted=0,
@@ -1210,13 +1219,13 @@ def run_continuous_scan_cycle(
                     notification_callback,
                     event_type="dry_run_trade_skipped",
                     title="Dry Run Skip",
-                    message="All buy signals are paused or unavailable.",
+                    message="All matching entry signals are paused or unavailable.",
                     severity="INFO",
                     metadata={
                         "run_id": cycle_run_id,
                         "dry_run": True,
                         "symbol": selected_symbol,
-                        "reason": "no_active_buy_signals",
+                        "reason": "no_active_entry_signals",
                         "orders_recommended": 0,
                         "orders_submission_requested": 0,
                         "orders_attempted": 0,
@@ -1225,7 +1234,7 @@ def run_continuous_scan_cycle(
                         "orders_rejected": 0,
                         "status": "skipped",
                     },
-                    deduplication_key=f"dry_run_trade_skipped:{cycle_run_id}:{selected_symbol}:no_active_buy_signals",
+                    deduplication_key=f"dry_run_trade_skipped:{cycle_run_id}:{selected_symbol}:no_active_entry_signals",
                 )
             return _result(
                 status="no_trade",
@@ -1237,7 +1246,7 @@ def run_continuous_scan_cycle(
                     "selected": selected_candidate,
                     "strategy_signals": strategy_signals,
                     "paper_order": {},
-                    "risk_result": {"approved": False, "reason": "no_active_buy_signals", "paused_strategies": sorted(paused)},
+                    "risk_result": {"approved": False, "reason": "no_active_entry_signals", "paused_strategies": sorted(paused)},
                     "reconciliation": {},
                 },
                 persistence_payload={"scan": {"status": "saved" if persist else "skipped"}, "execution": {"status": "skipped"}},
@@ -1323,8 +1332,10 @@ def run_continuous_scan_cycle(
                 else max(1, int(PAPER_VALIDATION_MAX_ORDERS))
             ),
             cash_buffer=float(PAPER_VALIDATION_CASH_BUFFER),
+            allow_short=bool(PAPER_ALLOW_SHORT_SELLING),
         )
-        target_weight = min(target_notional / max(float(broker_equity), 1.0), 1.0)
+        direction_multiplier = -1.0 if requested_entry_side == "SELL" else 1.0
+        target_weight = direction_multiplier * min(target_notional / max(float(broker_equity), 1.0), 1.0)
         # This cycle opens one selected entry; it is not a portfolio rebalance.
         # Passing every holding here makes the planner create zero-target SELLs for
         # unrelated symbols, which must never escape through the entry path.
@@ -1386,7 +1397,7 @@ def run_continuous_scan_cycle(
 
         planned_symbol = str(planned_order.get("symbol") or "").strip().upper()
         planned_side = str(planned_order.get("side") or "").strip().upper()
-        if planned_symbol != selected_symbol or planned_side != "BUY":
+        if planned_symbol != selected_symbol or planned_side != requested_entry_side:
             return _result(
                 status="risk_rejected",
                 execution_status="risk_rejected",
@@ -1443,12 +1454,12 @@ def run_continuous_scan_cycle(
         reward_risk_ok = "invalid_reward_risk_structure" not in quantum_rejections and "reward_risk_below_minimum" not in quantum_rejections
         risk_checks = {
             "position_size": bool(trade_value <= notional_cap_by_equity),
-            "cash": bool(float(broker_cash) >= trade_value),
+            "cash": bool(planned_side == "SELL" or float(broker_cash) >= trade_value),
             "buying_power": bool(float(broker_buying_power) >= trade_value),
             "daily_loss": bool(risk.daily_loss < float(DAILY_LOSS_LIMIT)),
-            "existing_position": bool(existing_qty <= 0 or supports_scaling),
-            "open_entry_order": not _has_open_entry_order(broker_open_orders, selected_symbol),
-            "max_open_positions": bool(_position_count(broker_positions) < int(max_open_positions) or (existing_qty > 0 and supports_scaling)),
+            "existing_position": bool(abs(existing_qty) <= 1e-8 or supports_scaling),
+            "open_entry_order": not _has_open_entry_order(broker_open_orders, selected_symbol, planned_side),
+            "max_open_positions": bool(_position_count(broker_positions) < int(max_open_positions) or (abs(existing_qty) > 1e-8 and supports_scaling)),
             "stale_data": bool(stale_data_ok),
             "liquidity": bool(liquidity_ok),
             "reward_risk": bool(reward_risk_ok),
@@ -1458,11 +1469,11 @@ def run_continuous_scan_cycle(
 
         if PAPER_VALIDATION_DUPLICATE_RUN_PROTECTION:
             strategy_fp = f"{selected_strategy.get('strategy_id')}:{selected_strategy.get('strategy_version')}"
-            execution_fingerprint = _execution_fingerprint(selected_symbol, float(planned_order.get("quantity") or 0.0), f"PAPER:{strategy_fp}")
+            execution_fingerprint = _execution_fingerprint(selected_symbol, float(planned_order.get("quantity") or 0.0), f"PAPER:{planned_side}:{strategy_fp}")
             existing = execution_repo.fetch_latest_submitting_run_by_execution_fingerprint(execution_fingerprint)
             risk_checks["duplicate_protection"] = existing is None
         else:
-            execution_fingerprint = _execution_fingerprint(selected_symbol, float(planned_order.get("quantity") or 0.0), "PAPER")
+            execution_fingerprint = _execution_fingerprint(selected_symbol, float(planned_order.get("quantity") or 0.0), f"PAPER:{planned_side}")
             existing = None
 
         if not risk.approve_trade(max(float(broker_equity), 1.0), trade_value, current_loss=0.0) or not all(risk_checks.values()):
@@ -1509,7 +1520,7 @@ def run_continuous_scan_cycle(
                     "selected": selected_candidate,
                     "strategy_signals": strategy_signals,
                     "selected_strategy": selected_strategy,
-                    "paper_order": {"symbol": selected_symbol, "side": "BUY", "quantity": planned_order.get("quantity"), "notional": trade_value, "submission_status": "rejected"},
+                    "paper_order": {"symbol": selected_symbol, "side": planned_side, "quantity": planned_order.get("quantity"), "notional": trade_value, "submission_status": "rejected"},
                     "execution_counters": {
                         "orders_recommended": 1,
                         "orders_submission_requested": 0,
@@ -1526,7 +1537,7 @@ def run_continuous_scan_cycle(
         client_order_id = str(_execution_fingerprint(
             selected_symbol,
             float(planned_order.get("quantity") or 0.0),
-            f"{selected_strategy.get('strategy_id')}:{started_dt.date().isoformat()}"
+            f"{planned_side}:{selected_strategy.get('strategy_id')}:{started_dt.date().isoformat()}"
         ))
         client_order_id = f"qtb-{client_order_id}"
 
@@ -1771,7 +1782,12 @@ def run_continuous_scan_cycle(
                 "quantity": float((expected_positions.get(planned_symbol) or {}).get("quantity") or 0.0) + signed_filled_quantity,
                 "avg_price": fill_price,
             }
-            if planned_side == "BUY" and float((broker_pre_positions.get(planned_symbol) or {}).get("quantity") or 0.0) <= 0:
+            pre_quantity = float((broker_pre_positions.get(planned_symbol) or {}).get("quantity") or 0.0)
+            opened_new_position = (
+                (planned_side == "BUY" and pre_quantity >= -1e-8)
+                or (planned_side == "SELL" and pre_quantity <= 1e-8)
+            )
+            if opened_new_position:
                 _emit_notification(
                     notification_callback,
                     event_type="position_opened",
@@ -1782,6 +1798,7 @@ def run_continuous_scan_cycle(
                         "run_id": cycle_run_id,
                         "dry_run": bool(dry_run),
                         "symbol": selected_symbol,
+                        "side": "SHORT" if planned_side == "SELL" else "LONG",
                         "strategy_id": str(selected_strategy.get("strategy_id") or ""),
                         "status": "position_opened",
                     },

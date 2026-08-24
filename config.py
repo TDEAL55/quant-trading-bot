@@ -87,6 +87,10 @@ PAPER_TUNING_PROFILE = resolve_paper_tuning_profile()
 PAPER_TUNING_PROFILE_ENABLED = bool(PAPER_TUNING_PROFILE["enabled"])
 PAPER_BROKER_BACKEND = os.getenv("PAPER_BROKER_BACKEND", "SIMULATED").strip().upper()
 ALPACA_ORDER_SUBMISSION_ENABLED = str(os.getenv("ALPACA_ORDER_SUBMISSION_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
+PAPER_ALLOW_SHORT_SELLING = bool(
+    TRADING_MODE == "PAPER"
+    and str(os.getenv("PAPER_ALLOW_SHORT_SELLING", "false")).strip().lower() in {"1", "true", "yes", "on"}
+)
 PAPER_API_BASE_URL = os.getenv("PAPER_API_BASE_URL", "")
 PAPER_API_USERNAME = os.getenv("PAPER_API_USERNAME", "")
 PAPER_API_PASSWORD = os.getenv("PAPER_API_PASSWORD", "")
@@ -236,6 +240,9 @@ SCANNER_MIN_RISK_QUALITY = float(os.getenv("SCANNER_MIN_RISK_QUALITY", "45"))
 SCANNER_MIN_VOLATILITY_SCORE = float(os.getenv("SCANNER_MIN_VOLATILITY_SCORE", "35"))
 SCANNER_ALLOWED_SIGNALS = _parse_csv_env(os.getenv("SCANNER_ALLOWED_SIGNALS", "BUY,STRONG_BUY"))
 SCANNER_BLOCKED_REGIMES = _parse_csv_env(os.getenv("SCANNER_BLOCKED_REGIMES", "strong_bear,high_volatility_risk_off"))
+SCANNER_SHORT_MAX_SCORE = float(os.getenv("SCANNER_SHORT_MAX_SCORE", "40"))
+SCANNER_SHORT_MIN_CONFIDENCE = float(os.getenv("SCANNER_SHORT_MIN_CONFIDENCE", "45"))
+SCANNER_SHORT_ALLOWED_SIGNALS = _parse_csv_env(os.getenv("SCANNER_SHORT_ALLOWED_SIGNALS", "REDUCE,EXIT"))
 
 SCANNER_MAX_WORKERS = int(os.getenv("SCANNER_MAX_WORKERS", "5"))
 SCANNER_SYMBOL_TIMEOUT_SECONDS = int(os.getenv("SCANNER_SYMBOL_TIMEOUT_SECONDS", "45"))

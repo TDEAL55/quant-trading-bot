@@ -62,6 +62,57 @@ def test_scan_symbol_rejected(monkeypatch):
     assert not result["eligible"]
 
 
+def test_scan_symbol_can_emit_an_intentional_short_candidate(monkeypatch):
+    monkeypatch.setattr(market_scanner, "PAPER_ALLOW_SHORT_SELLING", True)
+    monkeypatch.setattr(market_scanner, "generate_strategy_result", lambda **kwargs: {
+        "overall_score": 25.0,
+        "confidence": 70.0,
+        "signal": "EXIT",
+        "regime": "strong_bear",
+        "component_scores": {"risk_quality": 60.0, "volatility": 60.0, "trend": 20.0},
+        "reasons": ["bearish trend"],
+        "warnings": [],
+        "data_quality": {"history_sufficient": True},
+    })
+    monkeypatch.setattr(market_scanner, "calculate_quantum_score", lambda **kwargs: {
+        "final_score": 25.0,
+        "market_regime": "bear",
+        "normalized_component_scores": {
+            "trend_strength": 20.0,
+            "momentum_quality": 20.0,
+            "relative_strength": 25.0,
+            "liquidity_quality": 80.0,
+            "volatility_quality": 60.0,
+            "risk_reward_quality": 20.0,
+        },
+        "warnings": [],
+        "rejection_reasons": ["reward_risk_below_minimum"],
+        "data_quality_status": "ok",
+        "score_version": "quantum-test",
+    })
+    monkeypatch.setattr(market_scanner, "compute_strategy_specific_scores", lambda payload: {
+        "bearish_trend_short_v1": {
+            "strategy_id": "bearish_trend_short_v1",
+            "strategy_score": 82.0,
+            "confidence": 76.0,
+            "eligible": True,
+            "component_scores": {"trend_weakness": 80.0},
+        }
+    })
+
+    result = market_scanner.scan_symbol(
+        {"symbol": "BEAR", "company_name": "Bear", "sector": "Technology", "industry": "Software"},
+        benchmark_history=_frame(),
+        data_loader=lambda *args, **kwargs: _frame(),
+    )
+
+    assert result["status"] == "scored"
+    assert result["eligible"] is True
+    assert result["trade_side"] == "SELL"
+    assert result["entry_signal"] == "SELL"
+    assert result["directional_score"] == 82.0
+
+
 def test_scan_universe_continues_after_symbol_failure(monkeypatch):
     calls = {"count": 0}
 

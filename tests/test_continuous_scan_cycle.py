@@ -32,9 +32,10 @@ class _Broker:
     def submit_order(self, side, ticker, quantity, **kwargs):
         self.submissions.append((side, ticker, quantity))
         filled = float(quantity)
-        self._positions[str(ticker).upper()] = {"quantity": filled, "avg_price": 100.0}
-        self._buying_power -= filled * 100.0
-        return {"status": "filled", "order_id": f"ord-{ticker}", "filled_quantity": filled, "average_fill_price": 100.0}
+        signed = filled if str(side).lower() == "buy" else -filled
+        self._positions[str(ticker).upper()] = {"quantity": signed, "avg_price": 100.0}
+        self._buying_power -= signed * 100.0
+        return {"status": "filled", "order_id": f"ord-{ticker}", "side": side, "symbol": ticker, "filled_quantity": filled, "average_fill_price": 100.0}
 
 
 class _Repo:
@@ -150,6 +151,63 @@ def test_continuous_scan_cycle_completes_with_one_order(monkeypatch):
     assert scan_persist_calls
     assert repo.saved is not None
     assert repo.closed is True
+
+
+def test_continuous_scan_cycle_opens_and_reconciles_an_intentional_short(monkeypatch):
+    monkeypatch.setattr("continuous_scan_cycle.PAPER_EXECUTION_ENABLED", True)
+    monkeypatch.setattr("continuous_scan_cycle.PAPER_ALLOW_SHORT_SELLING", True)
+    monkeypatch.setattr("continuous_scan_cycle.CONTROLLED_PAPER_VALIDATION", False)
+    monkeypatch.setattr("continuous_scan_cycle.MAX_VALIDATION_ORDERS", 1)
+    monkeypatch.setattr("continuous_scan_cycle.MAX_VALIDATION_ORDER_NOTIONAL", 5000.0)
+    monkeypatch.setattr("continuous_scan_cycle.evaluate_all_strategies", lambda candidate: [
+        {
+            "symbol": candidate["symbol"],
+            "signal": "SELL",
+            "strategy_id": "bearish_trend_short_v1",
+            "strategy_version": "1.0.0",
+            "strategy_score": 82.0,
+            "confidence": 76.0,
+            "requested_risk_allocation": 1.0,
+            "supports_scaling": False,
+        }
+    ])
+
+    broker = _Broker()
+    repo = _Repo()
+    result = run_continuous_scan_cycle(
+        database_url="sqlite:///unused.db",
+        config_loader=_config_loader,
+        now_provider=lambda: datetime(2026, 7, 22, 10, 0, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=lambda universe: _scan_payload(symbol="BEAR", price=100.0),
+        shortlist_runner=lambda *args, **kwargs: {
+            "selected": [
+                {
+                    "rank": 1,
+                    "symbol": "BEAR",
+                    "score": 25.0,
+                    "confidence": 76.0,
+                    "trade_side": "SELL",
+                    "suggested_paper_notional": 1000.0,
+                    "suggested_max_allocation_percent": 20.0,
+                }
+            ],
+            "rejected": [],
+            "portfolio_warnings": [],
+            "selection_summary": {"selected_count": 1},
+        },
+        scan_persistor=lambda **kwargs: {"storage": "database", "run_id": kwargs["run_payload"]["run_id"]},
+        execution_repo_factory=lambda **kwargs: repo,
+        positions_loader=_positions_loader,
+        universe_loader=lambda: [{"symbol": "BEAR", "company_name": "Bear", "sector": "Technology", "industry": "Software"}],
+        persist=True,
+    )
+
+    assert result.execution_status == "completed"
+    assert result.execution["paper_order"]["side"] == "SELL"
+    assert broker.submissions[0][0] == "sell"
+    assert broker.get_positions()["BEAR"]["quantity"] == -5.0
+    assert result.execution["reconciliation"]["reconciliation_status"] == "matched"
 
 
 def test_entry_cycle_never_sells_an_unrelated_existing_position(monkeypatch):

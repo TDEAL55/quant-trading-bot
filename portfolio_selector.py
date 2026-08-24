@@ -76,6 +76,7 @@ def build_portfolio_shortlist(
     for candidate in ranked_candidates[: max(max_candidates, 0)]:
         symbol = str(candidate.get("symbol", "")).upper()
         sector = str(candidate.get("sector") or "Unknown")
+        trade_side = str(candidate.get("trade_side") or "BUY").strip().upper()
         quantum = dict(candidate.get("quantum_score") or {})
         quantum_rejections = set(str(reason) for reason in list(quantum.get("rejection_reasons") or []))
         strategy_scores = dict(candidate.get("strategy_specific_scores") or {})
@@ -103,7 +104,9 @@ def build_portfolio_shortlist(
         if "average_dollar_volume_below_minimum" in quantum_rejections or "minimum_price_check_failed" in quantum_rejections:
             rejected.append({"symbol": symbol, "reason": "liquidity/price guardrail failed", "rank": candidate.get("rank")})
             continue
-        if "invalid_reward_risk_structure" in quantum_rejections or "reward_risk_below_minimum" in quantum_rejections:
+        if trade_side != "SELL" and (
+            "invalid_reward_risk_structure" in quantum_rejections or "reward_risk_below_minimum" in quantum_rejections
+        ):
             rejected.append({"symbol": symbol, "reason": "reward/risk guardrail failed", "rank": candidate.get("rank")})
             continue
         if not eligible_strategies:
@@ -121,12 +124,18 @@ def build_portfolio_shortlist(
             rejected.append({"symbol": symbol, "reason": "sector allocation limit reached", "rank": candidate.get("rank")})
             continue
 
-        suggested_notional = min(deployable_cash, total_value * (proposed_symbol_alloc / 100.0)) if total_value > 0 else 0.0
+        allocation_notional = total_value * (proposed_symbol_alloc / 100.0) if total_value > 0 else 0.0
+        suggested_notional = (
+            allocation_notional
+            if trade_side == "SELL"
+            else min(deployable_cash, allocation_notional)
+        )
         if suggested_notional <= 0:
             rejected.append({"symbol": symbol, "reason": "insufficient deployable cash after reserve", "rank": candidate.get("rank")})
             continue
 
-        deployable_cash -= suggested_notional
+        if trade_side != "SELL":
+            deployable_cash -= suggested_notional
         sector_counts[sector] = current_sector_count + 1
         sector_allocations[sector] = proposed_sector_alloc
 
@@ -136,7 +145,13 @@ def build_portfolio_shortlist(
                 "symbol": symbol,
                 "sector": sector,
                 "score": float(candidate.get("overall_score") or 0.0),
+                "overall_score": float(candidate.get("overall_score") or 0.0),
+                "directional_score": float(candidate.get("directional_score") or candidate.get("overall_score") or 0.0),
                 "confidence": float(candidate.get("confidence") or 0.0),
+                "signal": str(candidate.get("signal") or "HOLD"),
+                "entry_signal": str(candidate.get("entry_signal") or candidate.get("signal") or "HOLD"),
+                "trade_side": trade_side,
+                "latest_price": float(candidate.get("latest_price") or 0.0),
                 "quantum_score": quantum,
                 "strategy_specific_scores": strategy_scores,
                 "eligible_strategy_ids": sorted(set(eligible_strategies)),
@@ -144,7 +159,7 @@ def build_portfolio_shortlist(
                 "suggested_max_allocation_percent": float(proposed_symbol_alloc),
                 "suggested_paper_notional": round(float(suggested_notional), 2),
                 "reasons_selected": [
-                    "eligible scanner candidate",
+                    "eligible short scanner candidate" if trade_side == "SELL" else "eligible long scanner candidate",
                     "passes diversification constraints",
                     "within cash reserve policy",
                 ],

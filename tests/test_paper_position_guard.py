@@ -41,3 +41,21 @@ def test_guard_fails_closed_when_price_is_missing():
 
     assert result["reviews"][0]["recommendation"] == "REVIEW_REQUIRED"
     assert result["exit_candidates"] == []
+
+
+def test_guard_reviews_short_returns_and_uses_buy_to_cover():
+    result = review_paper_positions(
+        positions={
+            "SHORT_WIN": {"quantity": -2, "avg_price": 100, "current_price": 90},
+            "SHORT_LOSS": {"quantity": -3, "avg_price": 100, "current_price": 105},
+        },
+        open_orders=[],
+        settings=PositionGuardSettings(stop_loss_percent=4, take_profit_percent=8, max_exits_per_cycle=2),
+    )
+
+    by_symbol = {row["symbol"]: row for row in result["reviews"]}
+    assert by_symbol["SHORT_WIN"]["recommendation"] == "CLOSE_TAKE_PROFIT"
+    assert by_symbol["SHORT_WIN"]["close_side"] == "BUY"
+    assert by_symbol["SHORT_WIN"]["return_percent"] == 10.0
+    assert by_symbol["SHORT_LOSS"]["recommendation"] == "CLOSE_STOP_LOSS"
+    assert by_symbol["SHORT_LOSS"]["return_percent"] == -5.0

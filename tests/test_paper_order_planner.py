@@ -54,3 +54,46 @@ def test_order_planner_respects_max_orders_and_cash_buffer():
         settings=settings,
     )
     assert len(result["orders"]) <= 1
+
+
+def test_order_planner_can_open_an_explicit_short_target():
+    settings = OrderPlannerSettings(
+        minimum_order_notional=25.0,
+        maximum_order_notional=5000.0,
+        allow_fractional=True,
+        quantity_precision=3,
+        rebalance_tolerance=0.0,
+        maximum_orders=2,
+        cash_buffer=0.0,
+        allow_short=True,
+    )
+
+    result = plan_paper_orders(
+        target_weights={"BEAR": -0.10},
+        current_positions={},
+        reference_prices={"BEAR": 50.0},
+        portfolio_value=10_000.0,
+        current_cash=5_000.0,
+        settings=settings,
+    )
+
+    order = result["orders"][0]
+    assert order["symbol"] == "BEAR"
+    assert order["side"] == "SELL"
+    assert order["quantity"] == 20.0
+    assert order["target_weight"] == -0.1
+    assert order["action"] == "short"
+
+
+def test_order_planner_rejects_negative_target_without_short_flag():
+    settings = OrderPlannerSettings(25.0, 5000.0, True, 3, 0.0, 2, 0.0)
+    result = plan_paper_orders(
+        target_weights={"BEAR": -0.10},
+        current_positions={},
+        reference_prices={"BEAR": 50.0},
+        portfolio_value=10_000.0,
+        current_cash=5_000.0,
+        settings=settings,
+    )
+    assert result["orders"] == []
+    assert result["rejections"][0]["reason"] == "short_target_not_allowed"

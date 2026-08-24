@@ -34,6 +34,7 @@ def test_strategy_plugins_emit_expected_fields_and_ids():
         "moving_average_trend_v1",
         "short_term_mean_reversion_v1",
         "volume_breakout_v1",
+        "bearish_trend_short_v1",
     }
     for row in rows:
         assert row["strategy_version"] == "1.0.0"
@@ -47,3 +48,29 @@ def test_strategy_plugins_emit_expected_fields_and_ids():
         assert "strategy_score" in row
         assert "expected_reward_risk" in row
         assert "data_quality_status" in row
+
+
+def test_bearish_strategy_emits_sell_only_for_explicit_paper_short(monkeypatch):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    monkeypatch.setenv("PAPER_ALLOW_SHORT_SELLING", "true")
+    payload = {
+        "symbol": "BEAR",
+        "latest_price": 50.0,
+        "overall_score": 25.0,
+        "confidence": 70.0,
+        "trade_side": "SELL",
+        "strategy_specific_scores": {
+            "bearish_trend_short_v1": {
+                "eligible": True,
+                "strategy_score": 82.0,
+                "confidence": 76.0,
+            }
+        },
+        "quantum_score": {"data_quality_status": "ok", "warnings": [], "rejection_reasons": []},
+    }
+
+    rows = evaluate_all_strategies(payload)
+    short_signal = next(row for row in rows if row["strategy_id"] == "bearish_trend_short_v1")
+
+    assert short_signal["signal"] == "SELL"
+    assert short_signal["stop"] > payload["latest_price"]

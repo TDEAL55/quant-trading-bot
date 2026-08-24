@@ -693,6 +693,43 @@ def compute_strategy_specific_scores(quantum_payload: dict[str, Any]) -> dict[st
             "market_regime": regime,
         }
 
+    def _build_bearish_trend_short() -> dict[str, Any]:
+        inverted = {
+            "trend_weakness": 100.0 - _component("trend_strength"),
+            "momentum_weakness": 100.0 - _component("momentum_quality"),
+            "relative_weakness": 100.0 - _component("relative_strength"),
+            "liquidity_quality": _component("liquidity_quality"),
+        }
+        weights = {
+            "trend_weakness": 0.35,
+            "momentum_weakness": 0.30,
+            "relative_weakness": 0.20,
+            "liquidity_quality": 0.15,
+        }
+        raw = sum(inverted[name] * weight for name, weight in weights.items())
+        rejections: list[str] = []
+        if inverted["trend_weakness"] < 52.0:
+            rejections.append("bearish_trend_too_weak")
+        if inverted["momentum_weakness"] < 52.0:
+            rejections.append("bearish_momentum_too_weak")
+        if inverted["liquidity_quality"] < 45.0:
+            rejections.append("liquidity_too_low")
+        if data_quality_status == "fail":
+            rejections.append("data_quality_failed")
+        return {
+            "strategy_id": "bearish_trend_short_v1",
+            "strategy_version": "1.0.0",
+            "strategy_score": round(_clamp(raw), 4),
+            "required_factors": sorted(inverted.keys()),
+            "rejection_reasons": sorted(set(rejections)),
+            "warnings": ["data quality warnings present"] if data_quality_status == "warn" else [],
+            "eligible": len(rejections) == 0,
+            "confidence": round(_clamp((raw * 0.85) + 5.0), 4),
+            "market_regime": regime,
+            "direction": "SHORT",
+            "component_scores": {name: round(value, 4) for name, value in inverted.items()},
+        }
+
     return {
         "trend_momentum_v1": _build(
             "trend_momentum_v1",
@@ -753,6 +790,7 @@ def compute_strategy_specific_scores(quantum_payload: dict[str, Any]) -> dict[st
             ],
             confidence_bias=7.0,
         ),
+        "bearish_trend_short_v1": _build_bearish_trend_short(),
     }
 
 

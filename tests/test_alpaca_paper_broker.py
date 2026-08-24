@@ -231,6 +231,30 @@ def test_sell_orders_cannot_create_or_increase_a_short(monkeypatch):
     assert client.submit_calls == 0
 
 
+def test_paper_short_flag_allows_short_submission(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+    monkeypatch.setenv("ALPACA_PAPER_BASE_URL", ALPACA_PAPER_ENDPOINT)
+    monkeypatch.setenv("ALPACA_ORDER_SUBMISSION_ENABLED", "true")
+    monkeypatch.setenv("PAPER_ALLOW_SHORT_SELLING", "true")
+    client = _TradingClient()
+    broker = AlpacaPaperBroker(mode="PAPER", trading_client=client)
+
+    order = broker.submit_order(side="sell", ticker="MSFT", quantity=1, wait_for_fill=False)
+
+    assert order["status"] == "filled"
+    assert client.submit_calls == 1
+
+
+def test_short_flag_never_enables_live_mode(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+    monkeypatch.setenv("PAPER_ALLOW_SHORT_SELLING", "true")
+
+    with pytest.raises(RuntimeError, match="LIVE mode is blocked"):
+        AlpacaPaperBroker(mode="LIVE", trading_client=_TradingClient())
+
+
 def test_order_history_is_normalized_and_sorted(monkeypatch):
     monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
     monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
