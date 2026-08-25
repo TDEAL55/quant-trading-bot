@@ -594,9 +594,10 @@ def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch)
 
     dashboard_app.render_dashboard(database_url="postgresql://example")
 
-    nav_calls = [call for call in fake_st._calls if call[0] == "selectbox" and call[1] == "Navigate"]
+    nav_calls = [call for call in fake_st._calls if call[0] == "radio" and call[1] == "Navigate"]
     assert nav_calls
-    assert nav_calls[0][2] == ["Command Center", "Portfolio", "Orders", "Crypto", "Options"]
+    assert nav_calls[0][2] == ["Overview", "Portfolio", "Orders", "Crypto", "Options"]
+    assert nav_calls[0][3] is True
     assert all("trade" not in str(page).lower() for page in nav_calls[0][2])
 
     build_markers = [call for call in fake_st._calls if call[0] == "markdown" and dashboard_app.UI_BUILD_LABEL in call[1]]

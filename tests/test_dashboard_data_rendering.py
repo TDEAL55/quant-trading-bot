@@ -273,4 +273,4 @@ def test_positive_and_negative_pl_formatting():
     view = dashboard_app.build_dashboard_view_model(history_payload)
     assert view["today_pl"] == -50.0
     assert view["total_pl"] == -50.0
-    assert dashboard_app.format_currency(view["today_pl"]) == "$-50.00"
+    assert dashboard_app.format_currency(view["today_pl"]) == "-$50.00"

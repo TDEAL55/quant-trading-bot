@@ -54,20 +54,20 @@ from walk_forward_data import fetch_walk_forward_dashboard_payload
 
 MAX_DAILY_ORDERS = 3
 MAX_DAILY_SUBMITTED_NOTIONAL = 30.0
-DASHBOARD_VERSION = "v3.0"
-UI_BUILD_LABEL = "PAPER COMMAND CENTER"
+DASHBOARD_VERSION = "v4.0"
+UI_BUILD_LABEL = "PAPER TRADING DESK"
 EASTERN_TZ = ZoneInfo("America/New_York")
 MARKET_OPEN_ET = time(9, 30)
 MARKET_CLOSE_ET = time(16, 0)
 
 STATUS_COLORS = {
-    "healthy": "#35e6c2",
-    "warning": "#ffc857",
-    "error": "#ff5f8f",
-    "neutral": "#b7a7ff",
-    "buy": "#35e6c2",
-    "hold": "#b8bad0",
-    "sell": "#ff5f8f",
+    "healthy": "#b6f542",
+    "warning": "#ffca58",
+    "error": "#ff5d73",
+    "neutral": "#a9b0bb",
+    "buy": "#b6f542",
+    "hold": "#a9b0bb",
+    "sell": "#ff5d73",
 }
 
 THEMES = {
@@ -105,11 +105,11 @@ THEMES = {
     },
 }
 
-PRIMARY_PAGE_OPTIONS = ["Command Center", "Portfolio", "Orders", "Crypto", "Options"]
-PAGE_OPTIONS = ["Command Center", "Crypto", "Options", "Portfolio", "Orders", "Risk", "Operations", "Strategy", "Performance", "Alerts", "Research", "LIVE Readiness", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
+PRIMARY_PAGE_OPTIONS = ["Overview", "Portfolio", "Orders", "Crypto", "Options"]
+PAGE_OPTIONS = ["Overview", "Crypto", "Options", "Portfolio", "Orders", "Risk", "Operations", "Strategy", "Performance", "Alerts", "Research", "LIVE Readiness", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
 NAVIGATION_SCOPE_OPTIONS = ["Essentials", "All pages"]
 MODE_OPTIONS = ["Standard Mode", "Focus Mode", "Presentation Mode"]
-THEME_OPTIONS = ["Aurora", "Midnight Blue", "Black Terminal", "Arctic Glass"]
+THEME_OPTIONS = ["Studio"]
 AUTO_REFRESH_OPTIONS = ["Off", "30 seconds", "60 seconds", "5 minutes"]
 TIMEFRAME_OPTIONS = ["1D", "5D", "1M", "3M"]
 
@@ -117,12 +117,12 @@ TIMEFRAME_OPTIONS = ["1D", "5D", "1M", "3M"]
 def initialize_dashboard_session_state() -> None:
     defaults = {
         "dashboard_authenticated": False,
-        "dashboard_page": "Command Center",
-        "dashboard_page_selector": "Command Center",
+        "dashboard_page": "Overview",
+        "dashboard_page_selector": "Overview",
         "dashboard_navigation_scope": "Essentials",
         "dashboard_navigation_scope_selector": "Essentials",
-        "dashboard_theme": "Aurora",
-        "dashboard_theme_selector": "Aurora",
+        "dashboard_theme": "Studio",
+        "dashboard_theme_selector": "Studio",
         "dashboard_mode": "Standard Mode",
         "dashboard_mode_selector": "Standard Mode",
         "dashboard_focus_mode": False,
@@ -131,8 +131,8 @@ def initialize_dashboard_session_state() -> None:
         "dashboard_timeframe_selector": "1D",
         "dashboard_alert_severity": "All",
         "dashboard_acknowledged_alerts": [],
-        "dashboard_auto_refresh": "Off",
-        "dashboard_auto_refresh_selector": "Off",
+        "dashboard_auto_refresh": "30 seconds",
+        "dashboard_auto_refresh_selector": "30 seconds",
         "dashboard_last_manual_refresh_status": "",
         "dashboard_last_refresh": None,
         "dashboard_last_db_refresh": None,
@@ -366,7 +366,8 @@ def format_currency(value, default="$0.00"):
         number = float(value)
     except (TypeError, ValueError):
         return default
-    return f"${number:,.2f}"
+    sign = "-" if number < 0 else ""
+    return f"{sign}${abs(number):,.2f}"
 
 
 def format_percent(value, default="0.00%"):
@@ -1500,34 +1501,43 @@ def build_compact_dashboard_summary(payload, view):
         outcome = _safe_text(view.get("trade_or_skip_reason"), "Waiting for the next scan.")
 
     position_rows = []
-    for position in positions:
+    ordered_positions = sorted(
+        positions,
+        key=lambda row: abs(_as_float((row or {}).get("market_value"), 0.0)),
+        reverse=True,
+    )
+    for position in ordered_positions:
         signed_quantity = _as_float(position.get("quantity"), 0.0)
         average_entry = _as_float(position.get("average_entry_price"), 0.0)
         unrealized_pl = _as_float(position.get("unrealized_pl"), 0.0)
         cost_basis = abs(signed_quantity * average_entry)
+        asset_class = str(position.get("asset_class") or "").strip().lower()
+        asset_label = "Crypto" if "crypto" in asset_class else "Option" if "option" in asset_class else "Stock"
         position_rows.append(
             {
                 "Symbol": _safe_text(position.get("symbol"), "N/A"),
-                "Asset": friendly_status_text(position.get("asset_class"), "Stock"),
+                "Asset": asset_label,
                 "Direction": "SHORT" if signed_quantity < 0 else "LONG",
                 "Quantity": round(abs(signed_quantity), 8),
                 "Avg entry": format_currency(position.get("average_entry_price")),
                 "Last": format_currency(position.get("current_price")),
                 "Exposure": format_currency(abs(_as_float(position.get("market_value"), 0.0))),
-                "Unrealized P&L": format_currency(unrealized_pl),
+                "Open P&L": format_currency(unrealized_pl),
                 "Return": format_percent((unrealized_pl / cost_basis) * 100.0 if cost_basis > 0 else 0.0, "0.00%"),
             }
         )
 
     order_rows = []
-    for order in recent_orders[:5]:
+    for order in recent_orders[:10]:
         side = str(order.get("side") or order.get("signal") or "").strip().upper()
         quantity = abs(_as_float(order.get("filled_quantity") or order.get("quantity"), 0.0))
+        asset_class = str(order.get("asset_class") or "").strip().lower()
+        asset_label = "Crypto" if "crypto" in asset_class else "Option" if "option" in asset_class else "Stock"
         order_rows.append(
             {
                 "Time": format_timestamp_eastern(order.get("event_timestamp")),
                 "Symbol": _safe_text(order.get("symbol"), "N/A"),
-                "Asset": friendly_status_text(order.get("asset_class"), "Stock"),
+                "Asset": asset_label,
                 "Side": side if side in {"BUY", "SELL"} else normalize_signal(side),
                 "Quantity": round(quantity, 8),
                 "Fill": format_currency(order.get("average_fill_price")),
@@ -1743,7 +1753,7 @@ def clear_dashboard_cache():
         st.cache_data.clear()
 
 
-def apply_dashboard_css(theme_name="Aurora"):
+def apply_dashboard_css(theme_name="Studio"):
     palette = build_palette(theme_name)
     st.markdown(
         f"""
@@ -2525,6 +2535,313 @@ def apply_dashboard_css(theme_name="Aurora"):
             0% {{ transform: translateX(0); }}
             100% {{ transform: translateX(-35%); }}
         }}
+
+        /* v4 Studio desk: intentionally replaces the previous glass-card shell. */
+        html, body, [class*="css"] {{
+            font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }}
+        .stApp {{
+            background: #0a0b0d;
+            background-image: linear-gradient(rgba(255,255,255,0.014) 1px, transparent 1px);
+            background-size: 100% 42px;
+        }}
+        [data-testid="stSidebar"], [data-testid="collapsedControl"] {{ display: none !important; }}
+        [data-testid="stHeader"] {{ display: none !important; }}
+        .main .block-container {{
+            max-width: 1380px;
+            padding: 0.65rem 1.25rem 2.5rem;
+        }}
+        .dq-shell-header {{
+            background: #121417;
+            border: 1px solid rgba(245, 247, 242, 0.09);
+            border-radius: 12px;
+            padding: 0;
+            margin: 0 0 0.35rem;
+            box-shadow: none;
+            overflow: hidden;
+        }}
+        .dq-shell-header::before {{ display: none; }}
+        .dq-desk-topline {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            padding: 0.78rem 0.9rem;
+            border-bottom: 1px solid rgba(245, 247, 242, 0.08);
+        }}
+        .dq-brand-lockup {{ display: flex; align-items: center; gap: 0.65rem; }}
+        .dq-brand-mark {{
+            display: grid;
+            place-items: center;
+            width: 34px;
+            height: 34px;
+            border-radius: 8px;
+            background: #b6f542;
+            color: #0a0b0d;
+            font-size: 0.72rem;
+            font-weight: 950;
+            letter-spacing: -0.02rem;
+        }}
+        .dq-brand-name {{
+            display: block;
+            color: #f4f6f1;
+            font-size: 0.9rem;
+            font-weight: 850;
+            letter-spacing: -0.01rem;
+        }}
+        .dq-brand-mode {{
+            display: block;
+            color: #747b86;
+            font-size: 0.66rem;
+            margin-top: 0.05rem;
+            text-transform: uppercase;
+            letter-spacing: 0.075rem;
+        }}
+        .dq-desk-statuses {{ display: flex; align-items: center; gap: 0.45rem; }}
+        .dq-desk-pill {{
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.28rem 0.5rem;
+            border: 1px solid rgba(245, 247, 242, 0.09);
+            border-radius: 6px;
+            color: #9aa1ac;
+            font-size: 0.63rem;
+            font-weight: 800;
+            letter-spacing: 0.045rem;
+        }}
+        .dq-desk-pill i, .dq-engine-state i {{
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            display: inline-block;
+            background: #747b86;
+        }}
+        .dq-desk-pill.live i, .dq-engine-state.on i {{ background: #b6f542; box-shadow: 0 0 0 3px rgba(182,245,66,0.1); }}
+        .dq-desk-pill.idle i, .dq-engine-state.off i {{ background: #ffca58; }}
+        .dq-desk-clock {{
+            color: #f4f6f1;
+            font-variant-numeric: tabular-nums;
+            font-size: 0.72rem;
+            font-weight: 750;
+            padding-left: 0.25rem;
+        }}
+        .dq-desk-hero {{
+            display: grid;
+            grid-template-columns: minmax(260px, 1.1fr) minmax(420px, 1fr);
+            align-items: end;
+            gap: 2rem;
+            padding: 1.15rem 1.35rem 1.05rem;
+            background: linear-gradient(105deg, #16191c 0%, #121417 68%);
+        }}
+        .dq-eyebrow {{
+            color: #747b86;
+            font-size: 0.64rem;
+            font-weight: 850;
+            letter-spacing: 0.12rem;
+        }}
+        .dq-equity-value {{
+            color: #f4f6f1;
+            font-size: clamp(2rem, 4vw, 2.85rem);
+            line-height: 1;
+            font-weight: 760;
+            letter-spacing: -0.13rem;
+            margin: 0.45rem 0 0.5rem;
+            font-variant-numeric: tabular-nums;
+        }}
+        .dq-equity-change {{ font-size: 0.78rem; font-weight: 800; }}
+        .dq-equity-change.positive {{ color: #b6f542; }}
+        .dq-equity-change.negative {{ color: #ff5d73; }}
+        .dq-equity-change.flat {{ color: #9aa1ac; }}
+        .dq-hero-facts {{
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            border-top: 1px solid rgba(245,247,242,0.09);
+        }}
+        .dq-hero-facts > div {{ padding: 0.7rem 0.8rem 0 0; min-width: 0; }}
+        .dq-hero-facts span {{
+            display: block;
+            color: #747b86;
+            font-size: 0.63rem;
+            text-transform: uppercase;
+            letter-spacing: 0.055rem;
+        }}
+        .dq-hero-facts strong {{
+            display: block;
+            color: #f4f6f1;
+            margin-top: 0.3rem;
+            font-size: 0.85rem;
+            font-weight: 760;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+        .dq-refresh-note {{ color: #747b86; font-size: 0.65rem; padding: 0.4rem 0.1rem; }}
+        .st-key-dashboard_page_selector {{ width: 100% !important; }}
+        div[data-testid="stRadio"] {{ width: 100% !important; margin: 0.2rem 0 0.85rem; }}
+        div[data-testid="stRadio"] > div {{ width: 100% !important; }}
+        div[data-testid="stRadio"] > label {{ display: none; }}
+        div[role="radiogroup"] {{
+            display: flex;
+            width: 100% !important;
+            gap: 0.25rem;
+            padding: 0.28rem;
+            background: #121417;
+            border: 1px solid rgba(245,247,242,0.09);
+            border-radius: 9px;
+        }}
+        div[role="radiogroup"] label {{
+            flex: 1;
+            justify-content: center;
+            min-height: 34px;
+            padding: 0.25rem 0.55rem;
+            border-radius: 6px;
+        }}
+        div[role="radiogroup"] label:has(input:checked) {{ background: #25292e; }}
+        div[role="radiogroup"] label p {{ color: #a9b0bb !important; font-size: 0.73rem !important; font-weight: 750; }}
+        div[role="radiogroup"] label:has(input:checked) p {{ color: #f4f6f1 !important; }}
+        div[role="radiogroup"] [data-testid="stMarkdownContainer"] {{ margin: 0; }}
+        label[data-testid="stRadioOption"] > div > div > div:first-child {{ display: none !important; }}
+        .stButton > button {{
+            width: 100%;
+            border-radius: 7px;
+            border: 1px solid rgba(245,247,242,0.11);
+            background: #17191d;
+            color: #c9ced6;
+            box-shadow: none;
+        }}
+        .stButton > button:hover {{ border-color: rgba(182,245,66,0.48); color: #f4f6f1; }}
+        .dq-section-intro {{
+            display: flex;
+            align-items: end;
+            justify-content: space-between;
+            gap: 1rem;
+            margin: 1.15rem 0 0.55rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid rgba(245,247,242,0.07);
+        }}
+        .dq-section-intro > div {{ display: flex; align-items: center; gap: 0.7rem; }}
+        .dq-section-index {{
+            display: grid;
+            place-items: center;
+            width: 28px;
+            height: 28px;
+            border-radius: 7px;
+            background: #1b1e22;
+            color: #b6f542;
+            font-size: 0.63rem;
+            font-weight: 900;
+            font-variant-numeric: tabular-nums;
+        }}
+        .dq-section-title {{ color: #f4f6f1; font-size: 0.9rem; font-weight: 820; letter-spacing: -0.01rem; }}
+        .dq-section-copy {{ color: #747b86; font-size: 0.68rem; margin-top: 0.06rem; }}
+        .dq-count-badge {{
+            min-width: 26px;
+            padding: 0.18rem 0.42rem;
+            border-radius: 999px;
+            background: #1b1e22;
+            color: #a9b0bb;
+            text-align: center;
+            font-size: 0.65rem;
+            font-weight: 850;
+        }}
+        .dq-engine-grid {{ grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.55rem; margin: 0 0 0.45rem; }}
+        .dq-engine-card {{
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            align-items: center;
+            gap: 0.7rem;
+            min-height: 68px;
+            padding: 0.72rem;
+            background: #121417;
+            border: 1px solid rgba(245,247,242,0.09);
+            border-radius: 9px;
+        }}
+        .dq-engine-symbol {{
+            display: grid;
+            place-items: center;
+            width: 34px;
+            height: 34px;
+            border-radius: 8px;
+            background: #1d2024;
+            color: #b6f542;
+            font-size: 0.64rem;
+            font-weight: 900;
+        }}
+        .dq-engine-name {{ color: #f4f6f1; font-size: 0.8rem; font-weight: 820; }}
+        .dq-engine-market {{ color: #747b86; font-size: 0.66rem; margin-top: 0.12rem; }}
+        .dq-engine-state {{ display: flex; align-items: center; gap: 0.35rem; font-size: 0.65rem; font-weight: 820; }}
+        .dq-engine-state.on {{ color: #b6f542; }}
+        .dq-engine-state.off {{ color: #ffca58; }}
+        .dq-metric-card {{
+            position: relative;
+            min-height: 98px;
+            padding: 0.82rem 0.85rem 0.72rem;
+            margin-bottom: 0.35rem;
+            background: #121417;
+            border: 1px solid rgba(245,247,242,0.09);
+            border-radius: 9px;
+            box-shadow: none;
+            overflow: hidden;
+        }}
+        .dq-metric-card:hover {{ transform: none; border-color: rgba(245,247,242,0.16); box-shadow: none; }}
+        .dq-metric-label {{ color: #747b86; font-size: 0.67rem; font-weight: 760; letter-spacing: 0.01rem; }}
+        .dq-metric-value {{ margin-top: 0.5rem; font-size: 1.38rem; font-weight: 760; letter-spacing: -0.035rem; font-variant-numeric: tabular-nums; }}
+        .dq-metric-rule {{ position: absolute; left: 0; bottom: 0; width: 100%; height: 2px; opacity: 0.72; }}
+        .dq-activity-line {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.35rem;
+            margin: 1rem 0 0;
+            padding: 0.62rem 0.72rem;
+            background: transparent;
+            border: 1px solid rgba(245,247,242,0.07);
+            border-left: 1px solid rgba(245,247,242,0.07);
+            border-radius: 8px;
+            color: #747b86;
+            font-size: 0.68rem;
+        }}
+        .dq-activity-line span {{ color: #9aa1ac; font-weight: 760; }}
+        .dq-activity-line strong {{ color: #f4f6f1; }}
+        div[data-testid="stDataFrame"] {{
+            border: 1px solid rgba(245,247,242,0.09);
+            border-radius: 9px;
+            overflow: hidden;
+            box-shadow: none;
+            background: #121417;
+        }}
+        .dq-empty-state {{
+            min-height: 84px;
+            display: grid;
+            place-items: center;
+            border-radius: 9px;
+            border: 1px dashed rgba(245,247,242,0.12);
+            background: #0f1113;
+            color: #747b86;
+            font-size: 0.74rem;
+        }}
+        .dq-short-alert, .dq-alert {{ border-radius: 8px; box-shadow: none; }}
+        .dq-panel, .dq-chart-frame, .dq-card, .dq-narrative-card, .dq-ops-node, .dq-matrix-row {{
+            background: #121417;
+            border-color: rgba(245,247,242,0.09);
+            border-radius: 9px;
+            box-shadow: none;
+        }}
+        .dq-section-tag {{ color: #b6f542; }}
+        @media (max-width: 768px) {{
+            .main .block-container {{ padding: 0.55rem 0.65rem 1.5rem; }}
+            .dq-desk-topline {{ align-items: flex-start; }}
+            .dq-desk-statuses {{ flex-wrap: wrap; justify-content: flex-end; }}
+            .dq-desk-clock {{ display: none; }}
+            .dq-desk-hero {{ grid-template-columns: 1fr; gap: 1rem; padding: 1.1rem; }}
+            .dq-equity-value {{ font-size: 2.35rem; }}
+            .dq-hero-facts {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+            .dq-hero-facts > div:last-child {{ display: none; }}
+            div[role="radiogroup"] {{ overflow-x: auto; justify-content: flex-start; }}
+            div[role="radiogroup"] label {{ flex: 0 0 auto; }}
+            .dq-engine-grid {{ grid-template-columns: 1fr; }}
+            .dq-section-copy {{ display: none; }}
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -2544,23 +2861,12 @@ def _direction_arrow(current_value, previous_value):
 
 def _metric_card(container, label, value, style_key="neutral", trend_arrow=""):
     color = STATUS_COLORS.get(style_key, STATUS_COLORS["neutral"])
-    icon_map = {
-        "healthy": "▲",
-        "warning": "●",
-        "error": "!",
-        "neutral": "◉",
-        "buy": "▲",
-        "hold": "•",
-        "sell": "▼",
-        "armed": "◉",
-        "active": "◆",
-        "triggered": "!",
-        "unavailable": "—",
-    }
-    icon = icon_map.get(str(style_key or "").lower(), "◉")
     arrow_html = f" <span style='font-size:0.95rem;'>{trend_arrow}</span>" if trend_arrow else ""
     container.markdown(
-        f"<div class='dq-metric-card dq-status-{str(style_key or 'neutral').lower()}'><div class='dq-metric-top'><span class='dq-metric-icon' style='color:{color};'>{icon}</span><span class='dq-metric-label'>{label}</span></div><div class='dq-metric-value' style='color:{color};'>{value}{arrow_html}</div></div>",
+        f"<div class='dq-metric-card dq-status-{str(style_key or 'neutral').lower()}'>"
+        f"<div class='dq-metric-label'>{label}</div>"
+        f"<div class='dq-metric-value' style='color:{color};'>{value}{arrow_html}</div>"
+        f"<div class='dq-metric-rule' style='background:{color};'></div></div>",
         unsafe_allow_html=True,
     )
 
@@ -2611,24 +2917,34 @@ def render_header(payload, view):
     refresh_parts = format_compact_timestamp(st.session_state.get("dashboard_last_refresh"))
     worker_parts = format_compact_timestamp((payload.get("latest_run") or {}).get("run_timestamp"))
     now_parts = format_compact_timestamp(datetime.now(timezone.utc).isoformat())
-    status_items = build_status_bar_items(payload, view, clock)
+    service_active = bool((payload.get("service_health") or {}).get("continuous_service_active"))
+    bot_state = "RUNNING" if service_active or bool(payload.get("latest_run")) else "WAITING"
+    today_pl = _as_float(view.get("today_pl"), 0.0)
+    today_class = "positive" if today_pl > 0 else "negative" if today_pl < 0 else "flat"
     st.markdown(
         f"""
         <div class='dq-shell-header'>
-            <div class='dq-build-marker'>{UI_BUILD_LABEL}</div>
-            <div class='dq-header-grid'>
-                <div>
-                    <div class='dq-header-title'>DEAL QUANT</div>
-                    <div class='dq-header-subtitle'>PAPER TRADING DASHBOARD</div>
-                    <div class='dq-header-badges'>
-                        <span class='dq-chip healthy'>PAPER</span>
-                        <span class='dq-chip critical'>LIVE BLOCKED</span>
-                        <span class='dq-chip {'healthy' if clock['is_open'] else 'neutral'}'>{clock['label']}</span>
-                    </div>
+            <div class='dq-desk-topline'>
+                <div class='dq-brand-lockup'>
+                    <span class='dq-brand-mark'>DQ</span>
+                    <span><span class='dq-brand-name'>Deal Quant</span><span class='dq-brand-mode'>{UI_BUILD_LABEL}</span></span>
                 </div>
-                <div class='dq-header-meta'>
-                    <div class='dq-header-meta-row'><span class='dq-header-meta-label'>Eastern</span><span class='dq-header-meta-value' title='{_safe_text(now_parts['full'])}'>{_safe_text(now_parts['time'])}</span></div>
-                    <div class='dq-header-meta-row'><span class='dq-header-meta-label'>Last worker</span><span class='dq-header-meta-value' title='{_safe_text(worker_parts['full'])}'>{_safe_text(worker_parts['relative'])}</span></div>
+                <div class='dq-desk-statuses'>
+                    <span class='dq-desk-pill {'live' if bot_state == 'RUNNING' else 'idle'}'><i></i>BOT {bot_state}</span>
+                    <span class='dq-desk-pill {'live' if clock['is_open'] else 'idle'}'><i></i>{_safe_text(clock['label'])}</span>
+                    <span class='dq-desk-clock' title='{_safe_text(now_parts['full'])}'>{_safe_text(now_parts['time'])}</span>
+                </div>
+            </div>
+            <div class='dq-desk-hero'>
+                <div class='dq-equity-block'>
+                    <div class='dq-eyebrow'>PAPER PORTFOLIO</div>
+                    <div class='dq-equity-value'>{format_currency(view.get('portfolio_value'))}</div>
+                    <div class='dq-equity-change {today_class}'>{'+' if today_pl > 0 else ''}{format_currency(today_pl)} today</div>
+                </div>
+                <div class='dq-hero-facts'>
+                    <div><span>Open positions</span><strong>{int(view.get('open_positions') or 0)}</strong></div>
+                    <div><span>Available cash</span><strong>{format_currency(view.get('cash'))}</strong></div>
+                    <div><span>Last bot check</span><strong title='{_safe_text(worker_parts['full'])}'>{_safe_text(worker_parts['relative'])}</strong></div>
                 </div>
             </div>
         </div>
@@ -2636,23 +2952,20 @@ def render_header(payload, view):
         unsafe_allow_html=True,
     )
 
-    status_col, refresh_col = st.columns([8.0, 1.4])
+    status_col, refresh_col = st.columns([9.0, 1.0])
     with status_col:
-        status_html = "".join([f"<span class='dq-chip {item['style']}'>{_safe_text(item['label'])}</span>" for item in status_items])
-        st.markdown(f"<div class='dq-status-bar'>{status_html}</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='dq-refresh-note' title='{_safe_text(refresh_parts['full'])}'>{_safe_text(refresh_parts['relative'])} · read-only PAPER account</div>",
+            unsafe_allow_html=True,
+        )
     with refresh_col:
-        if st.button("↻ Refresh Data", key="dashboard_refresh_button", help="Refresh dashboard read-only data only"):
+        if st.button("Refresh", key="dashboard_refresh_button", help="Refresh dashboard read-only data only"):
             clear_dashboard_cache()
             st.session_state["dashboard_last_refresh"] = datetime.now(timezone.utc).isoformat()
             st.session_state["dashboard_force_refresh"] = True
             st.session_state["dashboard_last_manual_refresh_status"] = "Dashboard data refreshed"
             # Intentional rerun: ensures data is fetched again after cache clear.
             st.rerun()
-
-    st.markdown(
-        f"<div class='dq-header-footer' title='{_safe_text(refresh_parts['full'])}'>Dashboard refresh: {_safe_text(refresh_parts['time'])} | {_safe_text(refresh_parts['date'])} | {_safe_text(refresh_parts['relative'])}</div>",
-        unsafe_allow_html=True,
-    )
     if st.session_state.get("dashboard_last_manual_refresh_status"):
         st.success(st.session_state.get("dashboard_last_manual_refresh_status"))
 
@@ -2906,15 +3219,13 @@ def _ensure_authenticated(expected_password: str) -> bool:
 
 
 def _render_navigation(pages: list[str]) -> str:
-    st.markdown("<div class='dq-nav-bar'>", unsafe_allow_html=True)
     current_page = st.session_state.get("dashboard_page", pages[0])
     if current_page not in pages:
         current_page = pages[0]
     if st.session_state.get("dashboard_page_selector") not in pages:
         st.session_state["dashboard_page_selector"] = current_page
-    selected = st.selectbox("Navigate", pages, key="dashboard_page_selector")
+    selected = st.radio("Navigate", pages, horizontal=True, key="dashboard_page_selector")
     st.session_state["dashboard_page"] = selected
-    st.markdown("</div>", unsafe_allow_html=True)
     return selected
 
 
@@ -2960,7 +3271,7 @@ def _render_crypto_dashboard_panel(payload, *, detailed: bool = False) -> None:
             "Avg entry": format_currency(row.get("average_entry_price")),
             "Last": format_currency(row.get("current_price")),
             "Exposure": format_currency(abs(_as_float(row.get("market_value"), 0.0))),
-            "Unrealized P&L": format_currency(row.get("unrealized_pl")),
+            "Open P&L": format_currency(row.get("unrealized_pl")),
         }
         for row in positions
     ]
@@ -3057,7 +3368,7 @@ def _render_options_dashboard_panel(payload, *, detailed: bool = False) -> None:
             "Avg premium": format_currency(row.get("average_entry_price")),
             "Last premium": format_currency(row.get("current_price")),
             "Market value": format_currency(abs(_as_float(row.get("market_value"), 0.0))),
-            "Unrealized P&L": format_currency(row.get("unrealized_pl")),
+            "Open P&L": format_currency(row.get("unrealized_pl")),
         }
         for row in positions
     ]
@@ -3123,80 +3434,83 @@ def render_command_center_page(payload, view):
     trading_enabled = status.get("kill_switch") != "ON" and status.get("autonomous_paper_trading") == "ENABLED"
     option_market = "OPEN" if stock_market.upper() == "OPEN" else "CLOSED"
     engine_items = [
-        ("Stocks", "ENABLED" if trading_enabled else "PAUSED", stock_market, trading_enabled),
-        ("Crypto", "ENABLED" if bool(crypto.get("enabled")) else "DISABLED", "OPEN 24/7", bool(crypto.get("enabled"))),
-        ("Options", "ENABLED" if bool(options.get("enabled")) else "DISABLED", option_market, bool(options.get("enabled"))),
+        ("EQ", "Stocks", "Enabled" if trading_enabled else "Paused", stock_market, trading_enabled),
+        ("CR", "Crypto", "Enabled" if bool(crypto.get("enabled")) else "Disabled", "Open 24/7", bool(crypto.get("enabled"))),
+        ("OP", "Options", "Enabled" if bool(options.get("enabled")) else "Disabled", option_market.title(), bool(options.get("enabled"))),
     ]
     engine_html = "".join(
         "<div class='dq-engine-card'>"
-        f"<div class='dq-engine-name'>{_safe_text(name)}</div>"
-        f"<div class='dq-engine-state {'on' if enabled else 'off'}'>{_safe_text(state)}</div>"
-        f"<div class='dq-engine-market'>{_safe_text(market)}</div>"
+        f"<span class='dq-engine-symbol'>{_safe_text(symbol)}</span>"
+        f"<div><div class='dq-engine-name'>{_safe_text(name)}</div><div class='dq-engine-market'>{_safe_text(market)}</div></div>"
+        f"<div class='dq-engine-state {'on' if enabled else 'off'}'><i></i>{_safe_text(state)}</div>"
         "</div>"
-        for name, state, market, enabled in engine_items
+        for symbol, name, state, market, enabled in engine_items
     )
     st.markdown(
-        f"<div class='dq-command-header'><div><div class='dq-panel-title'>TRADING ENGINES</div>"
-        f"<div class='dq-command-subtitle'>{_safe_text(status.get('bot_service', 'STOPPED'))} · broker synced {_safe_text(status.get('last_broker_check', 'Unknown'))}</div></div>"
-        f"<div class='dq-command-count'>{int(view.get('open_positions') or 0)} open positions</div></div>"
+        "<div class='dq-section-intro'><div><span class='dq-section-index'>01</span>"
+        "<div><div class='dq-section-title'>Trading status</div><div class='dq-section-copy'>What can trade right now</div></div></div></div>"
         f"<div class='dq-engine-grid'>{engine_html}</div>",
         unsafe_allow_html=True,
     )
 
-    top = st.columns(4)
-    _metric_card(top[0], "PAPER Equity", format_currency(view["portfolio_value"]), "neutral", _direction_arrow(view.get("portfolio_value"), view.get("previous_portfolio_value")))
-    _metric_card(top[1], "Today", format_currency(view["today_pl"]), "buy" if view["today_pl"] >= 0 else "sell")
-    _metric_card(top[2], "Unrealized", format_currency(view["unrealized_paper_pl"]), "buy" if view["unrealized_paper_pl"] >= 0 else "sell")
-    _metric_card(top[3], "Realized", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] >= 0 else "sell")
-
-    render_alert_banner(payload, view)
-    scan = summary["scan"]
     st.markdown(
-        f"<div class='dq-activity-line'><strong>Latest stock scan:</strong> {_safe_text(scan['status'])} · "
-        f"{scan['symbols']} checked · {scan['eligible']} passed · {_safe_text(scan['outcome'])}</div>",
+        "<div class='dq-section-intro dq-profit-heading'><div><span class='dq-section-index'>02</span>"
+        "<div><div class='dq-section-title'>Profit &amp; loss</div><div class='dq-section-copy'>Open changes with the market · closed is locked in</div></div></div></div>",
         unsafe_allow_html=True,
     )
+    top = st.columns(3)
+    _metric_card(top[0], "Today's P&L", format_currency(view["today_pl"]), "buy" if view["today_pl"] > 0 else "sell" if view["today_pl"] < 0 else "neutral")
+    _metric_card(top[1], "Open Position P&L", format_currency(view["unrealized_paper_pl"]), "buy" if view["unrealized_paper_pl"] > 0 else "sell" if view["unrealized_paper_pl"] < 0 else "neutral")
+    _metric_card(top[2], "Closed Trade P&L", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] > 0 else "sell" if view["realized_paper_pl"] < 0 else "neutral")
+
+    render_alert_banner(payload, view)
 
     if summary.get("short_position_count"):
         st.markdown(
-            f"<div class='dq-short-alert'><strong>Attention:</strong> {summary['short_position_count']} PAPER short position(s) exist at Alpaca. "
-            "Shares are shown as positive numbers with Direction = SHORT and are managed by the short strategy.</div>",
+            f"<div class='dq-short-alert'><strong>Short position:</strong> {summary['short_position_count']} open. "
+            "Direction shows SHORT while quantity stays positive.</div>",
             unsafe_allow_html=True,
         )
 
-    st.markdown("<div class='dq-section-heading'><div class='dq-section-heading-title'>Open positions</div><div class='dq-section-heading-note'>Current Alpaca PAPER holdings and P&amp;L</div></div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='dq-section-intro'><div><span class='dq-section-index'>03</span>"
+        f"<div><div class='dq-section-title'>Open positions</div><div class='dq-section-copy'>Current holdings, exposure, and open P&amp;L</div></div></div>"
+        f"<span class='dq-count-badge'>{len(summary['position_rows'])}</span></div>",
+        unsafe_allow_html=True,
+    )
     if summary["position_rows"]:
         st.dataframe(summary["position_rows"])
     else:
         _empty_state("No open paper positions.")
 
-    st.markdown("<div class='dq-section-heading'><div class='dq-section-heading-title'>Order history</div><div class='dq-section-heading-note'>Five latest broker-confirmed orders</div></div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='dq-section-intro'><div><span class='dq-section-index'>04</span>"
+        f"<div><div class='dq-section-title'>Order history</div><div class='dq-section-copy'>Ten latest broker-confirmed orders</div></div></div>"
+        f"<span class='dq-count-badge'>{len(summary['order_rows'])}</span></div>",
+        unsafe_allow_html=True,
+    )
     if summary["order_rows"]:
         st.dataframe(summary["order_rows"])
     else:
         _empty_state("No paper orders have been recorded yet.")
 
+    scan = summary["scan"]
+    st.markdown(
+        f"<div class='dq-activity-line'><span>Latest stock scan</span><strong>{_safe_text(scan['status'])}</strong> · "
+        f"{scan['symbols']} checked · {scan['eligible']} passed · {_safe_text(scan['outcome'])}</div>",
+        unsafe_allow_html=True,
+    )
+
 
 
 def render_sidebar(payload):
-    with st.sidebar:
-        st.subheader("DEAL QUANT")
-        st.caption("PAPER monitor • read only")
-        scope = st.selectbox("Pages", NAVIGATION_SCOPE_OPTIONS, key="dashboard_navigation_scope_selector")
-        if scope not in NAVIGATION_SCOPE_OPTIONS:
-            scope = "Essentials"
-        st.session_state["dashboard_navigation_scope"] = scope
-        st.session_state["dashboard_mode"] = "Standard Mode"
-        _refresh_mode_flags()
-        theme = st.selectbox("Theme", THEME_OPTIONS, key="dashboard_theme_selector")
-        if theme not in THEME_OPTIONS:
-            theme = "Aurora"
-        st.session_state["dashboard_theme"] = theme
-        refresh_choice = st.selectbox("Refresh", AUTO_REFRESH_OPTIONS, key="dashboard_auto_refresh_selector")
-        st.session_state["dashboard_auto_refresh"] = refresh_choice
-        connection = "Connected" if payload.get("db_connected") else "Disconnected"
-        st.caption(f"{friendly_status_text(os.getenv('TRADING_MODE', 'PAPER'))} • Database {connection}")
-        st.caption(f"{DASHBOARD_VERSION} • no trading controls")
+    # Version 4 intentionally removes the old control-heavy sidebar. The desk
+    # stays on essential pages and refreshes read-only account data automatically.
+    st.session_state["dashboard_navigation_scope"] = "Essentials"
+    st.session_state["dashboard_mode"] = "Standard Mode"
+    st.session_state["dashboard_theme"] = "Studio"
+    st.session_state["dashboard_auto_refresh"] = "30 seconds"
+    _refresh_mode_flags()
 
 
 def render_overview_page(payload, view):
@@ -3244,13 +3558,13 @@ def render_account_page(payload, view):
     _metric_card(acc_cols[3], "Open Positions", int(view.get("open_positions") or 0), "neutral")
 
     second_row = st.columns(4)
-    _metric_card(second_row[0], "Unrealized P&L", format_currency(view["unrealized_paper_pl"]), "buy" if view["unrealized_paper_pl"] >= 0 else "sell")
+    _metric_card(second_row[0], "Open Position P&L", format_currency(view["unrealized_paper_pl"]), "buy" if view["unrealized_paper_pl"] > 0 else "sell" if view["unrealized_paper_pl"] < 0 else "neutral")
     _metric_card(second_row[1], "Daily P/L", format_currency(view.get("today_pl", 0.0)), "buy" if _as_float(view.get("today_pl"), 0.0) >= 0 else "sell")
     _metric_card(second_row[2], "Total PAPER Return", format_percent(total_return_pct, "0.00%"), "buy" if total_return_pct >= 0 else "sell")
     _metric_card(second_row[3], "Orders Today", orders_today, "neutral")
 
     third_row = st.columns(2)
-    _metric_card(third_row[0], "Realized P&L", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] >= 0 else "sell")
+    _metric_card(third_row[0], "Closed Trade P&L", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] > 0 else "sell" if view["realized_paper_pl"] < 0 else "neutral")
     _metric_card(third_row[1], "Account Status", view["account_status"], "healthy" if _is_active_account_status(view["account_status"]) else "warning")
 
     st.markdown("### Portfolio Allocation", unsafe_allow_html=True)
@@ -4533,7 +4847,7 @@ def render_dashboard(database_url: str | None = None):
     st.session_state["dashboard_page"] = selected_page
 
     page_renderers = {
-        "Command Center": render_overview_page,
+        "Overview": render_overview_page,
         "Crypto": render_crypto_page,
         "Options": render_options_page,
         "Strategy": render_strategy_page,

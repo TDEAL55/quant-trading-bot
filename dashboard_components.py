@@ -30,6 +30,29 @@ class DashboardPalette:
 
 def build_palette(theme_name: str) -> DashboardPalette:
     theme = theme_name.lower().strip()
+    if theme == "studio":
+        return DashboardPalette(
+            page_bg="#0a0b0d",
+            panel_bg="#121417",
+            elevated_bg="#191c20",
+            border="rgba(245, 247, 242, 0.09)",
+            positive="#b6f542",
+            negative="#ff5d73",
+            neutral="#a9b0bb",
+            warning="#ffca58",
+            critical="#ff5d73",
+            muted_text="#747b86",
+            primary_text="#f4f6f1",
+            secondary_text="#9aa1ac",
+            accent_glow="rgba(182, 245, 66, 0.12)",
+            radius_lg="12px",
+            spacing_sm="0.4rem",
+            spacing_md="0.75rem",
+            spacing_lg="1.1rem",
+            shadow_soft="0 12px 30px rgba(0, 0, 0, 0.28)",
+            chart_bg="#121417",
+            chart_grid="rgba(245, 247, 242, 0.06)",
+        )
     if theme == "aurora":
         return DashboardPalette(
             page_bg="radial-gradient(circle at 8% 0%, #241345 0%, #0e1020 36%, #080a12 100%)",
