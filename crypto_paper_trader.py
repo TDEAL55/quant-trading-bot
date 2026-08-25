@@ -14,6 +14,9 @@ from crypto_market_data import AlpacaCryptoMarketData, analyze_crypto_bars
 from crypto_universe import canonical_crypto_symbol, load_crypto_universe
 
 
+_TERMINAL_ORDER_STATUSES = {"filled", "canceled", "cancelled", "rejected", "expired"}
+
+
 def _enabled(value: Any, default: bool = False) -> bool:
     if value is None:
         return bool(default)
@@ -94,6 +97,66 @@ def _client_order_id(symbol: str, side: str, now: datetime, interval_minutes: in
     return f"qtb-crypto-{digest}"
 
 
+def _order_is_open(order: dict[str, Any]) -> bool:
+    return str(order.get("status") or "").strip().lower() not in _TERMINAL_ORDER_STATUSES
+
+
+def _order_age_minutes(order: dict[str, Any], now: datetime) -> float | None:
+    raw_timestamp = str(order.get("updated_at") or order.get("submitted_at") or "").strip()
+    if not raw_timestamp:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return max((now.astimezone(timezone.utc) - timestamp.astimezone(timezone.utc)).total_seconds() / 60.0, 0.0)
+
+
+def _clear_stale_bot_orders(
+    broker: AlpacaPaperBroker,
+    open_orders: list[dict[str, Any]],
+    *,
+    now: datetime,
+    stale_after_minutes: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    active_orders: list[dict[str, Any]] = []
+    canceled_orders: list[dict[str, Any]] = []
+    cancellation_failures: list[dict[str, Any]] = []
+    for order in open_orders:
+        client_order_id = str(order.get("client_order_id") or "")
+        order_id = str(order.get("order_id") or "")
+        age_minutes = _order_age_minutes(order, now)
+        is_stale_bot_order = bool(
+            _order_is_open(order)
+            and client_order_id.startswith("qtb-crypto-")
+            and order_id
+            and age_minutes is not None
+            and age_minutes >= stale_after_minutes
+        )
+        if not is_stale_bot_order:
+            active_orders.append(order)
+            continue
+        try:
+            canceled = dict(broker.cancel_order(order_id) or {})
+        except Exception as exc:
+            active_orders.append(order)
+            cancellation_failures.append(
+                {
+                    "order_id": order_id,
+                    "symbol": canonical_crypto_symbol(order.get("symbol")),
+                    "error": str(exc),
+                }
+            )
+            continue
+        if _order_is_open(canceled):
+            active_orders.append(canceled or order)
+        else:
+            canceled_orders.append(canceled or order)
+    return active_orders, canceled_orders, cancellation_failures
+
+
 def _safe_status(
     *,
     now: datetime,
@@ -158,6 +221,8 @@ def run_crypto_paper_cycle(
     maximum_position_percent = min(max(requested_position_percent, 0.1), 10.0)
     minimum_order_notional = max(_as_float(os.getenv("CRYPTO_MIN_ORDER_NOTIONAL", "10"), 10.0), 1.0)
     maximum_order_notional = min(max(_as_float(os.getenv("CRYPTO_MAX_ORDER_NOTIONAL", "200000"), 200000.0), minimum_order_notional), 200000.0)
+    buying_power_usage_percent = min(max(_as_float(os.getenv("CRYPTO_BUYING_POWER_USAGE_PERCENT", "95"), 95.0), 1.0), 99.0)
+    stale_order_minutes = max(_as_float(os.getenv("CRYPTO_STALE_ORDER_MINUTES", "10"), 10.0), 2.0)
     universe_refresh_seconds = max(int(os.getenv("CRYPTO_UNIVERSE_REFRESH_SECONDS", "900")), 60)
     signal_refresh_seconds = max(int(os.getenv("CRYPTO_SIGNAL_REFRESH_SECONDS", "60")), 10)
     timeframe_minutes = int(os.getenv("CRYPTO_BAR_TIMEFRAME_MINUTES", "15"))
@@ -248,8 +313,15 @@ def run_crypto_paper_cycle(
     positions_before = broker.get_positions()
     crypto_positions_before = _crypto_positions(positions_before, symbol_set)
     open_orders = list(broker.get_open_orders() or [])
+    open_orders, stale_orders_canceled, stale_order_cancel_failures = _clear_stale_bot_orders(
+        broker,
+        open_orders,
+        now=cycle_now,
+        stale_after_minutes=stale_order_minutes,
+    )
     order: dict[str, Any] = {}
     action_reason = "no_crypto_order_selected"
+    blocked_buy_candidates: list[str] = []
 
     signal_by_symbol = {str(row.get("symbol") or ""): row for row in signals}
     for position in crypto_positions_before:
@@ -270,7 +342,7 @@ def run_crypto_paper_cycle(
         if any(
             canonical_crypto_symbol(row.get("symbol")) == symbol
             and str(row.get("side") or "").lower() == "sell"
-            and str(row.get("status") or "").lower() not in {"filled", "canceled", "cancelled", "rejected", "expired"}
+            and _order_is_open(row)
             for row in open_orders
         ):
             action_reason = "crypto_sell_order_already_open"
@@ -311,24 +383,26 @@ def run_crypto_paper_cycle(
             and str(row.get("symbol") or "") not in held_symbols
         ]
         if candidates:
-            candidate = candidates[0]
-            symbol = str(candidate.get("symbol") or "")
-            price = _as_float(candidate.get("latest_price"), 0.0)
-            position_cap = equity * (maximum_position_percent / 100.0)
-            target_notional = min(position_cap, non_marginable_buying_power, maximum_order_notional)
-            asset = next((row for row in universe if canonical_crypto_symbol(row.get("symbol")) == symbol), {})
-            quantity = _quantity_for_notional(target_notional, price, _as_float(asset.get("min_trade_increment"), 0.0))
-            notional = quantity * price
-            if any(
-                canonical_crypto_symbol(row.get("symbol")) == symbol
-                and str(row.get("side") or "").lower() == "buy"
-                and str(row.get("status") or "").lower() not in {"filled", "canceled", "cancelled", "rejected", "expired"}
-                for row in open_orders
-            ):
-                action_reason = "crypto_buy_order_already_open"
-            elif notional < minimum_order_notional:
-                action_reason = "insufficient_non_marginable_buying_power"
-            else:
+            spendable_buying_power = non_marginable_buying_power * (buying_power_usage_percent / 100.0)
+            for candidate in candidates:
+                symbol = str(candidate.get("symbol") or "")
+                if any(
+                    canonical_crypto_symbol(row.get("symbol")) == symbol
+                    and str(row.get("side") or "").lower() == "buy"
+                    and _order_is_open(row)
+                    for row in open_orders
+                ):
+                    blocked_buy_candidates.append(symbol)
+                    continue
+                price = _as_float(candidate.get("latest_price"), 0.0)
+                position_cap = equity * (maximum_position_percent / 100.0)
+                target_notional = min(position_cap, spendable_buying_power, maximum_order_notional)
+                asset = next((row for row in universe if canonical_crypto_symbol(row.get("symbol")) == symbol), {})
+                quantity = _quantity_for_notional(target_notional, price, _as_float(asset.get("min_trade_increment"), 0.0))
+                notional = quantity * price
+                if notional < minimum_order_notional:
+                    action_reason = "insufficient_non_marginable_buying_power"
+                    break
                 order_payload = {
                     "symbol": symbol,
                     "side": "BUY",
@@ -355,6 +429,9 @@ def run_crypto_paper_cycle(
                     )
                     order = {**order_payload, **dict(response or {})}
                 action_reason = str(order_payload.get("reason"))
+                break
+            if not order and blocked_buy_candidates and len(blocked_buy_candidates) == len(candidates):
+                action_reason = "all_crypto_buy_candidates_already_open"
 
     positions_after = broker.get_positions() if order and not resolved_dry_run else positions_before
     crypto_positions_after = _crypto_positions(positions_after, symbol_set)
@@ -380,6 +457,12 @@ def run_crypto_paper_cycle(
             "maximum_position_percent": maximum_position_percent,
             "equity": round(equity, 6),
             "non_marginable_buying_power": round(non_marginable_buying_power, 6),
+            "spendable_crypto_buying_power": round(non_marginable_buying_power * (buying_power_usage_percent / 100.0), 6),
+            "buying_power_usage_percent": buying_power_usage_percent,
+            "blocked_buy_candidates": blocked_buy_candidates,
+            "stale_order_minutes": stale_order_minutes,
+            "stale_orders_canceled": stale_orders_canceled,
+            "stale_order_cancel_failures": stale_order_cancel_failures,
             "signal_data_reused": not signals_refreshed,
             "signal_refresh_seconds": signal_refresh_seconds,
             "signal_refreshed_at": _utc_iso(cache.get("signals_at") if cache is not None else cycle_now),

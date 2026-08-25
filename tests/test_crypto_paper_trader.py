@@ -23,15 +23,18 @@ class _MarketData:
 
 
 class _Broker:
-    def __init__(self, *, positions=None):
+    def __init__(self, *, positions=None, account=None, open_orders=None):
         self.positions = dict(positions or {})
+        self.account = dict(account or {})
+        self.open_orders = list(open_orders or [])
         self.calls = []
+        self.cancel_calls = []
         self.account_checks = 0
         self.position_checks = 0
 
     def get_account(self):
         self.account_checks += 1
-        return {
+        return self.account or {
             "equity": 100000.0,
             "portfolio_value": 100000.0,
             "cash": 50000.0,
@@ -43,7 +46,13 @@ class _Broker:
         return self.positions
 
     def get_open_orders(self):
-        return []
+        return list(self.open_orders)
+
+    def cancel_order(self, order_id):
+        self.cancel_calls.append(order_id)
+        canceled = next(row for row in self.open_orders if row.get("order_id") == order_id)
+        self.open_orders = [row for row in self.open_orders if row.get("order_id") != order_id]
+        return {**canceled, "status": "canceled"}
 
     def submit_order(self, **kwargs):
         self.calls.append(dict(kwargs))
@@ -182,3 +191,95 @@ def test_crypto_runtime_cache_reuses_expensive_data_but_rechecks_broker(monkeypa
     assert counts == {"broker": 1, "market_data": 1, "universe": 1, "bars": 1}
     assert broker.account_checks == 2
     assert broker.position_checks == 2
+
+
+def test_crypto_cycle_reserves_buying_power_for_price_movement(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    broker = _Broker(
+        account={
+            "equity": 100000.0,
+            "portfolio_value": 100000.0,
+            "cash": 90.57,
+            "non_marginable_buying_power": 90.57,
+        }
+    )
+
+    result = run_crypto_paper_cycle(
+        broker_factory=lambda **_kwargs: broker,
+        market_data_factory=lambda: _MarketData(rising=True),
+        universe_loader=_universe,
+        now=NOW,
+        status_path=tmp_path / "status.json",
+        trades_path=tmp_path / "trades.jsonl",
+    )
+
+    assert result["confirmed_order_count"] == 1
+    assert result["buying_power_usage_percent"] == 95.0
+    assert result["spendable_crypto_buying_power"] == 86.0415
+    assert broker.calls[0]["quantity"] * broker.calls[0]["reference_price"] <= 86.0415
+
+
+def test_crypto_cycle_skips_candidate_with_open_buy_and_tries_next(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    broker = _Broker(
+        open_orders=[
+            {
+                "order_id": "open-btc",
+                "client_order_id": "manual-order",
+                "symbol": "BTCUSD",
+                "side": "buy",
+                "status": "accepted",
+                "submitted_at": NOW.isoformat(),
+            }
+        ]
+    )
+
+    def _two_coin_universe(**_kwargs):
+        return [
+            {"symbol": "BTC/USD", "tradable": True, "asset_class": "crypto", "min_trade_increment": 0.00000001},
+            {"symbol": "ETH/USD", "tradable": True, "asset_class": "crypto", "min_trade_increment": 0.00000001},
+        ]
+
+    result = run_crypto_paper_cycle(
+        broker_factory=lambda **_kwargs: broker,
+        market_data_factory=lambda: _MarketData(rising=True),
+        universe_loader=_two_coin_universe,
+        now=NOW,
+        status_path=tmp_path / "status.json",
+        trades_path=tmp_path / "trades.jsonl",
+    )
+
+    assert result["confirmed_order_count"] == 1
+    assert result["blocked_buy_candidates"] == ["BTC/USD"]
+    assert broker.calls[0]["ticker"] == "ETH/USD"
+    assert broker.cancel_calls == []
+
+
+def test_crypto_cycle_cancels_stale_bot_order_before_selecting_candidate(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    broker = _Broker(
+        open_orders=[
+            {
+                "order_id": "stale-btc",
+                "client_order_id": "qtb-crypto-old-order",
+                "symbol": "BTCUSD",
+                "side": "buy",
+                "status": "accepted",
+                "submitted_at": "2026-08-24T21:30:00+00:00",
+            }
+        ]
+    )
+
+    result = run_crypto_paper_cycle(
+        broker_factory=lambda **_kwargs: broker,
+        market_data_factory=lambda: _MarketData(rising=True),
+        universe_loader=_universe,
+        now=NOW,
+        status_path=tmp_path / "status.json",
+        trades_path=tmp_path / "trades.jsonl",
+    )
+
+    assert broker.cancel_calls == ["stale-btc"]
+    assert result["stale_orders_canceled"][0]["status"] == "canceled"
+    assert result["confirmed_order_count"] == 1
+    assert broker.calls[0]["ticker"] == "BTC/USD"
