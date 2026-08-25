@@ -2,6 +2,7 @@ from monitoring_db import MonitoringDatabase
 from monitoring_recorder import MonitoringRecorder
 import dashboard_app
 import dashboard_data
+from dashboard_data import _attach_recorded_closed_trade_pl
 
 
 class _ReadOnlyPaperBroker:
@@ -51,6 +52,15 @@ class _ReadOnlyPaperBroker:
             }
         ]
 
+    def get_market_clock(self):
+        return {
+            "is_open": False,
+            "timestamp": "2026-08-24T22:00:00+00:00",
+            "next_open": "2026-08-25T13:30:00+00:00",
+            "next_close": "2026-08-25T20:00:00+00:00",
+            "source": "alpaca",
+        }
+
 
 def test_read_only_paper_account_fallback_builds_dashboard_snapshot():
     snapshot = dashboard_data._fetch_paper_account_snapshot(_ReadOnlyPaperBroker)
@@ -64,6 +74,37 @@ def test_read_only_paper_account_fallback_builds_dashboard_snapshot():
     assert snapshot["day_pl"] == 75.0
     assert snapshot["recent_orders"][0]["safe_order_status"] == "filled"
     assert snapshot["recent_orders"][0]["filled_quantity"] == 2.0
+    assert snapshot["market_open"] is False
+    assert snapshot["market_clock"]["source"] == "alpaca"
+
+
+def test_live_broker_market_clock_overrides_stale_signal_state():
+    payload = {
+        "latest_run": {},
+        "latest_success": {},
+        "latest_signal": {"market_open": 1, "generated_signal": "HOLD"},
+        "latest_account": {"market_open": False},
+        "recent_runs": [],
+        "recent_orders": [],
+        "portfolio_history": [],
+        "signal_history": [],
+        "order_count_by_day": [],
+    }
+
+    view = dashboard_app.build_dashboard_view_model(payload)
+
+    assert view["market_is_open"] is False
+    assert view["market_status"]["label"] == "Closed"
+
+
+def test_recorded_closed_trade_pl_populates_live_account_snapshot():
+    account = {"source": "alpaca_paper_read_only", "portfolio_value": 10000.0}
+    tuning = {"closed_trades": {"closed_trades": 3, "net_pnl": 142.75}}
+
+    result = _attach_recorded_closed_trade_pl(account, tuning)
+
+    assert result["realized_paper_pl"] == 142.75
+    assert "realized_paper_pl" not in account
 
 
 def test_broker_daily_pl_and_short_positions_render_clearly():

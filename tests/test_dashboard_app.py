@@ -283,6 +283,67 @@ def test_compact_dashboard_summary_prioritizes_scan_positions_and_orders(monkeyp
     assert summary["position_rows"][0]["Symbol"] == "JPM"
 
 
+def test_stale_successful_run_does_not_report_running_service():
+    payload = {
+        "latest_run": {
+            "run_timestamp": "2025-01-01T12:00:00+00:00",
+            "bot_status": "healthy",
+        },
+        "latest_signal": {},
+        "latest_account": {},
+        "recent_orders": [],
+        "recent_runs": [],
+        "scanner_rejections": [],
+        "service_health": {"continuous_service_active": False},
+    }
+    view = {"bot_health": {"style": "healthy"}, "latest_safe_error_message": ""}
+
+    snapshot = dashboard_app.build_monitor_status_snapshot(payload, view)
+
+    assert snapshot["bot_service"] == "STOPPED"
+
+
+def test_portfolio_page_displays_short_direction_with_positive_quantity(monkeypatch):
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+    monkeypatch.setattr(dashboard_app, "go", None)
+    payload = {
+        "latest_account": {
+            "positions": [
+                {
+                    "symbol": "SBLK",
+                    "asset_class": "us_equity",
+                    "quantity": -18.0,
+                    "average_entry_price": 20.0,
+                    "current_price": 19.0,
+                    "market_value": -342.0,
+                    "unrealized_pl": 18.0,
+                }
+            ]
+        },
+        "portfolio_history": [],
+        "order_count_by_day": [],
+    }
+    view = {
+        "portfolio_value": 1000.0,
+        "cash": 658.0,
+        "buying_power": 658.0,
+        "open_positions": 1,
+        "unrealized_paper_pl": 18.0,
+        "realized_paper_pl": 0.0,
+        "today_pl": 18.0,
+        "open_position_value": 342.0,
+        "account_status": "Active",
+    }
+
+    dashboard_app.render_account_page(payload, view)
+
+    tables = [call[1] for call in fake_st._calls if call[0] == "dataframe"]
+    position_row = tables[-1][0]
+    assert position_row["direction"] == "SHORT"
+    assert position_row["quantity"] == 18.0
+
+
 def test_paper_tuning_scorecard_uses_closed_trades_and_funnel_only():
     payload = {
         "latest_scanner_run": {"success_count": 100, "eligible_count": 22},

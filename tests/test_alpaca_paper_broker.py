@@ -94,6 +94,15 @@ class _TradingClient:
         del filter
         return []
 
+    def get_clock(self):
+        class _Clock:
+            is_open = True
+            timestamp = "2026-08-25T15:00:00+00:00"
+            next_open = "2026-08-26T13:30:00+00:00"
+            next_close = "2026-08-25T20:00:00+00:00"
+
+        return _Clock()
+
     def get_order_by_id(self, order_id):
         return self.orders_by_id[order_id]
 
@@ -128,6 +137,18 @@ def test_alpaca_paper_endpoint_is_enforced(monkeypatch):
     assert account["paper_endpoint_confirmed"] is True
     assert account["status"] == "ACTIVE"
     assert account["day_pl"] == 125.0
+
+
+def test_alpaca_market_clock_is_normalized_for_dashboard(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "demo-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "demo-secret")
+    monkeypatch.setenv("ALPACA_PAPER_BASE_URL", ALPACA_PAPER_ENDPOINT)
+
+    clock = AlpacaPaperBroker(mode="PAPER", trading_client=_TradingClient()).get_market_clock()
+
+    assert clock["is_open"] is True
+    assert clock["source"] == "alpaca"
+    assert clock["next_close"] == "2026-08-25T20:00:00+00:00"
 
 
 def test_alpaca_positions_include_read_only_dashboard_values(monkeypatch):

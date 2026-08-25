@@ -79,6 +79,10 @@ def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dic
     positions_by_symbol = broker.get_positions()
     open_orders = broker.get_open_orders()
     broker_orders = list(getattr(broker, "get_order_history", lambda limit=50: [])(limit=120) or [])
+    try:
+        market_clock = dict(getattr(broker, "get_market_clock", lambda: {})() or {})
+    except Exception:
+        market_clock = {}
     positions = [
         {
             "symbol": symbol,
@@ -111,6 +115,8 @@ def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dic
         "short_positions": sum(1 for item in positions if float(item.get("quantity") or 0.0) < 0),
         "gross_exposure": sum(abs(float(item.get("market_value") or 0.0)) for item in positions),
         "recent_orders": recent_orders,
+        "market_clock": market_clock,
+        "market_open": market_clock.get("is_open") if "is_open" in market_clock else None,
         "source": "alpaca_paper_read_only",
     }
 
@@ -257,6 +263,17 @@ def _fetch_paper_tuning_snapshot(db: MonitoringDatabase) -> dict[str, Any]:
         "latest_notification": dict(latest_notification),
         "latest_position_reviews": list(latest_position_reviews or []),
     }
+
+
+def _attach_recorded_closed_trade_pl(
+    latest_account: dict[str, Any],
+    paper_tuning: dict[str, Any],
+) -> dict[str, Any]:
+    account = dict(latest_account or {})
+    closed = dict((paper_tuning or {}).get("closed_trades") or {})
+    if account.get("realized_paper_pl") is None:
+        account["realized_paper_pl"] = float(closed.get("net_pnl") or 0.0)
+    return account
 
 
 def fetch_dashboard_payload(
@@ -492,6 +509,10 @@ def fetch_dashboard_payload(
     payload["scanner_rejections"] = fetch_scan_rejection_reasons(database_url, limit=50, database_factory=MonitoringDatabase)
     payload["scanner_sector_distribution"] = fetch_scanner_sector_distribution(database_url, database_factory=MonitoringDatabase)
     payload["paper_tuning"] = _fetch_paper_tuning_snapshot(db)
+    payload["latest_account"] = _attach_recorded_closed_trade_pl(
+        payload["latest_account"],
+        payload["paper_tuning"],
+    )
     payload["crypto"] = _fetch_crypto_dashboard_snapshot(payload["latest_account"], payload["recent_orders"])
     payload["options"] = _fetch_options_dashboard_snapshot(payload["latest_account"], payload["recent_orders"])
 

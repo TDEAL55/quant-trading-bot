@@ -479,6 +479,17 @@ class AlpacaPaperBroker:
             rows = self._trading_client.get_orders()
         return [normalize_alpaca_order(row) for row in rows or []]
 
+    def get_market_clock(self) -> dict[str, Any]:
+        """Return Alpaca's read-only market clock for accurate dashboard status."""
+        clock = self._trading_client.get_clock()
+        return {
+            "is_open": bool(getattr(clock, "is_open", False)),
+            "timestamp": str(getattr(clock, "timestamp", "") or ""),
+            "next_open": str(getattr(clock, "next_open", "") or ""),
+            "next_close": str(getattr(clock, "next_close", "") or ""),
+            "source": "alpaca",
+        }
+
     def get_order_history(self, limit: int = 50) -> list[dict[str, Any]]:
         safe_limit = max(1, min(int(limit or 50), 500))
         if GetOrdersRequest is not None and QueryOrderStatus is not None:

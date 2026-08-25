@@ -1254,7 +1254,13 @@ def build_dashboard_view_model(payload):
     portfolio_history = payload.get("portfolio_history") or []
 
     bot_health_text, bot_health_style = classify_bot_health(latest_run)
-    market_text, market_style = classify_market_status(latest_signal)
+    account_market_open = latest_account.get("market_open")
+    market_state = (
+        {"market_open": account_market_open}
+        if account_market_open is not None
+        else latest_signal
+    )
+    market_text, market_style = classify_market_status(market_state)
     signal_text, signal_style = classify_signal(latest_signal.get("generated_signal"))
     historical_daily_pl, historical_total_pl = calculate_daily_and_total_pl(portfolio_history)
     broker_day_pl = latest_account.get("day_pl")
@@ -1293,6 +1299,7 @@ def build_dashboard_view_model(payload):
     return {
         "bot_health": {"label": bot_health_text, "style": bot_health_style},
         "market_status": {"label": market_text, "style": market_style},
+        "market_is_open": _as_bool(market_state.get("market_open")),
         "signal": {"label": signal_text, "style": signal_style},
         "last_successful_run": format_timestamp_eastern(latest_success.get("run_timestamp")),
         "trading_mode": friendly_status_text(latest_run.get("trading_mode"), "Paper"),
@@ -1454,8 +1461,13 @@ def build_monitor_status_snapshot(payload, view):
     except (TypeError, ValueError):
         scan_duration_seconds = None
 
+    runner_recent_and_healthy = bool(
+        latest_run
+        and not heartbeat_stale
+        and view.get("bot_health", {}).get("style") != "error"
+    )
     return {
-        "bot_service": "RUNNING" if service_health.get("continuous_service_active") or (bool(latest_run) and view.get("bot_health", {}).get("style") != "error") else "STOPPED",
+        "bot_service": "RUNNING" if service_health.get("continuous_service_active") or runner_recent_and_healthy else "STOPPED",
         "dashboard_service": "RUNNING",
         "trading_mode": trading_mode,
         "autonomous_paper_trading": "ENABLED" if autonomous_enabled else "DISABLED",
@@ -2918,7 +2930,11 @@ def render_header(payload, view):
     worker_parts = format_compact_timestamp((payload.get("latest_run") or {}).get("run_timestamp"))
     now_parts = format_compact_timestamp(datetime.now(timezone.utc).isoformat())
     service_active = bool((payload.get("service_health") or {}).get("continuous_service_active"))
-    bot_state = "RUNNING" if service_active or bool(payload.get("latest_run")) else "WAITING"
+    last_run_age = _seconds_since_iso((payload.get("latest_run") or {}).get("run_timestamp"))
+    runner_recent = last_run_age is not None and last_run_age <= 60 * 30
+    bot_state = "RUNNING" if service_active or runner_recent else "STOPPED"
+    market_is_open = bool(view.get("market_is_open"))
+    market_label = "MARKET OPEN" if market_is_open else "MARKET CLOSED"
     today_pl = _as_float(view.get("today_pl"), 0.0)
     today_class = "positive" if today_pl > 0 else "negative" if today_pl < 0 else "flat"
     st.markdown(
@@ -2931,7 +2947,7 @@ def render_header(payload, view):
                 </div>
                 <div class='dq-desk-statuses'>
                     <span class='dq-desk-pill {'live' if bot_state == 'RUNNING' else 'idle'}'><i></i>BOT {bot_state}</span>
-                    <span class='dq-desk-pill {'live' if clock['is_open'] else 'idle'}'><i></i>{_safe_text(clock['label'])}</span>
+                    <span class='dq-desk-pill {'live' if market_is_open else 'idle'}'><i></i>{market_label}</span>
                     <span class='dq-desk-clock' title='{_safe_text(now_parts['full'])}'>{_safe_text(now_parts['time'])}</span>
                 </div>
             </div>
@@ -3430,7 +3446,7 @@ def render_command_center_page(payload, view):
     status = summary["status"]
     crypto = dict(payload.get("crypto") or {})
     options = dict(payload.get("options") or {})
-    stock_market = _safe_text(view.get("market_status", {}).get("label"), "Unknown")
+    stock_market = "Open" if bool(view.get("market_is_open")) else "Closed"
     trading_enabled = status.get("kill_switch") != "ON" and status.get("autonomous_paper_trading") == "ENABLED"
     option_market = "OPEN" if stock_market.upper() == "OPEN" else "CLOSED"
     engine_items = [
@@ -3594,10 +3610,15 @@ def render_account_page(payload, view):
             entry_ts = position.get("entry_timestamp")
             hold_seconds = _seconds_since_iso(entry_ts)
             holding_time = "Unknown" if hold_seconds is None else (f"{hold_seconds // 3600}h" if hold_seconds >= 3600 else f"{max(hold_seconds // 60, 0)}m")
+            signed_quantity = _as_float(position.get("quantity"), 0.0)
+            asset_class = str(position.get("asset_class") or "").strip().lower()
+            asset_label = "Crypto" if "crypto" in asset_class else "Option" if "option" in asset_class else "Stock"
             position_rows.append(
                 {
                     "symbol": position.get("symbol"),
-                    "quantity": position.get("quantity"),
+                    "asset": asset_label,
+                    "direction": "SHORT" if signed_quantity < 0 else "LONG",
+                    "quantity": abs(signed_quantity),
                     "entry_price": position.get("average_entry_price"),
                     "current_price": position.get("current_price"),
                     "market_value": position.get("market_value"),
