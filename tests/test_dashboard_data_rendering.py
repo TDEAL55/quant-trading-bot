@@ -2,7 +2,7 @@ from monitoring_db import MonitoringDatabase
 from monitoring_recorder import MonitoringRecorder
 import dashboard_app
 import dashboard_data
-from dashboard_data import _attach_recorded_closed_trade_pl
+from dashboard_data import _attach_recorded_closed_trade_pl, _summarize_bot_closed_orders
 
 
 class _ReadOnlyPaperBroker:
@@ -36,7 +36,7 @@ class _ReadOnlyPaperBroker:
         return []
 
     def get_order_history(self, limit=50):
-        assert limit == 120
+        assert limit == 500
         return [
             {
                 "order_id": "broker-1",
@@ -105,6 +105,33 @@ def test_recorded_closed_trade_pl_populates_live_account_snapshot():
 
     assert result["realized_paper_pl"] == 142.75
     assert "realized_paper_pl" not in account
+
+
+def test_filled_bot_orders_reconstruct_long_short_crypto_and_option_closes():
+    orders = [
+        {"order_id": "1", "client_order_id": "qtb-stock-buy", "symbol": "AAPL", "asset_class": "us_equity", "side": "buy", "filled_quantity": 2, "average_fill_price": 100, "status": "filled", "updated_at": "2026-08-01T10:00:00Z"},
+        {"order_id": "2", "client_order_id": "qtb-exit-stock", "symbol": "AAPL", "asset_class": "us_equity", "side": "sell", "filled_quantity": 2, "average_fill_price": 110, "status": "filled", "updated_at": "2026-08-02T10:00:00Z"},
+        {"order_id": "3", "client_order_id": "qtb-crypto-buy", "symbol": "BTC/USD", "asset_class": "crypto", "side": "buy", "filled_quantity": 0.01, "average_fill_price": 100000, "status": "filled", "updated_at": "2026-08-03T10:00:00Z"},
+        {"order_id": "4", "client_order_id": "qtb-crypto-sell", "symbol": "BTC/USD", "asset_class": "crypto", "side": "sell", "filled_quantity": 0.01, "average_fill_price": 101000, "status": "filled", "updated_at": "2026-08-04T10:00:00Z"},
+        {"order_id": "5", "client_order_id": "qtb-short", "symbol": "SBLK", "asset_class": "us_equity", "side": "sell", "filled_quantity": 3, "average_fill_price": 20, "status": "filled", "updated_at": "2026-08-05T10:00:00Z"},
+        {"order_id": "6", "client_order_id": "qtb-exit-short", "symbol": "SBLK", "asset_class": "us_equity", "side": "buy", "filled_quantity": 3, "average_fill_price": 18, "status": "filled", "updated_at": "2026-08-06T10:00:00Z"},
+        {"order_id": "7", "client_order_id": "manual-order", "symbol": "MSFT", "asset_class": "us_equity", "side": "buy", "filled_quantity": 1, "average_fill_price": 10, "status": "filled", "updated_at": "2026-08-07T10:00:00Z"},
+    ]
+
+    result = _summarize_bot_closed_orders(list(reversed(orders)))
+
+    assert result["closed_trade_count"] == 3
+    assert result["realized_paper_pl"] == 36.0
+
+
+def test_broker_closed_summary_wins_and_recorded_database_is_fallback():
+    broker_account = {"closed_trade_count": 2, "realized_paper_pl": 50.0}
+    tuning = {"closed_trades": {"closed_trades": 3, "net_pnl": 142.75}}
+    assert _attach_recorded_closed_trade_pl(broker_account, tuning)["realized_paper_pl"] == 50.0
+
+    fallback = _attach_recorded_closed_trade_pl({}, tuning)
+    assert fallback["closed_trade_count"] == 3
+    assert fallback["realized_paper_pl"] == 142.75
 
 
 def test_broker_daily_pl_and_short_positions_render_clearly():

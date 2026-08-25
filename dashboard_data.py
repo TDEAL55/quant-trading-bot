@@ -73,12 +73,80 @@ def _broker_order_to_dashboard_event(order: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _summarize_bot_closed_orders(orders: list[dict[str, Any]]) -> dict[str, Any]:
+    """Reconstruct realized P&L from filled bot orders using average-cost lots."""
+    inventory: dict[str, dict[str, float]] = {}
+    closed_trade_count = 0
+    realized_pnl = 0.0
+    seen_order_ids: set[str] = set()
+    chronological = sorted(
+        list(orders or []),
+        key=lambda row: str((row or {}).get("updated_at") or (row or {}).get("submitted_at") or ""),
+    )
+    for raw_order in chronological:
+        order = dict(raw_order or {})
+        order_id = str(order.get("order_id") or "").strip()
+        if order_id and order_id in seen_order_ids:
+            continue
+        if order_id:
+            seen_order_ids.add(order_id)
+        client_order_id = str(order.get("client_order_id") or "").strip().lower()
+        if not client_order_id.startswith("qtb-"):
+            continue
+        if str(order.get("status") or "").strip().lower() != "filled":
+            continue
+        symbol = str(order.get("symbol") or "").strip().upper()
+        side = str(order.get("side") or "").strip().lower()
+        quantity = abs(float(order.get("filled_quantity") or 0.0))
+        fill_price = float(order.get("average_fill_price") or 0.0)
+        if not symbol or side not in {"buy", "sell"} or quantity <= 0 or fill_price <= 0:
+            continue
+
+        signed_fill = quantity if side == "buy" else -quantity
+        lot = inventory.setdefault(symbol, {"quantity": 0.0, "average_price": 0.0})
+        existing_quantity = float(lot["quantity"])
+        existing_price = float(lot["average_price"])
+        if existing_quantity == 0 or existing_quantity * signed_fill > 0:
+            combined_quantity = abs(existing_quantity) + quantity
+            lot["average_price"] = (
+                ((abs(existing_quantity) * existing_price) + (quantity * fill_price)) / combined_quantity
+            )
+            lot["quantity"] = existing_quantity + signed_fill
+            continue
+
+        closing_quantity = min(abs(existing_quantity), quantity)
+        asset_class = str(order.get("asset_class") or "").strip().lower()
+        multiplier = 100.0 if asset_class in {"option", "us_option"} else 1.0
+        if existing_quantity > 0:
+            realized_pnl += (fill_price - existing_price) * closing_quantity * multiplier
+        else:
+            realized_pnl += (existing_price - fill_price) * closing_quantity * multiplier
+        closed_trade_count += 1
+
+        remaining_quantity = existing_quantity + signed_fill
+        if abs(remaining_quantity) <= 1e-10:
+            lot["quantity"] = 0.0
+            lot["average_price"] = 0.0
+        elif existing_quantity * remaining_quantity > 0:
+            lot["quantity"] = remaining_quantity
+        else:
+            lot["quantity"] = remaining_quantity
+            lot["average_price"] = fill_price
+
+    return {
+        "closed_trade_count": closed_trade_count,
+        "realized_paper_pl": round(realized_pnl, 6),
+        "source": "alpaca_filled_bot_orders",
+    }
+
+
 def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dict[str, Any]:
     broker = paper_broker_factory(mode="PAPER")
     account = broker.get_account()
     positions_by_symbol = broker.get_positions()
     open_orders = broker.get_open_orders()
-    broker_orders = list(getattr(broker, "get_order_history", lambda limit=50: [])(limit=120) or [])
+    broker_orders = list(getattr(broker, "get_order_history", lambda limit=50: [])(limit=500) or [])
+    closed_summary = _summarize_bot_closed_orders(broker_orders)
     try:
         market_clock = dict(getattr(broker, "get_market_clock", lambda: {})() or {})
     except Exception:
@@ -96,7 +164,7 @@ def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dic
         }
         for symbol, details in sorted(positions_by_symbol.items())
     ]
-    recent_orders = [_broker_order_to_dashboard_event(order) for order in broker_orders]
+    recent_orders = [_broker_order_to_dashboard_event(order) for order in broker_orders[:120]]
     equity = float(account.get("equity") or account.get("portfolio_value") or 0.0)
     last_equity = float(account.get("last_equity") or equity)
     return {
@@ -110,6 +178,9 @@ def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dic
         "buying_power": account.get("buying_power", 0.0),
         "open_positions": len(positions),
         "unrealized_paper_pl": sum(float(item.get("unrealized_pl") or 0.0) for item in positions),
+        "realized_paper_pl": closed_summary["realized_paper_pl"] if closed_summary["closed_trade_count"] else None,
+        "closed_trade_count": closed_summary["closed_trade_count"],
+        "closed_trade_source": closed_summary["source"],
         "pending_orders": len(open_orders),
         "positions": positions,
         "short_positions": sum(1 for item in positions if float(item.get("quantity") or 0.0) < 0),
@@ -271,6 +342,10 @@ def _attach_recorded_closed_trade_pl(
 ) -> dict[str, Any]:
     account = dict(latest_account or {})
     closed = dict((paper_tuning or {}).get("closed_trades") or {})
+    recorded_count = int(closed.get("closed_trades") or 0)
+    if int(account.get("closed_trade_count") or 0) <= 0 and recorded_count > 0:
+        account["closed_trade_count"] = recorded_count
+        account["closed_trade_source"] = "strategy_closed_trades"
     if account.get("realized_paper_pl") is None:
         account["realized_paper_pl"] = float(closed.get("net_pnl") or 0.0)
     return account

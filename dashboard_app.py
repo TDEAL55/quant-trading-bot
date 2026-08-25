@@ -1325,6 +1325,7 @@ def build_dashboard_view_model(payload):
         "buying_power": _as_float(latest_account.get("buying_power"), 0.0),
         "unrealized_paper_pl": _as_float(latest_account.get("unrealized_paper_pl"), 0.0),
         "realized_paper_pl": _as_float(latest_account.get("realized_paper_pl"), 0.0),
+        "closed_trade_count": int(latest_account.get("closed_trade_count") or 0),
         "open_positions": int(latest_account.get("open_positions") or 0),
         "account_status": friendly_status_text(latest_account.get("account_status"), "Unknown"),
         "account_source": _safe_text(latest_account.get("source"), "monitoring database"),
@@ -3477,7 +3478,7 @@ def render_command_center_page(payload, view):
     top = st.columns(3)
     _metric_card(top[0], "Today's P&L", format_currency(view["today_pl"]), "buy" if view["today_pl"] > 0 else "sell" if view["today_pl"] < 0 else "neutral")
     _metric_card(top[1], "Open Position P&L", format_currency(view["unrealized_paper_pl"]), "buy" if view["unrealized_paper_pl"] > 0 else "sell" if view["unrealized_paper_pl"] < 0 else "neutral")
-    _metric_card(top[2], "Closed Trade P&L", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] > 0 else "sell" if view["realized_paper_pl"] < 0 else "neutral")
+    _metric_card(top[2], f"Closed P&L ({int(view.get('closed_trade_count') or 0)} trades)", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] > 0 else "sell" if view["realized_paper_pl"] < 0 else "neutral")
 
     render_alert_banner(payload, view)
 
@@ -3580,7 +3581,7 @@ def render_account_page(payload, view):
     _metric_card(second_row[3], "Orders Today", orders_today, "neutral")
 
     third_row = st.columns(2)
-    _metric_card(third_row[0], "Closed Trade P&L", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] > 0 else "sell" if view["realized_paper_pl"] < 0 else "neutral")
+    _metric_card(third_row[0], f"Closed P&L ({int(view.get('closed_trade_count') or 0)} trades)", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] > 0 else "sell" if view["realized_paper_pl"] < 0 else "neutral")
     _metric_card(third_row[1], "Account Status", view["account_status"], "healthy" if _is_active_account_status(view["account_status"]) else "warning")
 
     st.markdown("### Portfolio Allocation", unsafe_allow_html=True)
