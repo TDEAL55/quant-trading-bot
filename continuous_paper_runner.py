@@ -327,6 +327,7 @@ def run_continuous_paper_runner(
         int(os.getenv("CRYPTO_SCAN_INTERVAL_SECONDS", str(crypto_interval_minutes * 60))),
         10,
     )
+    using_default_crypto_runner = bool(crypto_enabled and crypto_runner is None)
     if crypto_enabled and crypto_runner is None:
         from crypto_paper_trader import run_crypto_paper_cycle
 
@@ -422,6 +423,14 @@ def run_continuous_paper_runner(
     last_active_cycle_key: str | None = None
     last_crypto_cycle_at: datetime | None = None
     last_options_cycle_at: datetime | None = None
+    crypto_runtime_cache: dict[str, Any] = {}
+    last_crypto_log_at: datetime | None = None
+    last_crypto_log_signature: tuple[Any, ...] | None = None
+    crypto_log_heartbeat_seconds = max(int(os.getenv("CRYPTO_LOG_HEARTBEAT_SECONDS", "60")), crypto_interval_seconds)
+    last_market_closed_log_at: datetime | None = None
+    market_closed_log_interval_seconds = max(int(os.getenv("MARKET_CLOSED_LOG_INTERVAL_SECONDS", "300")), 60)
+    last_daily_summary_date: str | None = None
+    last_weekly_summary_key: str | None = None
     daily_summary_enabled = str(os.getenv("NOTIFICATION_DAILY_SUMMARY_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
     weekly_summary_enabled = str(os.getenv("NOTIFICATION_WEEKLY_SUMMARY_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
     daily_summary_hour, daily_summary_minute = _parse_summary_time_et(os.getenv("DAILY_SUMMARY_TIME_ET", "16:15"))
@@ -446,34 +455,55 @@ def run_continuous_paper_runner(
             if crypto_due:
                 stats["crypto_cycles_attempted"] += 1
                 try:
+                    crypto_kwargs = {
+                        "now": now_eastern.astimezone(timezone.utc),
+                        "dry_run": bool(
+                            dry_run
+                            or str(os.getenv("CRYPTO_DRY_RUN", "false")).strip().lower()
+                            in {"1", "true", "yes", "on"}
+                        ),
+                    }
+                    if using_default_crypto_runner:
+                        crypto_kwargs["runtime_cache"] = crypto_runtime_cache
                     crypto_result = dict(
-                        crypto_runner(
-                            now=now_eastern.astimezone(timezone.utc),
-                            dry_run=bool(
-                                dry_run
-                                or str(os.getenv("CRYPTO_DRY_RUN", "false")).strip().lower()
-                                in {"1", "true", "yes", "on"}
-                            ),
-                        )
+                        crypto_runner(**crypto_kwargs)
                         or {}
                     )
                     confirmed_crypto_orders = int(crypto_result.get("confirmed_order_count") or 0)
                     stats["crypto_cycles_completed"] += 1
                     stats["crypto_orders_submitted"] += confirmed_crypto_orders
-                    _log_event(
-                        "crypto_cycle_complete",
-                        run_id=run_id,
-                        timestamp=now_eastern.isoformat(),
-                        cycle_status=str(crypto_result.get("cycle_status") or "unknown"),
-                        universe_count=int(crypto_result.get("universe_count") or 0),
-                        scanned_count=int(crypto_result.get("scanned_count") or 0),
-                        buy_signal_count=int(crypto_result.get("buy_signal_count") or 0),
-                        sell_signal_count=int(crypto_result.get("sell_signal_count") or 0),
-                        confirmed_order_count=confirmed_crypto_orders,
-                        action_reason=str(crypto_result.get("action_reason") or ""),
+                    crypto_log_signature = (
+                        str(crypto_result.get("cycle_status") or "unknown"),
+                        str(crypto_result.get("action_reason") or ""),
+                        int(crypto_result.get("buy_signal_count") or 0),
+                        int(crypto_result.get("sell_signal_count") or 0),
+                        int(crypto_result.get("open_position_count") or 0),
                     )
+                    heartbeat_due = bool(
+                        last_crypto_log_at is None
+                        or (now_eastern - last_crypto_log_at).total_seconds() >= float(crypto_log_heartbeat_seconds)
+                    )
+                    if confirmed_crypto_orders or crypto_log_signature != last_crypto_log_signature or heartbeat_due:
+                        _log_event(
+                            "crypto_cycle_complete",
+                            run_id=run_id,
+                            timestamp=now_eastern.isoformat(),
+                            cycle_status=crypto_log_signature[0],
+                            universe_count=int(crypto_result.get("universe_count") or 0),
+                            scanned_count=int(crypto_result.get("scanned_count") or 0),
+                            buy_signal_count=crypto_log_signature[2],
+                            sell_signal_count=crypto_log_signature[3],
+                            confirmed_order_count=confirmed_crypto_orders,
+                            action_reason=crypto_log_signature[1],
+                            signal_data_reused=bool(crypto_result.get("signal_data_reused")),
+                            cycle_duration_ms=float(crypto_result.get("cycle_duration_ms") or 0.0),
+                        )
+                        last_crypto_log_at = now_eastern
+                        last_crypto_log_signature = crypto_log_signature
                 except Exception as exc:
                     stats["crypto_cycles_failed"] += 1
+                    if using_default_crypto_runner:
+                        crypto_runtime_cache.clear()
                     _log_event(
                         "crypto_cycle_failed",
                         run_id=run_id,
@@ -489,7 +519,7 @@ def run_continuous_paper_runner(
                 if crypto_enabled:
                     sleep_seconds = min(float(sleep_seconds), float(crypto_interval_seconds))
                 stats["closed_market_sleeps"] += 1
-                if daily_summary_enabled and ((now_eastern.hour, now_eastern.minute) >= (daily_summary_hour, daily_summary_minute)):
+                if daily_summary_enabled and market_date != last_daily_summary_date and ((now_eastern.hour, now_eastern.minute) >= (daily_summary_hour, daily_summary_minute)):
                     summary_message = format_daily_summary_message(
                         {
                             "date": market_date,
@@ -508,55 +538,65 @@ def run_continuous_paper_runner(
                         deduplication_key=f"daily_summary:{market_date}",
                         deduplication_window_seconds=60 * 60 * 30,
                     )
+                    last_daily_summary_date = market_date
                 if weekly_summary_enabled and now_eastern.weekday() == 4 and ((now_eastern.hour, now_eastern.minute) >= (daily_summary_hour, daily_summary_minute)):
                     iso_year, iso_week, _ = now_eastern.isocalendar()
-                    weekly_message = format_weekly_summary_message(
-                        {
-                            "strategy_leaderboard": "N/A",
-                            "total_paper_pl": "N/A",
-                            "win_rate": "N/A",
-                            "profit_factor": "N/A",
-                            "maximum_drawdown": "N/A",
-                            "best_strategies": "N/A",
-                            "worst_strategies": "N/A",
-                            "best_sectors": "N/A",
-                            "worst_sectors": "N/A",
-                            "factor_effectiveness": "N/A",
-                            "recommendations": "N/A",
-                            "strategies_recommended_for_pause": "N/A",
-                            "proposed_weight_changes": "N/A",
-                        }
+                    weekly_key = f"{iso_year}-W{iso_week:02d}"
+                    if weekly_key != last_weekly_summary_key:
+                        weekly_message = format_weekly_summary_message(
+                            {
+                                "strategy_leaderboard": "N/A",
+                                "total_paper_pl": "N/A",
+                                "win_rate": "N/A",
+                                "profit_factor": "N/A",
+                                "maximum_drawdown": "N/A",
+                                "best_strategies": "N/A",
+                                "worst_strategies": "N/A",
+                                "best_sectors": "N/A",
+                                "worst_sectors": "N/A",
+                                "factor_effectiveness": "N/A",
+                                "recommendations": "N/A",
+                                "strategies_recommended_for_pause": "N/A",
+                                "proposed_weight_changes": "N/A",
+                            }
+                        )
+                        _notify(
+                            event_type="weekly_summary",
+                            title="Weekly Summary",
+                            message=weekly_message,
+                            severity="INFO",
+                            metadata={"run_id": run_id, "dry_run": bool(dry_run), "status": "weekly_summary", "week": weekly_key},
+                            deduplication_key=f"weekly_summary:{weekly_key}",
+                            deduplication_window_seconds=60 * 60 * 24 * 8,
+                        )
+                        last_weekly_summary_key = weekly_key
+                closed_heartbeat_due = bool(
+                    last_market_closed_log_at is None
+                    or (now_eastern - last_market_closed_log_at).total_seconds() >= float(market_closed_log_interval_seconds)
+                )
+                if closed_heartbeat_due:
+                    _log_event(
+                        "continuous_runner_market_closed",
+                        run_id=run_id,
+                        timestamp=now_eastern.isoformat(),
+                        sleep_seconds=round(float(sleep_seconds), 3),
                     )
                     _notify(
-                        event_type="weekly_summary",
-                        title="Weekly Summary",
-                        message=weekly_message,
+                        event_type="market_closed_wait",
+                        title="Market Closed",
+                        message="Runner is waiting for the next market open window.",
                         severity="INFO",
-                        metadata={"run_id": run_id, "dry_run": bool(dry_run), "status": "weekly_summary", "week": f"{iso_year}-W{iso_week:02d}"},
-                        deduplication_key=f"weekly_summary:{iso_year}:W{iso_week:02d}",
-                        deduplication_window_seconds=60 * 60 * 24 * 8,
+                        metadata={
+                            "run_id": run_id,
+                            "dry_run": bool(dry_run),
+                            "status": "market_closed_wait",
+                            "reason": "outside_market_hours",
+                            "market_date": market_date,
+                        },
+                        deduplication_key=f"market_closed_wait:{market_date}",
+                        deduplication_window_seconds=60 * 60 * 30,
                     )
-                _log_event(
-                    "continuous_runner_market_closed",
-                    run_id=run_id,
-                    timestamp=now_eastern.isoformat(),
-                    sleep_seconds=round(float(sleep_seconds), 3),
-                )
-                _notify(
-                    event_type="market_closed_wait",
-                    title="Market Closed",
-                    message="Runner is waiting for the next market open window.",
-                    severity="INFO",
-                    metadata={
-                        "run_id": run_id,
-                        "dry_run": bool(dry_run),
-                        "status": "market_closed_wait",
-                        "reason": "outside_market_hours",
-                        "market_date": market_date,
-                    },
-                    deduplication_key=f"market_closed_wait:{market_date}",
-                    deduplication_window_seconds=60 * 60 * 30,
-                )
+                    last_market_closed_log_at = now_eastern
                 stopped_during_sleep = _sleep_with_stop(sleep_fn, sleep_seconds, stop_event)
                 stats["cycles"] += 1
                 if stopped_during_sleep:

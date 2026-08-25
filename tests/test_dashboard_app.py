@@ -596,7 +596,7 @@ def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch)
 
     nav_calls = [call for call in fake_st._calls if call[0] == "selectbox" and call[1] == "Navigate"]
     assert nav_calls
-    assert nav_calls[0][2] == ["Command Center", "Crypto", "Options", "Portfolio", "Orders", "Risk", "Operations"]
+    assert nav_calls[0][2] == ["Command Center", "Portfolio", "Orders", "Crypto", "Options"]
     assert all("trade" not in str(page).lower() for page in nav_calls[0][2])
 
     build_markers = [call for call in fake_st._calls if call[0] == "markdown" and dashboard_app.UI_BUILD_LABEL in call[1]]

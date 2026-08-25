@@ -814,6 +814,33 @@ def test_crypto_cycle_runs_while_stock_market_is_closed(tmp_path, monkeypatch):
     assert sleeps and sleeps[0] == 15 * 60
 
 
+def test_closed_market_logging_is_throttled_during_fast_crypto_loops(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    events = []
+    monkeypatch.setenv("CRYPTO_TRADING_ENABLED", "true")
+    monkeypatch.setenv("CRYPTO_SCAN_INTERVAL_SECONDS", "10")
+    monkeypatch.setenv("MARKET_CLOSED_LOG_INTERVAL_SECONDS", "300")
+    monkeypatch.setattr(continuous_paper_runner, "_log_event", lambda event, **fields: events.append((event, fields)))
+
+    run_continuous_paper_runner(
+        config_loader=lambda: cfg,
+        runner=lambda **_kwargs: _failed_result(status="no_candidates"),
+        crypto_runner=lambda **_kwargs: {"cycle_status": "no_trade", "confirmed_order_count": 0},
+        state_path=_state_path(tmp_path),
+        now_provider=_Clock(
+            [
+                datetime(2026, 7, 25, 22, 0, tzinfo=EASTERN_TZ),
+                datetime(2026, 7, 25, 22, 0, 10, tzinfo=EASTERN_TZ),
+            ]
+        ),
+        sleep_fn=lambda _seconds: None,
+        max_iterations=2,
+    )
+
+    assert [name for name, _fields in events].count("continuous_runner_market_closed") == 1
+    assert [name for name, _fields in events].count("crypto_cycle_complete") == 1
+
+
 def test_options_cycle_runs_during_regular_market_hours(tmp_path, monkeypatch):
     cfg = _config(tmp_path)
     calls = {"stock": 0, "options": 0}

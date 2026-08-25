@@ -6,6 +6,7 @@ import math
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable
 
 from alpaca_paper_broker import AlpacaPaperBroker
@@ -134,7 +135,9 @@ def run_crypto_paper_cycle(
     status_path: str | Path | None = None,
     trades_path: str | Path | None = None,
     dry_run: bool | None = None,
+    runtime_cache: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    cycle_started = perf_counter()
     cycle_now = now or datetime.now(timezone.utc)
     if cycle_now.tzinfo is None:
         cycle_now = cycle_now.replace(tzinfo=timezone.utc)
@@ -155,31 +158,86 @@ def run_crypto_paper_cycle(
     maximum_position_percent = min(max(requested_position_percent, 0.1), 10.0)
     minimum_order_notional = max(_as_float(os.getenv("CRYPTO_MIN_ORDER_NOTIONAL", "10"), 10.0), 1.0)
     maximum_order_notional = min(max(_as_float(os.getenv("CRYPTO_MAX_ORDER_NOTIONAL", "200000"), 200000.0), minimum_order_notional), 200000.0)
+    universe_refresh_seconds = max(int(os.getenv("CRYPTO_UNIVERSE_REFRESH_SECONDS", "900")), 60)
+    signal_refresh_seconds = max(int(os.getenv("CRYPTO_SIGNAL_REFRESH_SECONDS", "60")), 10)
+    timeframe_minutes = int(os.getenv("CRYPTO_BAR_TIMEFRAME_MINUTES", "15"))
+    lookback_bars = int(os.getenv("CRYPTO_LOOKBACK_BARS", "240"))
+    maximum_age_minutes = int(os.getenv("CRYPTO_MAX_DATA_AGE_MINUTES", "45"))
 
-    broker = broker_factory(mode="PAPER")
-    universe = list(universe_loader(broker_factory=lambda **_: broker) or [])
+    cache = runtime_cache if isinstance(runtime_cache, dict) else None
+    broker = cache.get("broker") if cache is not None else None
+    if broker is None:
+        broker = broker_factory(mode="PAPER")
+        if cache is not None:
+            cache["broker"] = broker
+
+    cached_universe_at = cache.get("universe_at") if cache is not None else None
+    universe_age = (
+        (cycle_now - cached_universe_at).total_seconds()
+        if isinstance(cached_universe_at, datetime) and cycle_now >= cached_universe_at
+        else None
+    )
+    universe_refreshed = bool(
+        cache is None
+        or not cache.get("universe")
+        or universe_age is None
+        or universe_age >= float(universe_refresh_seconds)
+    )
+    if universe_refreshed:
+        universe = list(universe_loader(broker_factory=lambda **_: broker) or [])
+        if cache is not None:
+            cache["universe"] = universe
+            cache["universe_at"] = cycle_now
+    else:
+        universe = list(cache.get("universe") or [])
     symbols = [canonical_crypto_symbol(row.get("symbol")) for row in universe]
     symbol_set = set(symbols)
-    market_data = market_data_factory()
-    bars_by_symbol = market_data.fetch_bars(
-        symbols,
-        now=cycle_now,
-        timeframe_minutes=int(os.getenv("CRYPTO_BAR_TIMEFRAME_MINUTES", "15")),
-        lookback_bars=int(os.getenv("CRYPTO_LOOKBACK_BARS", "240")),
+    signal_cache_key = (tuple(symbols), buy_score, exit_score, timeframe_minutes, lookback_bars, maximum_age_minutes)
+    cached_signals_at = cache.get("signals_at") if cache is not None else None
+    signals_age = (
+        (cycle_now - cached_signals_at).total_seconds()
+        if isinstance(cached_signals_at, datetime) and cycle_now >= cached_signals_at
+        else None
     )
-    signals = [
-        analyze_crypto_bars(
-            symbol,
-            bars_by_symbol.get(symbol),
-            buy_score=buy_score,
-            exit_score=exit_score,
+    signals_refreshed = bool(
+        cache is None
+        or universe_refreshed
+        or cache.get("signals_key") != signal_cache_key
+        or not cache.get("signals")
+        or signals_age is None
+        or signals_age >= float(signal_refresh_seconds)
+    )
+    if signals_refreshed:
+        market_data = cache.get("market_data") if cache is not None else None
+        if market_data is None:
+            market_data = market_data_factory()
+            if cache is not None:
+                cache["market_data"] = market_data
+        bars_by_symbol = market_data.fetch_bars(
+            symbols,
             now=cycle_now,
-            maximum_age_minutes=int(os.getenv("CRYPTO_MAX_DATA_AGE_MINUTES", "45")),
+            timeframe_minutes=timeframe_minutes,
+            lookback_bars=lookback_bars,
         )
-        for symbol in symbols
-        if symbol in bars_by_symbol
-    ]
-    signals = sorted(signals, key=lambda row: (-_as_float(row.get("score"), 0.0), str(row.get("symbol") or "")))
+        signals = [
+            analyze_crypto_bars(
+                symbol,
+                bars_by_symbol.get(symbol),
+                buy_score=buy_score,
+                exit_score=exit_score,
+                now=cycle_now,
+                maximum_age_minutes=maximum_age_minutes,
+            )
+            for symbol in symbols
+            if symbol in bars_by_symbol
+        ]
+        signals = sorted(signals, key=lambda row: (-_as_float(row.get("score"), 0.0), str(row.get("symbol") or "")))
+        if cache is not None:
+            cache["signals"] = signals
+            cache["signals_at"] = cycle_now
+            cache["signals_key"] = signal_cache_key
+    else:
+        signals = list(cache.get("signals") or [])
 
     account = broker.get_account()
     equity = _as_float(account.get("equity") or account.get("portfolio_value"), 0.0)
@@ -322,6 +380,11 @@ def run_crypto_paper_cycle(
             "maximum_position_percent": maximum_position_percent,
             "equity": round(equity, 6),
             "non_marginable_buying_power": round(non_marginable_buying_power, 6),
+            "signal_data_reused": not signals_refreshed,
+            "signal_refresh_seconds": signal_refresh_seconds,
+            "signal_refreshed_at": _utc_iso(cache.get("signals_at") if cache is not None else cycle_now),
+            "universe_data_reused": not universe_refreshed,
+            "cycle_duration_ms": round((perf_counter() - cycle_started) * 1000.0, 3),
         }
     )
     _write_json_atomic(resolved_status_path, status)

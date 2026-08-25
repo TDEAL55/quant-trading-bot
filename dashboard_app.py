@@ -105,7 +105,7 @@ THEMES = {
     },
 }
 
-PRIMARY_PAGE_OPTIONS = ["Command Center", "Crypto", "Options", "Portfolio", "Orders", "Risk", "Operations"]
+PRIMARY_PAGE_OPTIONS = ["Command Center", "Portfolio", "Orders", "Crypto", "Options"]
 PAGE_OPTIONS = ["Command Center", "Crypto", "Options", "Portfolio", "Orders", "Risk", "Operations", "Strategy", "Performance", "Alerts", "Research", "LIVE Readiness", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
 NAVIGATION_SCOPE_OPTIONS = ["Essentials", "All pages"]
 MODE_OPTIONS = ["Standard Mode", "Focus Mode", "Presentation Mode"]
@@ -1508,8 +1508,9 @@ def build_compact_dashboard_summary(payload, view):
         position_rows.append(
             {
                 "Symbol": _safe_text(position.get("symbol"), "N/A"),
+                "Asset": friendly_status_text(position.get("asset_class"), "Stock"),
                 "Direction": "SHORT" if signed_quantity < 0 else "LONG",
-                "Shares": round(abs(signed_quantity), 4),
+                "Quantity": round(abs(signed_quantity), 8),
                 "Avg entry": format_currency(position.get("average_entry_price")),
                 "Last": format_currency(position.get("current_price")),
                 "Exposure": format_currency(abs(_as_float(position.get("market_value"), 0.0))),
@@ -1526,8 +1527,9 @@ def build_compact_dashboard_summary(payload, view):
             {
                 "Time": format_timestamp_eastern(order.get("event_timestamp")),
                 "Symbol": _safe_text(order.get("symbol"), "N/A"),
+                "Asset": friendly_status_text(order.get("asset_class"), "Stock"),
                 "Side": side if side in {"BUY", "SELL"} else normalize_signal(side),
-                "Shares": round(quantity, 4),
+                "Quantity": round(quantity, 8),
                 "Fill": format_currency(order.get("average_fill_price")),
                 "Status": friendly_status_text(order.get("safe_order_status") or order.get("status"), "Unknown"),
             }
@@ -2140,6 +2142,72 @@ def apply_dashboard_css(theme_name="Aurora"):
             gap: 0.5rem;
             margin: 0.45rem 0 0.75rem;
         }}
+        .dq-command-header {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            margin: 0.25rem 0 0.55rem;
+        }}
+        .dq-command-subtitle {{
+            color: {palette.secondary_text};
+            font-size: 0.76rem;
+            margin-top: 0.15rem;
+        }}
+        .dq-command-count {{
+            color: {palette.primary_text};
+            background: {palette.panel_bg};
+            border: 1px solid {palette.border};
+            border-radius: 999px;
+            padding: 0.34rem 0.68rem;
+            font-size: 0.72rem;
+            font-weight: 800;
+            white-space: nowrap;
+        }}
+        .dq-engine-grid {{
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.55rem;
+            margin: 0 0 0.7rem;
+        }}
+        .dq-engine-card {{
+            display: grid;
+            grid-template-columns: 1fr auto;
+            align-items: center;
+            gap: 0.1rem 0.65rem;
+            background: linear-gradient(145deg, {palette.elevated_bg}, {palette.panel_bg});
+            border: 1px solid {palette.border};
+            border-radius: 13px;
+            padding: 0.58rem 0.7rem;
+        }}
+        .dq-engine-name {{
+            color: {palette.primary_text};
+            font-size: 0.86rem;
+            font-weight: 850;
+        }}
+        .dq-engine-state {{
+            font-size: 0.67rem;
+            font-weight: 900;
+            letter-spacing: 0.035rem;
+        }}
+        .dq-engine-state.on {{ color: {palette.positive}; }}
+        .dq-engine-state.off {{ color: {palette.warning}; }}
+        .dq-engine-market {{
+            grid-column: 1 / -1;
+            color: {palette.secondary_text};
+            font-size: 0.7rem;
+        }}
+        .dq-activity-line {{
+            color: {palette.secondary_text};
+            background: {palette.panel_bg};
+            border-left: 3px solid {palette.positive};
+            border-radius: 8px;
+            padding: 0.5rem 0.68rem;
+            margin: 0.5rem 0 0.7rem;
+            font-size: 0.76rem;
+            line-height: 1.35;
+        }}
+        .dq-activity-line strong {{ color: {palette.primary_text}; }}
         .dq-compact-status {{
             background: {palette.panel_bg};
             border: 1px solid {palette.border};
@@ -2433,9 +2501,11 @@ def apply_dashboard_css(theme_name="Aurora"):
             .dq-signal-grid,
             .dq-status-bar,
             .dq-compact-strip,
+            .dq-engine-grid,
             .dq-decision-grid {{
                 grid-template-columns: 1fr;
             }}
+            .dq-command-header {{ align-items: flex-start; }}
             .dq-header-meta {{ display: none; }}
         }}
         @keyframes dqPulse {{
@@ -3046,54 +3116,46 @@ def render_options_page(payload, view):
 
 def render_command_center_page(payload, view):
     summary = build_compact_dashboard_summary(payload, view)
-    tuning_scorecard = build_paper_tuning_scorecard(payload)
     status = summary["status"]
-    status_items = [
-        ("Bot status", status.get("bot_service", "STOPPED")),
-        ("Market", view.get("market_status", {}).get("label", "Unknown")),
-        ("Trading", "PAUSED" if status.get("kill_switch") == "ON" else status.get("autonomous_paper_trading", "DISABLED")),
-        ("Broker sync", status.get("last_broker_check", "Unknown")),
+    crypto = dict(payload.get("crypto") or {})
+    options = dict(payload.get("options") or {})
+    stock_market = _safe_text(view.get("market_status", {}).get("label"), "Unknown")
+    trading_enabled = status.get("kill_switch") != "ON" and status.get("autonomous_paper_trading") == "ENABLED"
+    option_market = "OPEN" if stock_market.upper() == "OPEN" else "CLOSED"
+    engine_items = [
+        ("Stocks", "ENABLED" if trading_enabled else "PAUSED", stock_market, trading_enabled),
+        ("Crypto", "ENABLED" if bool(crypto.get("enabled")) else "DISABLED", "OPEN 24/7", bool(crypto.get("enabled"))),
+        ("Options", "ENABLED" if bool(options.get("enabled")) else "DISABLED", option_market, bool(options.get("enabled"))),
     ]
-    status_html = "".join(
-        f"<div class='dq-compact-status'><div class='dq-compact-status-label'>{_safe_text(label)}</div>"
-        f"<div class='dq-compact-status-value' title='{_safe_text(value)}'>{_safe_text(value)}</div></div>"
-        for label, value in status_items
+    engine_html = "".join(
+        "<div class='dq-engine-card'>"
+        f"<div class='dq-engine-name'>{_safe_text(name)}</div>"
+        f"<div class='dq-engine-state {'on' if enabled else 'off'}'>{_safe_text(state)}</div>"
+        f"<div class='dq-engine-market'>{_safe_text(market)}</div>"
+        "</div>"
+        for name, state, market, enabled in engine_items
     )
-    st.markdown(f"<div class='dq-compact-strip'>{status_html}</div>", unsafe_allow_html=True)
-
-    account_source = _safe_text(view.get("account_source"), "monitoring database")
     st.markdown(
-        f"<div class='dq-source-ribbon'><span><strong>Broker source of truth</strong> · positions, orders, and P&amp;L are synced from {_safe_text(account_source)}</span>"
-        f"<span>{int(view.get('open_positions') or 0)} positions · {int((payload.get('latest_account') or {}).get('pending_orders') or 0)} pending</span></div>",
+        f"<div class='dq-command-header'><div><div class='dq-panel-title'>TRADING ENGINES</div>"
+        f"<div class='dq-command-subtitle'>{_safe_text(status.get('bot_service', 'STOPPED'))} · broker synced {_safe_text(status.get('last_broker_check', 'Unknown'))}</div></div>"
+        f"<div class='dq-command-count'>{int(view.get('open_positions') or 0)} open positions</div></div>"
+        f"<div class='dq-engine-grid'>{engine_html}</div>",
         unsafe_allow_html=True,
     )
 
     top = st.columns(4)
     _metric_card(top[0], "PAPER Equity", format_currency(view["portfolio_value"]), "neutral", _direction_arrow(view.get("portfolio_value"), view.get("previous_portfolio_value")))
-    _metric_card(top[1], "Today's P&L", format_currency(view["today_pl"]), "buy" if view["today_pl"] >= 0 else "sell")
-    _metric_card(top[2], "Unrealized P&L", format_currency(view["unrealized_paper_pl"]), "buy" if view["unrealized_paper_pl"] >= 0 else "sell")
-    _metric_card(top[3], "Cash", format_currency(view["cash"]), "neutral")
+    _metric_card(top[1], "Today", format_currency(view["today_pl"]), "buy" if view["today_pl"] >= 0 else "sell")
+    _metric_card(top[2], "Unrealized", format_currency(view["unrealized_paper_pl"]), "buy" if view["unrealized_paper_pl"] >= 0 else "sell")
+    _metric_card(top[3], "Realized", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] >= 0 else "sell")
 
     render_alert_banner(payload, view)
     scan = summary["scan"]
     st.markdown(
-        f"""
-        <div class='dq-decision-card'>
-            <div class='dq-panel-title'>LATEST BOT DECISION</div>
-            <div class='dq-decision-grid'>
-                <div><div class='dq-compact-status-label'>Scan status</div><div class='dq-decision-value'>{_safe_text(scan['status'])}</div></div>
-                <div><div class='dq-compact-status-label'>Stocks scanned</div><div class='dq-decision-value'>{scan['symbols']}</div></div>
-                <div><div class='dq-compact-status-label'>Passed</div><div class='dq-decision-value'>{scan['eligible']}</div></div>
-                <div><div class='dq-compact-status-label'>Top candidate</div><div class='dq-decision-value'>{_safe_text(scan['top_candidate'])}</div></div>
-            </div>
-            <div class='dq-decision-outcome'>{_safe_text(scan['outcome'])} · {_safe_text(scan['completed_at'])}</div>
-        </div>
-        """,
+        f"<div class='dq-activity-line'><strong>Latest stock scan:</strong> {_safe_text(scan['status'])} · "
+        f"{scan['symbols']} checked · {scan['eligible']} passed · {_safe_text(scan['outcome'])}</div>",
         unsafe_allow_html=True,
     )
-
-    _render_crypto_dashboard_panel(payload, detailed=False)
-    _render_options_dashboard_panel(payload, detailed=False)
 
     if summary.get("short_position_count"):
         st.markdown(
@@ -3102,22 +3164,18 @@ def render_command_center_page(payload, view):
             unsafe_allow_html=True,
         )
 
-    st.markdown("<div class='dq-section-heading'><div class='dq-section-heading-title'>Open positions</div><div class='dq-section-heading-note'>Live Alpaca PAPER holdings</div></div>", unsafe_allow_html=True)
+    st.markdown("<div class='dq-section-heading'><div class='dq-section-heading-title'>Open positions</div><div class='dq-section-heading-note'>Current Alpaca PAPER holdings and P&amp;L</div></div>", unsafe_allow_html=True)
     if summary["position_rows"]:
         st.dataframe(summary["position_rows"])
     else:
         _empty_state("No open paper positions.")
 
-    st.markdown("<div class='dq-section-heading'><div class='dq-section-heading-title'>Recent orders</div><div class='dq-section-heading-note'>Latest broker-confirmed activity</div></div>", unsafe_allow_html=True)
+    st.markdown("<div class='dq-section-heading'><div class='dq-section-heading-title'>Order history</div><div class='dq-section-heading-note'>Five latest broker-confirmed orders</div></div>", unsafe_allow_html=True)
     if summary["order_rows"]:
         st.dataframe(summary["order_rows"])
     else:
         _empty_state("No paper orders have been recorded yet.")
 
-    st.caption(
-        f"Tuning evidence: {tuning_scorecard['evidence_status']} · "
-        f"{tuning_scorecard['submitted']} submitted · {tuning_scorecard['filled']} filled · {tuning_scorecard['closed_trades']} closed"
-    )
 
 
 def render_sidebar(payload):

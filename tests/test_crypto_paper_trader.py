@@ -26,8 +26,11 @@ class _Broker:
     def __init__(self, *, positions=None):
         self.positions = dict(positions or {})
         self.calls = []
+        self.account_checks = 0
+        self.position_checks = 0
 
     def get_account(self):
+        self.account_checks += 1
         return {
             "equity": 100000.0,
             "portfolio_value": 100000.0,
@@ -36,6 +39,7 @@ class _Broker:
         }
 
     def get_positions(self):
+        self.position_checks += 1
         return self.positions
 
     def get_open_orders(self):
@@ -125,3 +129,56 @@ def test_crypto_cycle_sells_existing_position_on_bearish_exit(monkeypatch, tmp_p
     assert broker.calls[0]["quantity"] == 0.25
     assert broker.calls[0]["time_in_force"] == "gtc"
 
+
+def test_crypto_runtime_cache_reuses_expensive_data_but_rechecks_broker(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    monkeypatch.setenv("CRYPTO_SIGNAL_REFRESH_SECONDS", "60")
+    monkeypatch.setenv("CRYPTO_UNIVERSE_REFRESH_SECONDS", "900")
+    broker = _Broker()
+    counts = {"broker": 0, "market_data": 0, "universe": 0, "bars": 0}
+
+    class _CountingMarketData(_MarketData):
+        def fetch_bars(self, symbols, **kwargs):
+            counts["bars"] += 1
+            return super().fetch_bars(symbols, **kwargs)
+
+    def _broker_factory(**_kwargs):
+        counts["broker"] += 1
+        return broker
+
+    def _market_factory():
+        counts["market_data"] += 1
+        return _CountingMarketData(rising=True)
+
+    def _universe_loader(**_kwargs):
+        counts["universe"] += 1
+        return _universe()
+
+    runtime_cache = {}
+    first = run_crypto_paper_cycle(
+        broker_factory=_broker_factory,
+        market_data_factory=_market_factory,
+        universe_loader=_universe_loader,
+        now=NOW,
+        status_path=tmp_path / "status.json",
+        trades_path=tmp_path / "trades.jsonl",
+        dry_run=True,
+        runtime_cache=runtime_cache,
+    )
+    second = run_crypto_paper_cycle(
+        broker_factory=_broker_factory,
+        market_data_factory=_market_factory,
+        universe_loader=_universe_loader,
+        now=NOW.replace(second=10),
+        status_path=tmp_path / "status.json",
+        trades_path=tmp_path / "trades.jsonl",
+        dry_run=True,
+        runtime_cache=runtime_cache,
+    )
+
+    assert first["signal_data_reused"] is False
+    assert second["signal_data_reused"] is True
+    assert second["universe_data_reused"] is True
+    assert counts == {"broker": 1, "market_data": 1, "universe": 1, "bars": 1}
+    assert broker.account_checks == 2
+    assert broker.position_checks == 2

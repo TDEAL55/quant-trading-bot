@@ -106,7 +106,7 @@ def test_broker_daily_pl_and_short_positions_render_clearly():
     assert view["today_pl"] == 75.0
     assert view["short_positions"] == 1
     assert summary["position_rows"][0]["Direction"] == "SHORT"
-    assert summary["position_rows"][0]["Shares"] == 18.0
+    assert summary["position_rows"][0]["Quantity"] == 18.0
     assert summary["short_position_count"] == 1
 
 
