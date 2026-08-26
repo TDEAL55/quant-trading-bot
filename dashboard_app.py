@@ -2984,8 +2984,8 @@ def render_header(payload, view):
     bot_state = "RUNNING" if service_active or runner_recent else "STOPPED"
     market_is_open = bool(view.get("market_is_open"))
     market_label = "MARKET OPEN" if market_is_open else "MARKET CLOSED"
-    today_pl = _as_float(view.get("today_pl"), 0.0)
-    today_class = "positive" if today_pl > 0 else "negative" if today_pl < 0 else "flat"
+    total_pl = _as_float(view.get("total_pl"), 0.0)
+    total_pl_class = "positive" if total_pl > 0 else "negative" if total_pl < 0 else "flat"
     st.markdown(
         f"""
         <div class='dq-shell-header'>
@@ -3004,7 +3004,7 @@ def render_header(payload, view):
                 <div class='dq-equity-block'>
                     <div class='dq-eyebrow'>PAPER PORTFOLIO</div>
                     <div class='dq-equity-value'>{format_currency(view.get('portfolio_value'))}</div>
-                    <div class='dq-equity-change {today_class}'>{'+' if today_pl > 0 else ''}{format_currency(today_pl)} account change today</div>
+                    <div class='dq-equity-change {total_pl_class}'>{'+' if total_pl > 0 else ''}{format_currency(total_pl)} total profit / loss</div>
                 </div>
                 <div class='dq-hero-facts'>
                     <div><span>Open positions</span><strong>{int(view.get('open_positions') or 0)}</strong></div>
@@ -3564,15 +3564,12 @@ def render_command_center_page(payload, view):
 
     st.markdown(
         "<div class='dq-section-intro dq-profit-heading'><div><span class='dq-section-index'>02</span>"
-        "<div><div class='dq-section-title'>Profit &amp; loss</div><div class='dq-section-copy'>Total P/L = open P/L + closed P/L</div></div></div></div>",
+        "<div><div class='dq-section-title'>Total profit / loss</div><div class='dq-section-copy'>One number for the whole PAPER account</div></div></div></div>",
         unsafe_allow_html=True,
     )
-    top = st.columns(4)
-    _metric_card(top[0], "Open P/L", format_currency(view["unrealized_paper_pl"]), "buy" if view["unrealized_paper_pl"] > 0 else "sell" if view["unrealized_paper_pl"] < 0 else "neutral")
-    _metric_card(top[1], f"Closed P/L ({int(view.get('closed_trade_count') or 0)} trades)", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] > 0 else "sell" if view["realized_paper_pl"] < 0 else "neutral")
-    _metric_card(top[2], "Total P/L", format_currency(view["total_pl"]), "buy" if view["total_pl"] > 0 else "sell" if view["total_pl"] < 0 else "neutral")
-    _metric_card(top[3], "Today's Account Change", format_currency(view["today_pl"]), "buy" if view["today_pl"] > 0 else "sell" if view["today_pl"] < 0 else "neutral")
-    st.caption("Open P/L moves with positions you still own. Closed P/L comes from completed trades. Today's account change tracks the whole account and can differ from trade P/L.")
+    top = st.columns(1)
+    _metric_card(top[0], "Total Profit / Loss", format_currency(view["total_pl"]), "buy" if view["total_pl"] > 0 else "sell" if view["total_pl"] < 0 else "neutral")
+    st.caption("Includes current positions and completed trades.")
 
     render_alert_banner(payload, view)
 
@@ -3678,16 +3675,13 @@ def render_account_page(payload, view):
     _metric_card(acc_cols[2], "Buying Power", format_currency(view["buying_power"]), "neutral")
     _metric_card(acc_cols[3], "Open Positions", int(view.get("open_positions") or 0), "neutral")
 
-    second_row = st.columns(4)
-    _metric_card(second_row[0], "Open P/L", format_currency(view["unrealized_paper_pl"]), "buy" if view["unrealized_paper_pl"] > 0 else "sell" if view["unrealized_paper_pl"] < 0 else "neutral")
-    _metric_card(second_row[1], f"Closed P/L ({int(view.get('closed_trade_count') or 0)} trades)", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] > 0 else "sell" if view["realized_paper_pl"] < 0 else "neutral")
-    _metric_card(second_row[2], "Total P/L", format_currency(total_pl), "buy" if total_pl > 0 else "sell" if total_pl < 0 else "neutral")
-    _metric_card(second_row[3], "Today's Account Change", format_currency(view.get("today_pl", 0.0)), "buy" if _as_float(view.get("today_pl"), 0.0) >= 0 else "sell")
+    second_row = st.columns(1)
+    _metric_card(second_row[0], "Total Profit / Loss", format_currency(total_pl), "buy" if total_pl > 0 else "sell" if total_pl < 0 else "neutral")
 
     third_row = st.columns(2)
     _metric_card(third_row[0], "Orders Today", orders_today, "neutral")
     _metric_card(third_row[1], "Account Status", view["account_status"], "healthy" if _is_active_account_status(view["account_status"]) else "warning")
-    st.caption("Open P/L changes with current prices. Closed P/L is locked in after a position is sold. Total P/L is those two numbers added together.")
+    st.caption("One combined number including current positions and completed trades.")
 
     st.markdown("### Portfolio Allocation", unsafe_allow_html=True)
     if go is not None:
