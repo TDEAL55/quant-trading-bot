@@ -4,6 +4,12 @@ import stat
 from pathlib import Path
 
 from dotenv import load_dotenv
+from paper_test_profile import (
+    AGGRESSIVE_MAX_DAILY_ORDERS,
+    AGGRESSIVE_MAX_OPEN_POSITIONS,
+    AGGRESSIVE_MAX_POSITION_EQUITY_PERCENT,
+    aggressive_paper_test_enabled,
+)
 
 
 load_dotenv()
@@ -46,16 +52,23 @@ BACKTEST_END_DATE = os.getenv("BACKTEST_END_DATE", "2025-01-01")
 STARTING_CASH = float(os.getenv("STARTING_CASH", "10000"))
 SHORT_MOVING_AVERAGE = int(os.getenv("SHORT_MOVING_AVERAGE", "20"))
 LONG_MOVING_AVERAGE = int(os.getenv("LONG_MOVING_AVERAGE", "50"))
-MAX_POSITION_SIZE = float(os.getenv("MAX_POSITION_SIZE", "0.25"))
-MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "500"))
-DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "500"))
 TRADING_MODE = os.getenv("TRADING_MODE", "SIMULATION").upper()
+PAPER_AGGRESSIVE_TEST_MODE = aggressive_paper_test_enabled()
+MAX_POSITION_SIZE = AGGRESSIVE_MAX_POSITION_EQUITY_PERCENT / 100.0 if PAPER_AGGRESSIVE_TEST_MODE else float(os.getenv("MAX_POSITION_SIZE", "0.25"))
+MAX_DAILY_LOSS = 1.0e18 if PAPER_AGGRESSIVE_TEST_MODE else float(os.getenv("MAX_DAILY_LOSS", "500"))
+DAILY_LOSS_LIMIT = 1.0e18 if PAPER_AGGRESSIVE_TEST_MODE else float(os.getenv("DAILY_LOSS_LIMIT", "500"))
 
 
 def resolve_paper_tuning_profile(env=None):
     """Return bounded allocation defaults used only for PAPER tuning."""
     source = os.environ if env is None else env
     mode = str(source.get("TRADING_MODE", "SIMULATION")).strip().upper()
+    if aggressive_paper_test_enabled(source, allow_marker=env is None):
+        return {
+            "enabled": True,
+            "max_position_percent": AGGRESSIVE_MAX_POSITION_EQUITY_PERCENT,
+            "unknown_sector_max_percent": 100.0,
+        }
     requested = str(source.get("PAPER_TUNING_PROFILE_ENABLED", "true")).strip().lower() in {
         "1",
         "true",
@@ -72,8 +85,8 @@ def resolve_paper_tuning_profile(env=None):
 
     max_position_percent = float(source.get("PAPER_TUNING_MAX_POSITION_PERCENT", "2"))
     unknown_sector_max_percent = float(source.get("PAPER_TUNING_UNKNOWN_SECTOR_MAX_PERCENT", "20"))
-    if not 0 < max_position_percent <= 5:
-        raise ValueError("PAPER_TUNING_MAX_POSITION_PERCENT must be > 0 and <= 5")
+    if not 0 < max_position_percent <= 10:
+        raise ValueError("PAPER_TUNING_MAX_POSITION_PERCENT must be > 0 and <= 10")
     if not 10 <= unknown_sector_max_percent <= 100:
         raise ValueError("PAPER_TUNING_UNKNOWN_SECTOR_MAX_PERCENT must be between 10 and 100")
     return {
@@ -351,9 +364,29 @@ PAPER_MAX_OPEN_POSITIONS = int(os.getenv("PAPER_MAX_OPEN_POSITIONS", os.getenv("
 PAPER_MAX_POSITION_EQUITY_PERCENT = float(os.getenv("PAPER_MAX_POSITION_EQUITY_PERCENT", os.getenv("MAX_POSITION_EQUITY_PERCENT", "5")))
 PAPER_MAX_DAILY_NEW_EXPOSURE_PERCENT = float(os.getenv("PAPER_MAX_DAILY_NEW_EXPOSURE_PERCENT", "20"))
 PAPER_DAILY_LOSS_STOP_PERCENT = float(os.getenv("PAPER_DAILY_LOSS_STOP_PERCENT", "2"))
+if PAPER_AGGRESSIVE_TEST_MODE:
+    PORTFOLIO_MAX_CANDIDATES = AGGRESSIVE_MAX_OPEN_POSITIONS
+    PORTFOLIO_MAX_POSITIONS = AGGRESSIVE_MAX_OPEN_POSITIONS
+    PORTFOLIO_MAX_SYMBOLS_PER_SECTOR = AGGRESSIVE_MAX_OPEN_POSITIONS
+    PORTFOLIO_MAX_SECTOR_PERCENT = 100.0
+    PORTFOLIO_MAX_SYMBOL_PERCENT = AGGRESSIVE_MAX_POSITION_EQUITY_PERCENT
+    PORTFOLIO_MIN_CASH_RESERVE_PERCENT = 0.0
+    PORTFOLIO_MAX_POSITION_PERCENT = AGGRESSIVE_MAX_POSITION_EQUITY_PERCENT
+    PORTFOLIO_MAX_CORRELATION = 1.0
+    PORTFOLIO_MAX_STRATEGY_PERCENT = 100.0
+    PORTFOLIO_UNKNOWN_SECTOR_MAX_PERCENT = 100.0
+    PAPER_MAX_DAILY_ORDERS = AGGRESSIVE_MAX_DAILY_ORDERS
+    PAPER_MAX_OPEN_POSITIONS = AGGRESSIVE_MAX_OPEN_POSITIONS
+    PAPER_MAX_POSITION_EQUITY_PERCENT = AGGRESSIVE_MAX_POSITION_EQUITY_PERCENT
+    PAPER_MAX_DAILY_NEW_EXPOSURE_PERCENT = 100.0
+    PAPER_DAILY_LOSS_STOP_PERCENT = 100.0
 MAX_DAILY_ORDERS = int(os.getenv("MAX_DAILY_ORDERS", str(PAPER_MAX_DAILY_ORDERS)))
 MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", str(PAPER_MAX_OPEN_POSITIONS or 10)))
 MAX_POSITION_EQUITY_PERCENT = float(os.getenv("MAX_POSITION_EQUITY_PERCENT", str(PAPER_MAX_POSITION_EQUITY_PERCENT or 5.0)))
+if PAPER_AGGRESSIVE_TEST_MODE:
+    MAX_DAILY_ORDERS = AGGRESSIVE_MAX_DAILY_ORDERS
+    MAX_OPEN_POSITIONS = AGGRESSIVE_MAX_OPEN_POSITIONS
+    MAX_POSITION_EQUITY_PERCENT = AGGRESSIVE_MAX_POSITION_EQUITY_PERCENT
 SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "5"))
 SCAN_ONLY_DURING_MARKET_HOURS = str(os.getenv("SCAN_ONLY_DURING_MARKET_HOURS", "true")).strip().lower() in {"1", "true", "yes", "on"}
 CONTINUOUS_RUNNER_DRY_RUN = str(os.getenv("CONTINUOUS_RUNNER_DRY_RUN", "true")).strip().lower() in {"1", "true", "yes", "on"}

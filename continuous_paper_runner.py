@@ -16,6 +16,7 @@ from continuous_scan_cycle import run_continuous_scan_cycle
 from deployment_config import load_deployment_config
 from logger_setup import logger
 from notification_service import NotificationService, format_daily_summary_message, format_weekly_summary_message
+from paper_test_profile import aggressive_paper_test_enabled
 from run_lock import DailyRunLock, RunLockBusyError
 
 
@@ -415,6 +416,10 @@ def run_continuous_paper_runner(
         options_market="US regular hours",
         live_readiness_mode=bool(live_readiness_enabled),
         live_order_submission_enabled=False,
+        aggressive_paper_test_mode=aggressive_paper_test_enabled(),
+        max_daily_orders=int(max_daily_orders),
+        max_open_positions=int(getattr(config, "max_open_positions", 0) or 0),
+        max_position_equity_percent=float(getattr(config, "max_position_equity_percent", 0.0) or 0.0),
         diagnostic_symbol_limit=(int(diagnostic_symbol_limit) if diagnostic_symbol_limit is not None else None),
     )
 

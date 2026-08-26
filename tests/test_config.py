@@ -37,6 +37,7 @@ def test_paper_tuning_profile_opens_small_allocation_room():
         {
             "TRADING_MODE": "PAPER",
             "PAPER_TUNING_PROFILE_ENABLED": "true",
+            "PAPER_AGGRESSIVE_TEST_MODE": "false",
         }
     )
 
@@ -44,6 +45,22 @@ def test_paper_tuning_profile_opens_small_allocation_room():
         "enabled": True,
         "max_position_percent": 2.0,
         "unknown_sector_max_percent": 20.0,
+    }
+
+
+def test_aggressive_paper_profile_keeps_only_ten_percent_position_cap():
+    profile = config.resolve_paper_tuning_profile(
+        {
+            "TRADING_MODE": "PAPER",
+            "PAPER_AGGRESSIVE_TEST_MODE": "true",
+            "PAPER_TUNING_MAX_POSITION_PERCENT": "2",
+        }
+    )
+
+    assert profile == {
+        "enabled": True,
+        "max_position_percent": 10.0,
+        "unknown_sector_max_percent": 100.0,
     }
 
 

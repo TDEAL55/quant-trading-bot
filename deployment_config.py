@@ -5,6 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from paper_test_profile import (
+    AGGRESSIVE_MAX_DAILY_ORDERS,
+    AGGRESSIVE_MAX_OPEN_POSITIONS,
+    AGGRESSIVE_MAX_POSITION_EQUITY_PERCENT,
+    aggressive_paper_test_enabled,
+)
+
 
 ALPACA_PAPER_ENDPOINT = "https://paper-api.alpaca.markets"
 
@@ -97,10 +104,15 @@ def load_deployment_config(environ: dict[str, str] | None = None) -> DeploymentC
     app_env = str(env.get("APP_ENV", "production")).strip() or "production"
     database_url = str(env.get("DATABASE_URL", "sqlite:////var/lib/quant-bot/quant-bot.db")).strip()
     trading_mode = str(env.get("TRADING_MODE", "PAPER")).strip().upper() or "PAPER"
+    aggressive_paper_test = aggressive_paper_test_enabled(env, allow_marker=environ is None)
     auto_approve_paper = _parse_bool(env.get("AUTO_APPROVE_PAPER"), default=False)
     max_daily_orders = _parse_int("MAX_DAILY_ORDERS", env.get("MAX_DAILY_ORDERS", "5"), minimum=1)
     max_open_positions = _parse_int("MAX_OPEN_POSITIONS", env.get("MAX_OPEN_POSITIONS", "10"), minimum=1)
     max_position_equity_percent = float(str(env.get("MAX_POSITION_EQUITY_PERCENT", "10")).strip() or "10")
+    if aggressive_paper_test:
+        max_daily_orders = AGGRESSIVE_MAX_DAILY_ORDERS
+        max_open_positions = AGGRESSIVE_MAX_OPEN_POSITIONS
+        max_position_equity_percent = AGGRESSIVE_MAX_POSITION_EQUITY_PERCENT
     if max_position_equity_percent <= 0 or max_position_equity_percent > 100:
         raise DeploymentConfigError("MAX_POSITION_EQUITY_PERCENT must be > 0 and <= 100")
     paper_broker_backend = str(env.get("PAPER_BROKER_BACKEND", "SIMULATED")).strip().upper() or "SIMULATED"
@@ -146,6 +158,8 @@ def load_deployment_config(environ: dict[str, str] | None = None) -> DeploymentC
         minimum=1,
         maximum=5,
     )
+    if aggressive_paper_test:
+        position_guard_max_exits_per_cycle = AGGRESSIVE_MAX_OPEN_POSITIONS
     if not 0 < position_guard_stop_loss_percent <= 25:
         raise DeploymentConfigError("PAPER_POSITION_STOP_LOSS_PERCENT must be > 0 and <= 25")
     if not 0 < position_guard_take_profit_percent <= 100:

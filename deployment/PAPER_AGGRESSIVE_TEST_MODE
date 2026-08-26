@@ -1,0 +1,11 @@
+Enabled for the requested aggressive PAPER test.
+
+This marker removes artificial PAPER execution throttles while preserving:
+- PAPER-only order routing
+- the 10% maximum per position
+- broker buying-power checks
+- market-data validity checks
+- duplicate-order protection
+- reconciliation and ledger integrity checks
+
+It has no effect when TRADING_MODE is not PAPER.
