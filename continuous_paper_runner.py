@@ -300,6 +300,7 @@ def run_continuous_paper_runner(
     crypto_runner: Callable[..., Any] | None = None,
     options_runner: Callable[..., Any] | None = None,
     reconciliation_runner: Callable[..., Any] | None = None,
+    live_readiness_runner: Callable[..., Any] | None = None,
 ) -> dict[str, int]:
     run_id = f"continuous-runner-{datetime.now(EASTERN_TZ).strftime('%Y%m%d%H%M%S%f')}-{uuid.uuid4().hex[:8]}"
     _log_event("continuous_runner_starting", run_id=run_id)
@@ -347,6 +348,13 @@ def run_continuous_paper_runner(
         from paper_account_reconciliation import run_paper_account_reconciliation
 
         reconciliation_runner = run_paper_account_reconciliation
+    live_readiness_enabled = str(os.getenv("LIVE_READINESS_MODE", "true")).strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if live_readiness_enabled and live_readiness_runner is None:
+        from live_readiness import run_live_readiness_check
+
+        live_readiness_runner = run_live_readiness_check
     telemetry_callback = _telemetry_callback_factory(run_id=run_id, dry_run=dry_run, trading_mode=str(config.trading_mode))
     notifier_builder = notifier_factory or NotificationService.from_env
     notifier = notifier_builder(database_url=(database_url or config.database_url))
@@ -405,6 +413,8 @@ def run_continuous_paper_runner(
         options_trading_enabled=bool(options_enabled),
         options_scan_interval_minutes=int(options_interval_minutes),
         options_market="US regular hours",
+        live_readiness_mode=bool(live_readiness_enabled),
+        live_order_submission_enabled=False,
         diagnostic_symbol_limit=(int(diagnostic_symbol_limit) if diagnostic_symbol_limit is not None else None),
     )
 
@@ -429,6 +439,8 @@ def run_continuous_paper_runner(
         "options_orders_submitted": 0,
         "reconciliations_completed": 0,
         "reconciliations_failed": 0,
+        "live_readiness_checks_completed": 0,
+        "live_readiness_checks_failed": 0,
     }
     last_active_cycle_key: str | None = None
     last_crypto_cycle_at: datetime | None = None
@@ -465,6 +477,7 @@ def run_continuous_paper_runner(
                 and (now_eastern.hour, now_eastern.minute) >= (reconciliation_hour, reconciliation_minute)
             )
             if reconciliation_due:
+                reconciliation_result: dict[str, Any] = {}
                 try:
                     reconciliation_result = dict(
                         reconciliation_runner(
@@ -497,6 +510,11 @@ def run_continuous_paper_runner(
                         )
                 except Exception as exc:
                     stats["reconciliations_failed"] += 1
+                    reconciliation_result = {
+                        "status": "error",
+                        "account_status": "UNKNOWN",
+                        "warnings": [f"reconciliation_failed:{type(exc).__name__}"],
+                    }
                     _log_event(
                         "daily_account_reconciliation_failed",
                         run_id=run_id,
@@ -513,6 +531,35 @@ def run_continuous_paper_runner(
                         deduplication_window_seconds=60 * 60 * 30,
                     )
                 finally:
+                    if live_readiness_enabled and callable(live_readiness_runner):
+                        try:
+                            readiness_result = dict(
+                                live_readiness_runner(
+                                    reconciliation_result=reconciliation_result,
+                                    now=now_eastern.astimezone(timezone.utc),
+                                )
+                                or {}
+                            )
+                            stats["live_readiness_checks_completed"] += 1
+                            _log_event(
+                                "live_readiness_check_complete",
+                                run_id=run_id,
+                                status=str(readiness_result.get("status") or "unknown"),
+                                gates_passed=int(readiness_result.get("gates_passed") or 0),
+                                gates_total=int(readiness_result.get("gates_total") or 0),
+                                matched_observation_days=int(readiness_result.get("matched_observation_days") or 0),
+                                observation_days_required=int(readiness_result.get("observation_days_required") or 14),
+                                live_orders_blocked=True,
+                            )
+                        except Exception as exc:
+                            stats["live_readiness_checks_failed"] += 1
+                            _log_event(
+                                "live_readiness_check_failed",
+                                run_id=run_id,
+                                error_type=type(exc).__name__,
+                                error_message=str(exc),
+                                live_orders_blocked=True,
+                            )
                     last_reconciliation_date = market_date
 
             crypto_due = bool(

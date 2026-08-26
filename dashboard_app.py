@@ -42,6 +42,7 @@ from dashboard_models import build_normalized_view_model
 from dashboard_sanitization import sanitize_identifier, sanitize_text
 from dashboard_status import classify_market_clock, format_est
 from logger_setup import logger
+from live_readiness import load_live_readiness_report
 from evaluation_data import fetch_evaluation_dashboard_payload
 from factor_attribution import fetch_factor_attribution_dashboard_payload
 from factor_intelligence_data import fetch_factor_intelligence_dashboard_payload
@@ -1675,6 +1676,29 @@ def build_service_health_telemetry(payload, view):
 
 
 def build_live_readiness_snapshot(payload, view):
+    persisted = load_live_readiness_report()
+    if persisted.get("gates"):
+        status = str(persisted.get("status") or "BLOCKED").upper()
+        display_status = {
+            "READY_FOR_CONTROLLED_LAUNCH": "READY FOR CONTROLLED LAUNCH",
+            "OBSERVING": "14-DAY PAPER OBSERVATION IN PROGRESS",
+            "BLOCKED": "NOT READY — BLOCKERS REMAIN",
+        }.get(status, "NOT READY")
+        return {
+            "gates": list(persisted.get("gates") or []),
+            "overall_status": display_status,
+            "status": status,
+            "trading_mode": "PAPER",
+            "dry_run": True,
+            "gates_passed": int(persisted.get("gates_passed") or 0),
+            "gates_total": int(persisted.get("gates_total") or 0),
+            "matched_observation_days": int(persisted.get("matched_observation_days") or 0),
+            "observation_days_required": int(persisted.get("observation_days_required") or 14),
+            "blockers": list(persisted.get("blockers") or []),
+            "updated_at": persisted.get("updated_at"),
+            "live_orders_blocked": True,
+        }
+
     latest_run = payload.get("latest_run") or {}
     latest_signal = payload.get("latest_signal") or {}
     latest_account = payload.get("latest_account") or {}
@@ -3061,22 +3085,39 @@ def render_live_readiness_page(payload, view):
     snapshot = build_live_readiness_snapshot(payload, view)
 
     overall = snapshot.get("overall_status", "NOT READY")
-    if overall == "READY FOR MANUAL LIVE VALIDATION":
+    if overall in {"READY FOR MANUAL LIVE VALIDATION", "READY FOR CONTROLLED LAUNCH"}:
         st.success(overall)
     else:
         st.warning(overall)
+
+    passed = int(snapshot.get("gates_passed") or sum(1 for gate in snapshot.get("gates", []) if gate.get("pass")))
+    total = int(snapshot.get("gates_total") or len(snapshot.get("gates", [])))
+    observed = int(snapshot.get("matched_observation_days") or 0)
+    required = int(snapshot.get("observation_days_required") or 14)
+    cols = st.columns(3)
+    cols[0].metric("Safety gates", f"{passed}/{total}")
+    cols[1].metric("Clean PAPER days", f"{observed}/{required}")
+    cols[2].metric("LIVE orders", "BLOCKED")
+
+    blockers = list(snapshot.get("blockers") or [])
+    if blockers:
+        st.info("Next blockers: " + " · ".join(_safe_text(item) for item in blockers[:5]))
 
     gate_rows = []
     for gate in snapshot.get("gates", []):
         gate_rows.append(
             {
+                "Category": _safe_text(gate.get("category"), "General"),
                 "Gate": gate.get("name"),
                 "Status": "PASS" if gate.get("pass") else "FAIL",
                 "Value": _safe_text(gate.get("value"), "Unknown"),
             }
         )
     st.dataframe(gate_rows)
-    st.caption("Read-only readiness checklist. This page does not enable LIVE trading.")
+    if snapshot.get("updated_at"):
+        st.caption(f"Last evaluated {format_timestamp_eastern(snapshot.get('updated_at'))}. LIVE execution remains hard-blocked.")
+    else:
+        st.caption("Read-only readiness checklist. This page does not enable LIVE trading.")
 
 
 def render_alert_banner(payload, view):

@@ -911,6 +911,43 @@ def test_daily_reconciliation_runs_once_after_configured_time(tmp_path, monkeypa
     assert stats["reconciliations_failed"] == 0
 
 
+def test_daily_reconciliation_updates_live_readiness_without_enabling_live(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    monkeypatch.setenv("PAPER_DAILY_RECONCILIATION_ENABLED", "true")
+    monkeypatch.setenv("PAPER_DAILY_RECONCILIATION_TIME_ET", "16:20")
+    monkeypatch.setenv("LIVE_READINESS_MODE", "true")
+    calls = []
+
+    stats = run_continuous_paper_runner(
+        config_loader=lambda: cfg,
+        runner=lambda **_kwargs: _failed_result(status="no_candidates"),
+        reconciliation_runner=lambda **_kwargs: {
+            "status": "matched",
+            "account_status": "ACTIVE",
+            "position_count": 2,
+            "open_order_count": 0,
+            "warnings": [],
+        },
+        live_readiness_runner=lambda **kwargs: calls.append(kwargs) or {
+            "status": "OBSERVING",
+            "gates_passed": 18,
+            "gates_total": 20,
+            "matched_observation_days": 1,
+            "observation_days_required": 14,
+            "live_orders_blocked": True,
+        },
+        state_path=_state_path(tmp_path),
+        now_provider=_Clock([datetime(2026, 7, 22, 16, 21, tzinfo=EASTERN_TZ)]),
+        sleep_fn=lambda _seconds: None,
+        max_iterations=1,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["reconciliation_result"]["status"] == "matched"
+    assert stats["live_readiness_checks_completed"] == 1
+    assert stats["live_readiness_checks_failed"] == 0
+
+
 def test_scanner_exception_emits_failure_and_final_exit_event(tmp_path, monkeypatch):
     cfg = _config(tmp_path)
     events = []

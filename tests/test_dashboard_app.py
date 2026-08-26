@@ -135,6 +135,31 @@ def test_live_readiness_defaults_not_ready(monkeypatch):
     assert snapshot["overall_status"] == "NOT READY"
 
 
+def test_live_readiness_uses_persisted_fourteen_day_report(monkeypatch):
+    monkeypatch.setattr(
+        dashboard_app,
+        "load_live_readiness_report",
+        lambda: {
+            "status": "OBSERVING",
+            "updated_at": "2026-08-25T20:00:00+00:00",
+            "gates_passed": 18,
+            "gates_total": 20,
+            "matched_observation_days": 3,
+            "observation_days_required": 14,
+            "blockers": ["Separate LIVE credentials staged"],
+            "gates": [
+                {"id": "paper_mode", "name": "PAPER mode remains active", "category": "Isolation", "pass": True, "value": "PAPER"}
+            ],
+        },
+    )
+
+    snapshot = dashboard_app.build_live_readiness_snapshot({}, {})
+
+    assert snapshot["overall_status"] == "14-DAY PAPER OBSERVATION IN PROGRESS"
+    assert snapshot["matched_observation_days"] == 3
+    assert snapshot["live_orders_blocked"] is True
+
+
 def test_service_health_telemetry_handles_missing_data():
     telemetry = dashboard_app.build_service_health_telemetry(
         {
