@@ -150,11 +150,31 @@ def _clear_stale_bot_orders(
                 }
             )
             continue
-        if _order_is_open(canceled):
+        canceled_record = {
+            **order,
+            **canceled,
+            "cancellation_reason": "stale_unfilled_bot_order",
+            "cancellation_explanation": "Canceled automatically because the bot order remained unfilled past the stale-order timeout.",
+            "order_age_minutes": round(float(age_minutes or 0.0), 3),
+            "canceled_at": str(canceled.get("updated_at") or _utc_iso(now)),
+        }
+        if _order_is_open(canceled_record):
             active_orders.append(canceled or order)
         else:
-            canceled_orders.append(canceled or order)
+            canceled_orders.append(canceled_record)
     return active_orders, canceled_orders, cancellation_failures
+
+
+def _load_recent_cancellations(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+    if not isinstance(payload, dict):
+        return []
+    return [dict(row) for row in list(payload.get("recent_cancellations") or []) if isinstance(row, dict)]
 
 
 def _safe_status(
@@ -441,6 +461,14 @@ def run_crypto_paper_cycle(
         and not resolved_dry_run
     )
     cycle_status = "order_submitted" if confirmed else "dry_run" if order and resolved_dry_run else "no_trade"
+    previous_cancellations = _load_recent_cancellations(resolved_status_path)
+    cancellations_by_id: dict[str, dict[str, Any]] = {}
+    for cancellation in [*stale_orders_canceled, *previous_cancellations]:
+        identity = str(cancellation.get("order_id") or cancellation.get("client_order_id") or "").strip()
+        if identity and identity not in cancellations_by_id:
+            cancellations_by_id[identity] = dict(cancellation)
+    recent_cancellations = list(cancellations_by_id.values())[:20]
+
     status = _safe_status(
         now=cycle_now,
         cycle_status=cycle_status,
@@ -462,6 +490,7 @@ def run_crypto_paper_cycle(
             "blocked_buy_candidates": blocked_buy_candidates,
             "stale_order_minutes": stale_order_minutes,
             "stale_orders_canceled": stale_orders_canceled,
+            "recent_cancellations": recent_cancellations,
             "stale_order_cancel_failures": stale_order_cancel_failures,
             "signal_data_reused": not signals_refreshed,
             "signal_refresh_seconds": signal_refresh_seconds,
@@ -471,6 +500,15 @@ def run_crypto_paper_cycle(
         }
     )
     _write_json_atomic(resolved_status_path, status)
+    for cancellation in stale_orders_canceled:
+        _append_jsonl(
+            resolved_trades_path,
+            {
+                "timestamp": str(cancellation.get("canceled_at") or _utc_iso(cycle_now)),
+                "event": "crypto_order_canceled",
+                **cancellation,
+            },
+        )
     if order:
         _append_jsonl(resolved_trades_path, {"timestamp": _utc_iso(cycle_now), **order})
     return status

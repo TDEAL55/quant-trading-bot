@@ -281,5 +281,8 @@ def test_crypto_cycle_cancels_stale_bot_order_before_selecting_candidate(monkeyp
 
     assert broker.cancel_calls == ["stale-btc"]
     assert result["stale_orders_canceled"][0]["status"] == "canceled"
+    assert result["stale_orders_canceled"][0]["cancellation_reason"] == "stale_unfilled_bot_order"
+    assert result["stale_orders_canceled"][0]["order_age_minutes"] > 10
+    assert result["recent_cancellations"][0]["order_id"] == "stale-btc"
     assert result["confirmed_order_count"] == 1
     assert broker.calls[0]["ticker"] == "BTC/USD"

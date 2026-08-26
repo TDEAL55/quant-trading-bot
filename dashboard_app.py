@@ -3339,6 +3339,16 @@ def _render_crypto_dashboard_panel(payload, *, detailed: bool = False) -> None:
     if crypto.get("error") or crypto.get("status_read_error"):
         st.warning(_safe_text(crypto.get("error") or crypto.get("status_read_error"), "Crypto status unavailable"))
 
+    cancellations = list(crypto.get("recent_cancellations") or [])
+    if cancellations:
+        latest_cancellation = dict(cancellations[0] or {})
+        st.warning(
+            f"Latest automatic cancellation: {_safe_text(latest_cancellation.get('symbol'), 'Unknown')} "
+            f"{_safe_text(latest_cancellation.get('side'), '').upper()} was unfilled for "
+            f"{round(_as_float(latest_cancellation.get('order_age_minutes'), 0.0), 1)} minutes. "
+            "The bot canceled the stale order so it would not block future trades."
+        )
+
     if not detailed:
         return
 
@@ -3379,6 +3389,23 @@ def _render_crypto_dashboard_panel(payload, *, detailed: bool = False) -> None:
         st.dataframe(signal_rows)
     else:
         _empty_state("The first crypto cycle has not completed yet.")
+
+    cancellation_rows = [
+        {
+            "Canceled": format_timestamp_eastern(row.get("canceled_at") or row.get("updated_at")),
+            "Symbol": _safe_text(row.get("symbol"), "N/A"),
+            "Side": _safe_text(row.get("side"), "N/A").upper(),
+            "Age": f"{round(_as_float(row.get('order_age_minutes'), 0.0), 1)} min",
+            "Filled": round(_as_float(row.get("filled_quantity"), 0.0), 8),
+            "Reason": "Stale unfilled bot order",
+        }
+        for row in cancellations[:20]
+    ]
+    st.markdown("#### Automatic crypto cancellations")
+    if cancellation_rows:
+        st.dataframe(cancellation_rows)
+    else:
+        _empty_state("No automatic crypto cancellations recorded.")
 
     orders = list(crypto.get("recent_orders") or [])
     if last_order and not orders:

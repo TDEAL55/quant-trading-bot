@@ -587,6 +587,20 @@ def run_continuous_paper_runner(
                         crypto_runner(**crypto_kwargs)
                         or {}
                     )
+                    for cancellation in list(crypto_result.get("stale_orders_canceled") or []):
+                        cancellation = dict(cancellation or {})
+                        _log_event(
+                            "crypto_order_canceled",
+                            run_id=run_id,
+                            timestamp=str(cancellation.get("canceled_at") or now_eastern.isoformat()),
+                            symbol=str(cancellation.get("symbol") or ""),
+                            side=str(cancellation.get("side") or "").lower(),
+                            status=str(cancellation.get("status") or "canceled").lower(),
+                            filled_quantity=float(cancellation.get("filled_quantity") or 0.0),
+                            order_age_minutes=float(cancellation.get("order_age_minutes") or 0.0),
+                            cancellation_reason=str(cancellation.get("cancellation_reason") or "stale_unfilled_bot_order"),
+                            explanation=str(cancellation.get("cancellation_explanation") or "Stale unfilled bot order canceled automatically."),
+                        )
                     confirmed_crypto_orders = int(crypto_result.get("confirmed_order_count") or 0)
                     stats["crypto_cycles_completed"] += 1
                     stats["crypto_orders_submitted"] += confirmed_crypto_orders

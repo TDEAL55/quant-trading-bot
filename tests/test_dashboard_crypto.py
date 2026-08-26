@@ -20,6 +20,17 @@ def test_crypto_dashboard_combines_cycle_status_with_live_broker_positions(tmp_p
                 "universe_count": 12,
                 "scanned_count": 12,
                 "signals": [{"symbol": "BTC/USD", "signal": "HOLD", "score": 55}],
+                "recent_cancellations": [
+                    {
+                        "order_id": "cancel-1",
+                        "symbol": "WIF/USD",
+                        "side": "buy",
+                        "status": "canceled",
+                        "filled_quantity": 0,
+                        "order_age_minutes": 1370,
+                        "cancellation_reason": "stale_unfilled_bot_order",
+                    }
+                ],
             }
         ),
         encoding="utf-8",
@@ -50,4 +61,4 @@ def test_crypto_dashboard_combines_cycle_status_with_live_broker_positions(tmp_p
     assert result["crypto_exposure"] == 6000
     assert result["unrealized_pl"] == 125
     assert [row["symbol"] for row in result["recent_orders"]] == ["BTC/USD"]
-
+    assert result["recent_cancellations"][0]["symbol"] == "WIF/USD"
