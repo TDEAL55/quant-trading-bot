@@ -1287,7 +1287,9 @@ def build_dashboard_view_model(payload):
     historical_daily_pl, historical_total_pl = calculate_daily_and_total_pl(portfolio_history)
     broker_day_pl = latest_account.get("day_pl")
     daily_pl = _as_float(broker_day_pl, historical_daily_pl) if broker_day_pl is not None else historical_daily_pl
-    total_pl = historical_total_pl if portfolio_history else _as_float(latest_account.get("unrealized_paper_pl"), 0.0)
+    open_pl = _as_float(latest_account.get("unrealized_paper_pl"), 0.0)
+    closed_pl = _as_float(latest_account.get("realized_paper_pl"), 0.0)
+    total_pl = open_pl + closed_pl
     previous_portfolio = (
         _as_float(portfolio_history[-2].get("portfolio_value"), 0.0)
         if len(portfolio_history) >= 2
@@ -1345,8 +1347,8 @@ def build_dashboard_view_model(payload):
         "portfolio_value": _as_float(latest_account.get("portfolio_value"), 0.0),
         "cash": _as_float(latest_account.get("cash"), 0.0),
         "buying_power": _as_float(latest_account.get("buying_power"), 0.0),
-        "unrealized_paper_pl": _as_float(latest_account.get("unrealized_paper_pl"), 0.0),
-        "realized_paper_pl": _as_float(latest_account.get("realized_paper_pl"), 0.0),
+        "unrealized_paper_pl": open_pl,
+        "realized_paper_pl": closed_pl,
         "closed_trade_count": int(latest_account.get("closed_trade_count") or 0),
         "open_positions": int(latest_account.get("open_positions") or 0),
         "account_status": friendly_status_text(latest_account.get("account_status"), "Unknown"),
@@ -1354,6 +1356,7 @@ def build_dashboard_view_model(payload):
         "short_positions": int(latest_account.get("short_positions") or sum(1 for item in position_rows if _as_float(item.get("quantity"), 0.0) < 0)),
         "today_pl": daily_pl,
         "total_pl": total_pl,
+        "account_change_since_tracking": historical_total_pl,
         "ma_distance": moving_average_distance(latest_signal.get("short_moving_average"), latest_signal.get("long_moving_average")),
         "previous_portfolio_value": previous_portfolio,
         "previous_spy_price": previous_price,
@@ -3001,7 +3004,7 @@ def render_header(payload, view):
                 <div class='dq-equity-block'>
                     <div class='dq-eyebrow'>PAPER PORTFOLIO</div>
                     <div class='dq-equity-value'>{format_currency(view.get('portfolio_value'))}</div>
-                    <div class='dq-equity-change {today_class}'>{'+' if today_pl > 0 else ''}{format_currency(today_pl)} today</div>
+                    <div class='dq-equity-change {today_class}'>{'+' if today_pl > 0 else ''}{format_currency(today_pl)} account change today</div>
                 </div>
                 <div class='dq-hero-facts'>
                     <div><span>Open positions</span><strong>{int(view.get('open_positions') or 0)}</strong></div>
@@ -3327,7 +3330,7 @@ def _render_crypto_dashboard_panel(payload, *, detailed: bool = False) -> None:
     _metric_card(columns[1], "Cycle", cycle_status, "neutral")
     _metric_card(columns[2], "Universe", int(crypto.get("universe_count") or 0), "neutral")
     _metric_card(columns[3], "Top Signal", f"{_safe_text(top_signal.get('symbol'), 'None')} · {signal}", signal_style)
-    _metric_card(columns[4], "Crypto P&L", format_currency(crypto.get("unrealized_pl")), "buy" if _as_float(crypto.get("unrealized_pl"), 0.0) >= 0 else "sell")
+    _metric_card(columns[4], "Crypto Open P/L", format_currency(crypto.get("unrealized_pl")), "buy" if _as_float(crypto.get("unrealized_pl"), 0.0) >= 0 else "sell")
 
     st.caption(
         f"Last cycle: {format_timestamp_eastern(crypto.get('updated_at'))} · "
@@ -3452,7 +3455,7 @@ def _render_options_dashboard_panel(payload, *, detailed: bool = False) -> None:
     _metric_card(columns[1], "Cycle", cycle_status, "neutral")
     _metric_card(columns[2], "Underlyings", int(options.get("underlying_count") or 0), "neutral")
     _metric_card(columns[3], "Top Signal", f"{_safe_text(top_signal.get('symbol'), 'None')} · {signal}", signal_style)
-    _metric_card(columns[4], "Options P&L", format_currency(options.get("unrealized_pl")), "buy" if _as_float(options.get("unrealized_pl"), 0.0) >= 0 else "sell")
+    _metric_card(columns[4], "Options Open P/L", format_currency(options.get("unrealized_pl")), "buy" if _as_float(options.get("unrealized_pl"), 0.0) >= 0 else "sell")
     st.caption(
         f"Last cycle: {format_timestamp_eastern(options.get('updated_at'))} · "
         f"{int(options.get('scanned_count') or 0)} scanned · "
@@ -3561,13 +3564,15 @@ def render_command_center_page(payload, view):
 
     st.markdown(
         "<div class='dq-section-intro dq-profit-heading'><div><span class='dq-section-index'>02</span>"
-        "<div><div class='dq-section-title'>Profit &amp; loss</div><div class='dq-section-copy'>Open changes with the market · closed is locked in</div></div></div></div>",
+        "<div><div class='dq-section-title'>Profit &amp; loss</div><div class='dq-section-copy'>Total P/L = open P/L + closed P/L</div></div></div></div>",
         unsafe_allow_html=True,
     )
-    top = st.columns(3)
-    _metric_card(top[0], "Today's P&L", format_currency(view["today_pl"]), "buy" if view["today_pl"] > 0 else "sell" if view["today_pl"] < 0 else "neutral")
-    _metric_card(top[1], "Open Position P&L", format_currency(view["unrealized_paper_pl"]), "buy" if view["unrealized_paper_pl"] > 0 else "sell" if view["unrealized_paper_pl"] < 0 else "neutral")
-    _metric_card(top[2], f"Closed P&L ({int(view.get('closed_trade_count') or 0)} trades)", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] > 0 else "sell" if view["realized_paper_pl"] < 0 else "neutral")
+    top = st.columns(4)
+    _metric_card(top[0], "Open P/L", format_currency(view["unrealized_paper_pl"]), "buy" if view["unrealized_paper_pl"] > 0 else "sell" if view["unrealized_paper_pl"] < 0 else "neutral")
+    _metric_card(top[1], f"Closed P/L ({int(view.get('closed_trade_count') or 0)} trades)", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] > 0 else "sell" if view["realized_paper_pl"] < 0 else "neutral")
+    _metric_card(top[2], "Total P/L", format_currency(view["total_pl"]), "buy" if view["total_pl"] > 0 else "sell" if view["total_pl"] < 0 else "neutral")
+    _metric_card(top[3], "Today's Account Change", format_currency(view["today_pl"]), "buy" if view["today_pl"] > 0 else "sell" if view["today_pl"] < 0 else "neutral")
+    st.caption("Open P/L moves with positions you still own. Closed P/L comes from completed trades. Today's account change tracks the whole account and can differ from trade P/L.")
 
     render_alert_banner(payload, view)
 
@@ -3663,11 +3668,9 @@ def render_strategy_page(payload, view):
 
 def render_account_page(payload, view):
     st.markdown("<div class='dq-section-tag'>PORTFOLIO</div>", unsafe_allow_html=True)
-    history = payload.get("portfolio_history") or []
     order_count_by_day = payload.get("order_count_by_day") or []
-    baseline_value = _as_float((history[0] if history else {}).get("portfolio_value"), 0.0)
-    total_return_pct = 0.0 if baseline_value <= 0 else ((_as_float(view.get("portfolio_value"), 0.0) - baseline_value) / baseline_value) * 100.0
     orders_today = int((order_count_by_day[-1] if order_count_by_day else {}).get("submitted_count") or 0)
+    total_pl = _as_float(view.get("total_pl"), _as_float(view.get("unrealized_paper_pl"), 0.0) + _as_float(view.get("realized_paper_pl"), 0.0))
 
     acc_cols = st.columns(4)
     _metric_card(acc_cols[0], "Portfolio Value", format_currency(view["portfolio_value"]), "neutral")
@@ -3676,14 +3679,15 @@ def render_account_page(payload, view):
     _metric_card(acc_cols[3], "Open Positions", int(view.get("open_positions") or 0), "neutral")
 
     second_row = st.columns(4)
-    _metric_card(second_row[0], "Open Position P&L", format_currency(view["unrealized_paper_pl"]), "buy" if view["unrealized_paper_pl"] > 0 else "sell" if view["unrealized_paper_pl"] < 0 else "neutral")
-    _metric_card(second_row[1], "Daily P/L", format_currency(view.get("today_pl", 0.0)), "buy" if _as_float(view.get("today_pl"), 0.0) >= 0 else "sell")
-    _metric_card(second_row[2], "Total PAPER Return", format_percent(total_return_pct, "0.00%"), "buy" if total_return_pct >= 0 else "sell")
-    _metric_card(second_row[3], "Orders Today", orders_today, "neutral")
+    _metric_card(second_row[0], "Open P/L", format_currency(view["unrealized_paper_pl"]), "buy" if view["unrealized_paper_pl"] > 0 else "sell" if view["unrealized_paper_pl"] < 0 else "neutral")
+    _metric_card(second_row[1], f"Closed P/L ({int(view.get('closed_trade_count') or 0)} trades)", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] > 0 else "sell" if view["realized_paper_pl"] < 0 else "neutral")
+    _metric_card(second_row[2], "Total P/L", format_currency(total_pl), "buy" if total_pl > 0 else "sell" if total_pl < 0 else "neutral")
+    _metric_card(second_row[3], "Today's Account Change", format_currency(view.get("today_pl", 0.0)), "buy" if _as_float(view.get("today_pl"), 0.0) >= 0 else "sell")
 
     third_row = st.columns(2)
-    _metric_card(third_row[0], f"Closed P&L ({int(view.get('closed_trade_count') or 0)} trades)", format_currency(view["realized_paper_pl"]), "buy" if view["realized_paper_pl"] > 0 else "sell" if view["realized_paper_pl"] < 0 else "neutral")
+    _metric_card(third_row[0], "Orders Today", orders_today, "neutral")
     _metric_card(third_row[1], "Account Status", view["account_status"], "healthy" if _is_active_account_status(view["account_status"]) else "warning")
+    st.caption("Open P/L changes with current prices. Closed P/L is locked in after a position is sold. Total P/L is those two numbers added together.")
 
     st.markdown("### Portfolio Allocation", unsafe_allow_html=True)
     if go is not None:
@@ -3915,12 +3919,14 @@ def render_performance_page(payload):
     portfolio_fig = build_line_chart([{ "timestamp": idx, "value": value } for idx, value in enumerate(values)], "Portfolio Value", "value", "timestamp")
     _safe_plotly_chart(portfolio_fig, "Portfolio chart unavailable")
 
-    st.subheader("Daily Paper P/L")
-    st.line_chart({"daily_pl": daily_pl})
+    st.subheader("Daily Account Value Change")
+    st.caption("How much the entire PAPER account value changed from one recorded snapshot to the next. This is not the same as closed-trade P/L.")
+    st.line_chart({"account_value_change": daily_pl})
 
-    st.subheader("Cumulative P/L")
-    cumulative_fig = build_line_chart([{ "timestamp": idx, "value": value } for idx, value in enumerate(cumulative)], "Cumulative P/L", "value", "timestamp")
-    _safe_plotly_chart(cumulative_fig, "Cumulative P/L chart unavailable")
+    st.subheader("Account Value Change Since Tracking Began")
+    st.caption("Current PAPER account value minus its first recorded value.")
+    cumulative_fig = build_line_chart([{ "timestamp": idx, "value": value } for idx, value in enumerate(cumulative)], "Account Value Change", "value", "timestamp")
+    _safe_plotly_chart(cumulative_fig, "Account value change chart unavailable")
 
     if len(values) > 3:
         st.subheader("Drawdown")

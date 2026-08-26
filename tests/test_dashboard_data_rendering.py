@@ -342,3 +342,30 @@ def test_positive_and_negative_pl_formatting():
     assert view["today_pl"] == -50.0
     assert view["total_pl"] == -50.0
     assert dashboard_app.format_currency(view["today_pl"]) == "-$50.00"
+
+
+def test_total_pl_is_open_plus_closed_not_account_history_change():
+    payload = {
+        "db_connected": True,
+        "latest_run": {"bot_status": "healthy", "trading_mode": "PAPER"},
+        "latest_success": {},
+        "latest_signal": {"market_open": 1, "generated_signal": "HOLD"},
+        "latest_account": {
+            "portfolio_value": 1050.0,
+            "cash": 900.0,
+            "buying_power": 900.0,
+            "unrealized_paper_pl": 25.0,
+            "realized_paper_pl": 40.0,
+            "closed_trade_count": 2,
+        },
+        "recent_runs": [],
+        "recent_orders": [],
+        "portfolio_history": [{"portfolio_value": 1000.0}, {"portfolio_value": 1050.0}],
+        "signal_history": [],
+        "order_count_by_day": [],
+    }
+
+    view = dashboard_app.build_dashboard_view_model(payload)
+
+    assert view["total_pl"] == 65.0
+    assert view["account_change_since_tracking"] == 50.0
