@@ -396,6 +396,27 @@ def friendly_status_text(value: Any, fallback="Unknown"):
     return text.title()
 
 
+def friendly_action_reason(value: Any, fallback="Waiting for the next cycle") -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return fallback
+    explanations = {
+        "no_crypto_order_selected": "No executable crypto order: no qualifying BUY and no held coin eligible to sell",
+        "all_crypto_buy_candidates_already_open": "BUY candidates already have open orders",
+        "crypto_sell_order_already_open": "A sell order is already open for the held coin",
+        "insufficient_non_marginable_buying_power": "Not enough crypto buying power for the minimum order",
+        "no_options_order_selected": "No option met entry or exit requirements",
+        "options_trade_window_closed": "Options wait for regular US market hours",
+        "options_level_2_required": "Alpaca options level 2 is required",
+        "insufficient_options_buying_power": "Not enough options buying power",
+        "no_liquid_option_contract": "Signal found, but no liquid contract passed the spread rules",
+        "option_premium_exceeds_position_cap": "Contract premium exceeds the 10% position cap",
+        "options_open_order_already_exists": "An entry order is already open for this contract",
+        "options_close_order_already_open": "A closing order is already open for this contract",
+    }
+    return explanations.get(raw, friendly_status_text(raw, fallback))
+
+
 def format_timestamp_eastern(value, fallback="Waiting for the next market-hours update"):
     return format_est(value, fallback)
 
@@ -3515,6 +3536,18 @@ def render_command_center_page(payload, view):
     st.markdown(
         f"<div class='dq-activity-line'><span>Latest stock scan</span><strong>{_safe_text(scan['status'])}</strong> · "
         f"{scan['symbols']} checked · {scan['eligible']} passed · {_safe_text(scan['outcome'])}</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div class='dq-activity-line'><span>Latest crypto cycle</span><strong>{friendly_status_text(crypto.get('cycle_status'), 'Waiting')}</strong> · "
+        f"{int(crypto.get('buy_signal_count') or 0)} BUY / {int(crypto.get('sell_signal_count') or 0)} SELL signals · "
+        f"{_safe_text(friendly_action_reason(crypto.get('action_reason')))}</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div class='dq-activity-line'><span>Latest options cycle</span><strong>{friendly_status_text(options.get('cycle_status'), 'Waiting')}</strong> · "
+        f"{int(options.get('call_signal_count') or 0)} CALL / {int(options.get('put_signal_count') or 0)} PUT signals · "
+        f"{_safe_text(friendly_action_reason(options.get('action_reason')))}</div>",
         unsafe_allow_html=True,
     )
 

@@ -878,6 +878,39 @@ def test_options_cycle_runs_during_regular_market_hours(tmp_path, monkeypatch):
     assert stats["options_cycles_failed"] == 0
 
 
+def test_daily_reconciliation_runs_once_after_configured_time(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    monkeypatch.setenv("PAPER_DAILY_RECONCILIATION_ENABLED", "true")
+    monkeypatch.setenv("PAPER_DAILY_RECONCILIATION_TIME_ET", "16:20")
+    calls = []
+
+    stats = run_continuous_paper_runner(
+        config_loader=lambda: cfg,
+        runner=lambda **_kwargs: _failed_result(status="no_candidates"),
+        reconciliation_runner=lambda **kwargs: calls.append(kwargs) or {
+            "status": "matched",
+            "position_count": 2,
+            "open_order_count": 0,
+            "closed_trade_count": 3,
+            "new_closed_trades_recorded": 1,
+            "warnings": [],
+        },
+        state_path=_state_path(tmp_path),
+        now_provider=_Clock(
+            [
+                datetime(2026, 7, 22, 16, 21, tzinfo=EASTERN_TZ),
+                datetime(2026, 7, 22, 16, 22, tzinfo=EASTERN_TZ),
+            ]
+        ),
+        sleep_fn=lambda _seconds: None,
+        max_iterations=2,
+    )
+
+    assert len(calls) == 1
+    assert stats["reconciliations_completed"] == 1
+    assert stats["reconciliations_failed"] == 0
+
+
 def test_scanner_exception_emits_failure_and_final_exit_event(tmp_path, monkeypatch):
     cfg = _config(tmp_path)
     events = []

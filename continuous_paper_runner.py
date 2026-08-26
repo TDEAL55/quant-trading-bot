@@ -299,6 +299,7 @@ def run_continuous_paper_runner(
     notifier_factory: Callable[..., NotificationService] | None = None,
     crypto_runner: Callable[..., Any] | None = None,
     options_runner: Callable[..., Any] | None = None,
+    reconciliation_runner: Callable[..., Any] | None = None,
 ) -> dict[str, int]:
     run_id = f"continuous-runner-{datetime.now(EASTERN_TZ).strftime('%Y%m%d%H%M%S%f')}-{uuid.uuid4().hex[:8]}"
     _log_event("continuous_runner_starting", run_id=run_id)
@@ -339,6 +340,13 @@ def run_continuous_paper_runner(
         from options_paper_trader import run_options_paper_cycle
 
         options_runner = run_options_paper_cycle
+    reconciliation_enabled = str(os.getenv("PAPER_DAILY_RECONCILIATION_ENABLED", "false")).strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if reconciliation_enabled and reconciliation_runner is None:
+        from paper_account_reconciliation import run_paper_account_reconciliation
+
+        reconciliation_runner = run_paper_account_reconciliation
     telemetry_callback = _telemetry_callback_factory(run_id=run_id, dry_run=dry_run, trading_mode=str(config.trading_mode))
     notifier_builder = notifier_factory or NotificationService.from_env
     notifier = notifier_builder(database_url=(database_url or config.database_url))
@@ -419,6 +427,8 @@ def run_continuous_paper_runner(
         "options_cycles_completed": 0,
         "options_cycles_failed": 0,
         "options_orders_submitted": 0,
+        "reconciliations_completed": 0,
+        "reconciliations_failed": 0,
     }
     last_active_cycle_key: str | None = None
     last_crypto_cycle_at: datetime | None = None
@@ -430,10 +440,14 @@ def run_continuous_paper_runner(
     last_market_closed_log_at: datetime | None = None
     market_closed_log_interval_seconds = max(int(os.getenv("MARKET_CLOSED_LOG_INTERVAL_SECONDS", "300")), 60)
     last_daily_summary_date: str | None = None
+    last_reconciliation_date: str | None = None
     last_weekly_summary_key: str | None = None
     daily_summary_enabled = str(os.getenv("NOTIFICATION_DAILY_SUMMARY_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
     weekly_summary_enabled = str(os.getenv("NOTIFICATION_WEEKLY_SUMMARY_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
     daily_summary_hour, daily_summary_minute = _parse_summary_time_et(os.getenv("DAILY_SUMMARY_TIME_ET", "16:15"))
+    reconciliation_hour, reconciliation_minute = _parse_summary_time_et(
+        os.getenv("PAPER_DAILY_RECONCILIATION_TIME_ET", "16:20")
+    )
 
     try:
         while effective_max_iterations is None or stats["cycles"] < int(effective_max_iterations):
@@ -443,6 +457,63 @@ def run_continuous_paper_runner(
 
             now_eastern = _to_eastern(now_provider())
             market_date = now_eastern.date().isoformat()
+
+            reconciliation_due = bool(
+                reconciliation_enabled
+                and callable(reconciliation_runner)
+                and market_date != last_reconciliation_date
+                and (now_eastern.hour, now_eastern.minute) >= (reconciliation_hour, reconciliation_minute)
+            )
+            if reconciliation_due:
+                try:
+                    reconciliation_result = dict(
+                        reconciliation_runner(
+                            database_url=(database_url or config.database_url),
+                            now=now_eastern.astimezone(timezone.utc),
+                        )
+                        or {}
+                    )
+                    stats["reconciliations_completed"] += 1
+                    reconciliation_status = str(reconciliation_result.get("status") or "unknown").lower()
+                    _log_event(
+                        "daily_account_reconciliation_complete",
+                        run_id=run_id,
+                        status=reconciliation_status,
+                        position_count=int(reconciliation_result.get("position_count") or 0),
+                        open_order_count=int(reconciliation_result.get("open_order_count") or 0),
+                        closed_trade_count=int(reconciliation_result.get("closed_trade_count") or 0),
+                        new_closed_trades_recorded=int(reconciliation_result.get("new_closed_trades_recorded") or 0),
+                        warnings=list(reconciliation_result.get("warnings") or []),
+                    )
+                    if reconciliation_status != "matched":
+                        _notify(
+                            event_type="broker_connection_failed",
+                            title="Paper Account Reconciliation Needs Attention",
+                            message="; ".join(list(reconciliation_result.get("warnings") or [])) or "Paper account mismatch detected.",
+                            severity="WARNING",
+                            metadata={"run_id": run_id, "date": market_date, **reconciliation_result},
+                            deduplication_key=f"paper_reconciliation_mismatch:{market_date}",
+                            deduplication_window_seconds=60 * 60 * 30,
+                        )
+                except Exception as exc:
+                    stats["reconciliations_failed"] += 1
+                    _log_event(
+                        "daily_account_reconciliation_failed",
+                        run_id=run_id,
+                        error_type=type(exc).__name__,
+                        error_message=str(exc),
+                    )
+                    _notify(
+                        event_type="broker_connection_failed",
+                        title="Paper Account Reconciliation Failed",
+                        message=f"{type(exc).__name__}: {exc}",
+                        severity="ERROR",
+                        metadata={"run_id": run_id, "date": market_date},
+                        deduplication_key=f"paper_reconciliation_failed:{market_date}",
+                        deduplication_window_seconds=60 * 60 * 30,
+                    )
+                finally:
+                    last_reconciliation_date = market_date
 
             crypto_due = bool(
                 crypto_enabled

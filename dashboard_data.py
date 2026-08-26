@@ -9,6 +9,7 @@ from typing import Any
 
 from alpaca_paper_broker import AlpacaPaperBroker
 from monitoring_db import MonitoringDatabase
+from paper_trade_ledger import build_closed_trade_records, summarize_closed_trade_records
 from dashboard_models import build_dashboard_dataset
 from evaluation_data import fetch_evaluation_dashboard_payload
 from daily_run_repository import DailyRunRepository
@@ -74,70 +75,7 @@ def _broker_order_to_dashboard_event(order: dict[str, Any]) -> dict[str, Any]:
 
 
 def _summarize_bot_closed_orders(orders: list[dict[str, Any]]) -> dict[str, Any]:
-    """Reconstruct realized P&L from filled bot orders using average-cost lots."""
-    inventory: dict[str, dict[str, float]] = {}
-    closed_trade_count = 0
-    realized_pnl = 0.0
-    seen_order_ids: set[str] = set()
-    chronological = sorted(
-        list(orders or []),
-        key=lambda row: str((row or {}).get("updated_at") or (row or {}).get("submitted_at") or ""),
-    )
-    for raw_order in chronological:
-        order = dict(raw_order or {})
-        order_id = str(order.get("order_id") or "").strip()
-        if order_id and order_id in seen_order_ids:
-            continue
-        if order_id:
-            seen_order_ids.add(order_id)
-        client_order_id = str(order.get("client_order_id") or "").strip().lower()
-        if not client_order_id.startswith("qtb-"):
-            continue
-        if str(order.get("status") or "").strip().lower() != "filled":
-            continue
-        symbol = str(order.get("symbol") or "").strip().upper()
-        side = str(order.get("side") or "").strip().lower()
-        quantity = abs(float(order.get("filled_quantity") or 0.0))
-        fill_price = float(order.get("average_fill_price") or 0.0)
-        if not symbol or side not in {"buy", "sell"} or quantity <= 0 or fill_price <= 0:
-            continue
-
-        signed_fill = quantity if side == "buy" else -quantity
-        lot = inventory.setdefault(symbol, {"quantity": 0.0, "average_price": 0.0})
-        existing_quantity = float(lot["quantity"])
-        existing_price = float(lot["average_price"])
-        if existing_quantity == 0 or existing_quantity * signed_fill > 0:
-            combined_quantity = abs(existing_quantity) + quantity
-            lot["average_price"] = (
-                ((abs(existing_quantity) * existing_price) + (quantity * fill_price)) / combined_quantity
-            )
-            lot["quantity"] = existing_quantity + signed_fill
-            continue
-
-        closing_quantity = min(abs(existing_quantity), quantity)
-        asset_class = str(order.get("asset_class") or "").strip().lower()
-        multiplier = 100.0 if asset_class in {"option", "us_option"} else 1.0
-        if existing_quantity > 0:
-            realized_pnl += (fill_price - existing_price) * closing_quantity * multiplier
-        else:
-            realized_pnl += (existing_price - fill_price) * closing_quantity * multiplier
-        closed_trade_count += 1
-
-        remaining_quantity = existing_quantity + signed_fill
-        if abs(remaining_quantity) <= 1e-10:
-            lot["quantity"] = 0.0
-            lot["average_price"] = 0.0
-        elif existing_quantity * remaining_quantity > 0:
-            lot["quantity"] = remaining_quantity
-        else:
-            lot["quantity"] = remaining_quantity
-            lot["average_price"] = fill_price
-
-    return {
-        "closed_trade_count": closed_trade_count,
-        "realized_paper_pl": round(realized_pnl, 6),
-        "source": "alpaca_filled_bot_orders",
-    }
+    return summarize_closed_trade_records(build_closed_trade_records(orders))
 
 
 def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dict[str, Any]:

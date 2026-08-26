@@ -191,6 +191,16 @@ journalctl -u quant-bot.service -f -n 200
 journalctl -u quant-bot.service -n 500 --no-pager | grep -Ei "broker execution blocked|no broker orders were submitted|Trading mode must be exactly PAPER|LIVE trading is hard-blocked"
 ```
 
+## One-command remote deployment
+
+Authorize a dedicated deployment key for `quantbot` and allow that account to restart only the two PAPER services. Then run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deployment/deploy_remote.ps1 -IdentityFile C:\path\to\deployment-key
+```
+
+The script performs a fast-forward-only update, restarts the PAPER runner and dashboard, verifies both services, checks Streamlit health, and prints the deployed commit. It never enables LIVE trading.
+
 ## Security notes
 
 - The DigitalOcean dashboard disables its in-app password gate only because nginx Basic Auth is the mandatory external authentication layer.

@@ -385,6 +385,12 @@ def test_paper_tuning_scorecard_does_not_claim_results_without_closed_trades():
     assert scorecard["evidence_status"] == "Collecting evidence (0/20 closed trades)"
 
 
+def test_action_reasons_explain_why_signals_did_not_become_orders():
+    assert "no held coin" in dashboard_app.friendly_action_reason("no_crypto_order_selected")
+    assert "10% position cap" in dashboard_app.friendly_action_reason("option_premium_exceeds_position_cap")
+    assert dashboard_app.friendly_action_reason("crypto_take_profit") == "Crypto Take Profit"
+
+
 def test_signal_strength_meter_boundaries():
     weak = dashboard_app.build_signal_strength(0.01)
     strong = dashboard_app.build_signal_strength(9.0)
