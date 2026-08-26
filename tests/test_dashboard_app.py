@@ -116,6 +116,7 @@ def test_market_clock_open_and_closed_states():
 
 
 def test_live_readiness_defaults_not_ready(monkeypatch):
+    monkeypatch.setattr(dashboard_app, "load_live_readiness_report", lambda: {})
     monkeypatch.setenv("TRADING_MODE", "PAPER")
     monkeypatch.setenv("CONTINUOUS_RUNNER_DRY_RUN", "true")
     monkeypatch.setenv("PAPER_BROKER_BACKEND", "SIMULATED")
