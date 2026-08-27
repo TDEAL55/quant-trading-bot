@@ -101,6 +101,13 @@ def test_format_percent_and_mobile_layout_helpers():
     assert dashboard_app.is_mobile_layout(1080) is False
 
 
+def test_mobile_dashboard_query_flag_is_explicit_and_tolerates_list_values():
+    assert dashboard_app.mobile_dashboard_requested({"mobile": "1"}) is True
+    assert dashboard_app.mobile_dashboard_requested({"mobile": ["true"]}) is True
+    assert dashboard_app.mobile_dashboard_requested({"mobile": "0"}) is False
+    assert dashboard_app.mobile_dashboard_requested({}) is False
+
+
 def test_market_clock_open_and_closed_states():
     tz = ZoneInfo("America/New_York")
     open_dt = datetime(2026, 7, 13, 10, 0, 0, tzinfo=tz)
@@ -307,6 +314,7 @@ def test_compact_dashboard_summary_prioritizes_scan_positions_and_orders(monkeyp
     assert summary["scan"]["top_candidate"] == "MSI"
     assert "risk checks" in summary["scan"]["outcome"]
     assert summary["position_rows"][0]["Symbol"] == "JPM"
+    assert summary["position_rows"][0]["Open P/L"] == "$4.00"
 
 
 def test_stale_successful_run_does_not_report_running_service():

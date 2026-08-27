@@ -557,6 +557,20 @@ def is_mobile_layout(viewport_width):
         return False
 
 
+def mobile_dashboard_requested(query_params=None) -> bool:
+    """Return whether the dedicated phone command center was requested."""
+    source = query_params
+    if source is None and st is not None:
+        source = getattr(st, "query_params", {})
+    try:
+        value = source.get("mobile", "")
+    except (AttributeError, TypeError):
+        value = ""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else ""
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def build_run_history_rows(recent_runs, recent_orders):
     order_by_run_id = {}
     for order in recent_orders or []:
@@ -1583,6 +1597,7 @@ def build_compact_dashboard_summary(payload, view):
                 "Avg entry": format_currency(position.get("average_entry_price")),
                 "Last": format_currency(position.get("current_price")),
                 "Exposure": format_currency(abs(_as_float(position.get("market_value"), 0.0))),
+                "Open P/L": format_currency(position.get("unrealized_pl")),
             }
         )
 
@@ -2633,6 +2648,11 @@ def apply_dashboard_css(theme_name="Studio"):
             max-width: 1380px;
             padding: 0.65rem 1.25rem 2.5rem;
         }}
+        [data-testid="stMainBlockContainer"] {{
+            max-width: 1380px;
+            padding-top: 0.65rem;
+            padding-bottom: 2.5rem;
+        }}
         .dq-shell-header {{
             background: #121417;
             border: 1px solid rgba(245, 247, 242, 0.09);
@@ -2691,6 +2711,7 @@ def apply_dashboard_css(theme_name="Studio"):
             font-size: 0.63rem;
             font-weight: 800;
             letter-spacing: 0.045rem;
+            text-decoration: none;
         }}
         .dq-desk-pill i, .dq-engine-state i {{
             width: 6px;
@@ -2910,8 +2931,60 @@ def apply_dashboard_css(theme_name="Studio"):
             box-shadow: none;
         }}
         .dq-section-tag {{ color: #b6f542; }}
+        .dq-mobile-app {{ max-width: 620px; margin: 0 auto; padding-bottom: 5.5rem; }}
+        .dq-mobile-topbar {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            margin: 0 0 0.7rem;
+            padding: 0.7rem 0.75rem;
+            background: #121417;
+            border: 1px solid rgba(245,247,242,0.09);
+            border-radius: 12px;
+        }}
+        .dq-mobile-brand {{ display: flex; align-items: center; gap: 0.58rem; }}
+        .dq-mobile-brand .dq-brand-mark {{ width: 32px; height: 32px; }}
+        .dq-mobile-title {{ color: #f4f6f1; font-size: 0.84rem; font-weight: 850; }}
+        .dq-mobile-subtitle {{ color: #747b86; font-size: 0.61rem; margin-top: 0.05rem; }}
+        .dq-mobile-live {{ display: flex; align-items: center; gap: 0.35rem; color: #b6f542; font-size: 0.65rem; font-weight: 850; }}
+        .dq-mobile-live i {{ width: 7px; height: 7px; border-radius: 50%; background: #b6f542; box-shadow: 0 0 0 3px rgba(182,245,66,0.1); }}
+        .dq-mobile-balance {{
+            padding: 1rem;
+            margin-bottom: 0.65rem;
+            border-radius: 14px;
+            background: linear-gradient(145deg, #181c1f, #101214);
+            border: 1px solid rgba(245,247,242,0.09);
+        }}
+        .dq-mobile-kicker {{ color: #747b86; font-size: 0.63rem; font-weight: 850; letter-spacing: 0.09rem; text-transform: uppercase; }}
+        .dq-mobile-pl {{ color: #f4f6f1; font-size: 2.15rem; line-height: 1; font-weight: 780; letter-spacing: -0.08rem; margin: 0.58rem 0 0.45rem; }}
+        .dq-mobile-pl.positive {{ color: #b6f542; }}
+        .dq-mobile-pl.negative {{ color: #ff5d73; }}
+        .dq-mobile-caption {{ color: #747b86; font-size: 0.67rem; line-height: 1.4; }}
+        .dq-mobile-stat-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.48rem; margin-bottom: 0.75rem; }}
+        .dq-mobile-stat {{ padding: 0.72rem; border-radius: 10px; background: #121417; border: 1px solid rgba(245,247,242,0.08); }}
+        .dq-mobile-stat span {{ display: block; color: #747b86; font-size: 0.61rem; text-transform: uppercase; letter-spacing: 0.05rem; }}
+        .dq-mobile-stat strong {{ display: block; color: #f4f6f1; font-size: 0.92rem; margin-top: 0.3rem; font-weight: 780; overflow: hidden; text-overflow: ellipsis; }}
+        .dq-mobile-engine-row {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.4rem; margin: 0.65rem 0 0.75rem; }}
+        .dq-mobile-engine {{ padding: 0.58rem 0.48rem; text-align: center; border-radius: 9px; background: #121417; border: 1px solid rgba(245,247,242,0.08); }}
+        .dq-mobile-engine span {{ display: block; color: #747b86; font-size: 0.6rem; }}
+        .dq-mobile-engine strong {{ display: block; margin-top: 0.22rem; font-size: 0.68rem; color: #b6f542; }}
+        .dq-mobile-engine strong.off {{ color: #ffca58; }}
+        .dq-mobile-section {{ display: flex; align-items: center; justify-content: space-between; margin: 0.9rem 0 0.42rem; color: #f4f6f1; font-size: 0.76rem; font-weight: 850; }}
+        .dq-mobile-section span {{ color: #747b86; font-size: 0.62rem; font-weight: 700; }}
+        .dq-mobile-card {{ padding: 0.72rem 0.78rem; margin-bottom: 0.42rem; border-radius: 10px; background: #121417; border: 1px solid rgba(245,247,242,0.08); }}
+        .dq-mobile-card-top {{ display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }}
+        .dq-mobile-symbol {{ color: #f4f6f1; font-size: 0.87rem; font-weight: 880; }}
+        .dq-mobile-tag {{ padding: 0.18rem 0.4rem; border-radius: 5px; background: #1e2226; color: #a9b0bb; font-size: 0.58rem; font-weight: 800; }}
+        .dq-mobile-card-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem; margin-top: 0.62rem; }}
+        .dq-mobile-card-grid span {{ display: block; color: #747b86; font-size: 0.57rem; text-transform: uppercase; }}
+        .dq-mobile-card-grid strong {{ display: block; color: #d7dbe0; font-size: 0.7rem; margin-top: 0.18rem; overflow: hidden; text-overflow: ellipsis; }}
+        .dq-mobile-back {{ display: block; color: #747b86; font-size: 0.65rem; text-align: center; margin-top: 1.2rem; }}
+        .dq-mobile-back a {{ color: #a9b0bb; text-decoration: none; }}
+        .dq-mobile-install {{ color: #747b86; font-size: 0.62rem; text-align: center; line-height: 1.4; margin: 0.8rem 0; }}
         @media (max-width: 768px) {{
             .main .block-container {{ padding: 0.55rem 0.65rem 1.5rem; }}
+            [data-testid="stMainBlockContainer"] {{ padding: 0.55rem 0.65rem 1.5rem; }}
             .dq-desk-topline {{ align-items: flex-start; }}
             .dq-desk-statuses {{ flex-wrap: wrap; justify-content: flex-end; }}
             .dq-desk-clock {{ display: none; }}
@@ -2923,6 +2996,7 @@ def apply_dashboard_css(theme_name="Studio"):
             div[role="radiogroup"] label {{ flex: 0 0 auto; }}
             .dq-engine-grid {{ grid-template-columns: 1fr; }}
             .dq-section-copy {{ display: none; }}
+            .dq-mobile-app {{ padding-bottom: 4rem; }}
         }}
         </style>
         """,
@@ -3018,6 +3092,7 @@ def render_header(payload, view):
                 <div class='dq-desk-statuses'>
                     <span class='dq-desk-pill {'live' if bot_state == 'RUNNING' else 'idle'}'><i></i>BOT {bot_state}</span>
                     <span class='dq-desk-pill {'live' if market_is_open else 'idle'}'><i></i>{market_label}</span>
+                    <a class='dq-desk-pill' href='?mobile=1' target='_self'>PHONE</a>
                     <span class='dq-desk-clock' title='{_safe_text(now_parts['full'])}'>{_safe_text(now_parts['time'])}</span>
                 </div>
             </div>
@@ -3650,6 +3725,148 @@ def render_command_center_page(payload, view):
         f"<div class='dq-activity-line'><span>Latest options cycle</span><strong>{friendly_status_text(options.get('cycle_status'), 'Waiting')}</strong> · "
         f"{int(options.get('call_signal_count') or 0)} CALL / {int(options.get('put_signal_count') or 0)} PUT signals · "
         f"{_safe_text(friendly_action_reason(options.get('action_reason')))}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_mobile_position_cards(rows, *, limit=None):
+    selected = list(rows or [])[:limit] if limit is not None else list(rows or [])
+    if not selected:
+        _empty_state("No open paper positions.")
+        return
+    for row in selected:
+        open_pl = _safe_text(row.get("Open P/L"), "$0.00")
+        st.markdown(
+            "<div class='dq-mobile-card'>"
+            "<div class='dq-mobile-card-top'>"
+            f"<span class='dq-mobile-symbol'>{_safe_text(row.get('Symbol'), 'N/A')}</span>"
+            f"<span class='dq-mobile-tag'>{_safe_text(row.get('Asset'), 'Stock')} · {_safe_text(row.get('Direction'), 'LONG')}</span>"
+            "</div><div class='dq-mobile-card-grid'>"
+            f"<div><span>Exposure</span><strong>{_safe_text(row.get('Exposure'), '$0.00')}</strong></div>"
+            f"<div><span>Open P/L</span><strong>{open_pl}</strong></div>"
+            f"<div><span>Last</span><strong>{_safe_text(row.get('Last'), '$0.00')}</strong></div>"
+            f"<div><span>Quantity</span><strong>{_safe_text(row.get('Quantity'), '0')}</strong></div>"
+            f"<div><span>Avg entry</span><strong>{_safe_text(row.get('Avg entry'), '$0.00')}</strong></div>"
+            "</div></div>",
+            unsafe_allow_html=True,
+        )
+
+
+def _render_mobile_order_cards(rows, *, limit=None):
+    selected = list(rows or [])[:limit] if limit is not None else list(rows or [])
+    if not selected:
+        _empty_state("No paper orders have been recorded yet.")
+        return
+    for row in selected:
+        st.markdown(
+            "<div class='dq-mobile-card'>"
+            "<div class='dq-mobile-card-top'>"
+            f"<span class='dq-mobile-symbol'>{_safe_text(row.get('Symbol'), 'N/A')}</span>"
+            f"<span class='dq-mobile-tag'>{_safe_text(row.get('Side'), 'HOLD')} · {_safe_text(row.get('Status'), 'Unknown')}</span>"
+            "</div><div class='dq-mobile-card-grid'>"
+            f"<div><span>Asset</span><strong>{_safe_text(row.get('Asset'), 'Stock')}</strong></div>"
+            f"<div><span>Quantity</span><strong>{_safe_text(row.get('Quantity'), '0')}</strong></div>"
+            f"<div><span>Fill</span><strong>{_safe_text(row.get('Fill'), '$0.00')}</strong></div>"
+            f"<div style='grid-column:1/-1'><span>Time</span><strong>{_safe_text(row.get('Time'), 'Waiting')}</strong></div>"
+            "</div></div>",
+            unsafe_allow_html=True,
+        )
+
+
+def render_mobile_command_center(payload, view):
+    summary = build_compact_dashboard_summary(payload, view)
+    status = dict(summary.get("status") or {})
+    crypto = dict(payload.get("crypto") or {})
+    options = dict(payload.get("options") or {})
+    service_active = status.get("bot_service") == "RUNNING"
+    market_open = bool(view.get("market_is_open"))
+    total_pl = _as_float(view.get("bot_net_pl"), 0.0)
+    total_class = "positive" if total_pl > 0 else "negative" if total_pl < 0 else ""
+    stock_enabled = status.get("kill_switch") != "ON" and status.get("autonomous_paper_trading") == "ENABLED"
+
+    st.markdown(
+        "<div class='dq-mobile-topbar'>"
+        "<div class='dq-mobile-brand'><span class='dq-brand-mark'>DQ</span>"
+        "<div><div class='dq-mobile-title'>Deal Quant</div><div class='dq-mobile-subtitle'>MOBILE PAPER COMMAND</div></div></div>"
+        f"<div class='dq-mobile-live'><i></i>{'LIVE DATA' if service_active else 'OFFLINE'}</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    if st.button("Refresh live data", key="mobile_refresh_button", help="Refresh read-only dashboard data"):
+        clear_dashboard_cache()
+        st.session_state["dashboard_force_refresh"] = True
+        st.rerun()
+
+    st.markdown(
+        "<div class='dq-mobile-balance'>"
+        "<div class='dq-mobile-kicker'>Realized bot profit / loss</div>"
+        f"<div class='dq-mobile-pl {total_class}'>{format_currency(total_pl)}</div>"
+        f"<div class='dq-mobile-caption'>Locked-in result from {int(view.get('closed_trade_count') or 0)} completed trades. Open price changes are separate.</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<div class='dq-mobile-stat-grid'>"
+        f"<div class='dq-mobile-stat'><span>Portfolio</span><strong>{format_currency(view.get('portfolio_value'))}</strong></div>"
+        f"<div class='dq-mobile-stat'><span>Cash</span><strong>{format_currency(view.get('cash'))}</strong></div>"
+        f"<div class='dq-mobile-stat'><span>Positions</span><strong>{int(view.get('open_positions') or 0)}</strong></div>"
+        f"<div class='dq-mobile-stat'><span>Market</span><strong>{'OPEN' if market_open else 'CLOSED'}</strong></div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    engines = [
+        ("Stocks", stock_enabled, "Open" if market_open else "Closed"),
+        ("Crypto", bool(crypto.get("enabled")), "24/7"),
+        ("Options", bool(options.get("enabled")), "Open" if market_open else "Closed"),
+    ]
+    engine_html = "".join(
+        f"<div class='dq-mobile-engine'><span>{_safe_text(name)} · {_safe_text(market)}</span>"
+        f"<strong class='{'' if enabled else 'off'}'>{'ENABLED' if enabled else 'PAUSED'}</strong></div>"
+        for name, enabled, market in engines
+    )
+    st.markdown(f"<div class='dq-mobile-engine-row'>{engine_html}</div>", unsafe_allow_html=True)
+
+    selected_view = st.radio(
+        "Mobile navigation",
+        ["Home", "Positions", "Orders"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="mobile_view_selector",
+    )
+
+    if selected_view == "Positions":
+        st.markdown(
+            f"<div class='dq-mobile-section'>Open positions <span>{len(summary['position_rows'])} total</span></div>",
+            unsafe_allow_html=True,
+        )
+        _render_mobile_position_cards(summary["position_rows"])
+    elif selected_view == "Orders":
+        st.markdown(
+            f"<div class='dq-mobile-section'>Recent orders <span>{len(summary['order_rows'])} shown</span></div>",
+            unsafe_allow_html=True,
+        )
+        _render_mobile_order_cards(summary["order_rows"])
+    else:
+        st.markdown("<div class='dq-mobile-section'>Realized breakdown <span>completed trades only</span></div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='dq-mobile-stat-grid'>"
+            f"<div class='dq-mobile-stat'><span>Stocks</span><strong>{format_currency(view.get('stock_realized_pl'))}</strong></div>"
+            f"<div class='dq-mobile-stat'><span>Crypto</span><strong>{format_currency(view.get('crypto_realized_pl'))}</strong></div>"
+            f"<div class='dq-mobile-stat'><span>Options</span><strong>{format_currency(view.get('options_realized_pl'))}</strong></div>"
+            f"<div class='dq-mobile-stat'><span>Last refresh</span><strong>{_safe_text(format_compact_timestamp(datetime.now(timezone.utc).isoformat()).get('time'), 'Now')}</strong></div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("<div class='dq-mobile-section'>Largest positions <span>top 3</span></div>", unsafe_allow_html=True)
+        _render_mobile_position_cards(summary["position_rows"], limit=3)
+        st.markdown("<div class='dq-mobile-section'>Latest orders <span>top 3</span></div>", unsafe_allow_html=True)
+        _render_mobile_order_cards(summary["order_rows"], limit=3)
+
+    st.markdown(
+        "<div class='dq-mobile-install'>On iPhone: Share → Add to Home Screen.<br>On Android: browser menu → Add to Home screen.</div>"
+        "<div class='dq-mobile-back'><a href='?mobile=0' target='_self'>Open full desktop dashboard</a></div>",
         unsafe_allow_html=True,
     )
 
@@ -4847,7 +5064,12 @@ def render_dashboard(database_url: str | None = None):
         raise RuntimeError("streamlit is required to run the dashboard")
 
     enforce_paper_mode(os.getenv("TRADING_MODE", "PAPER"))
-    st.set_page_config(page_title="DEAL QUANT COMMAND CENTER", layout="wide")
+    st.set_page_config(
+        page_title="DEAL QUANT COMMAND CENTER",
+        page_icon="📈",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
 
     initialize_dashboard_session_state()
     _refresh_mode_flags()
@@ -4896,6 +5118,13 @@ def render_dashboard(database_url: str | None = None):
     }
     st.session_state["dashboard_research_payload"] = payload.get("research") or {}
     st.session_state["dashboard_root_payload"] = payload
+
+    if mobile_dashboard_requested():
+        if st_autorefresh is not None:
+            st_autorefresh(interval=30 * 1000, key="mobile_dashboard_auto_refresh_tick")
+        _render_with_error_guard("Mobile command center", render_mobile_command_center, payload, view)
+        return
+
     render_sidebar(payload)
     apply_dashboard_css(st.session_state.get("dashboard_theme", "Aurora"))
 
