@@ -172,3 +172,50 @@ def test_guard_exit_buys_to_cover_short_and_records_short_pnl():
     assert result["paper_order"]["side"] == "BUY"
     assert broker.get_positions() == {}
     assert repo.closed_trade["realized_gross_pnl"] == 20.0
+
+
+def test_guard_exit_records_broker_fill_when_position_snapshot_is_stale():
+    class _StalePositionBroker(SimulatedPaperBroker):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.force_stale_snapshot = False
+
+        def submit_order(self, side, ticker, quantity, **kwargs):
+            order = super().submit_order(side, ticker, quantity, **kwargs)
+            self.force_stale_snapshot = True
+            return order
+
+        def get_positions(self):
+            if self.force_stale_snapshot:
+                return {"JPM": {"quantity": 2.0, "avg_price": 100.0, "current_price": 95.0}}
+            return super().get_positions()
+
+    broker = _StalePositionBroker(
+        mode="PAPER",
+        buying_power=1000.0,
+        positions={"JPM": {"quantity": 2.0, "avg_price": 100.0}},
+    )
+    repo = _Repo()
+
+    result = execute_guard_exit(
+        _candidate(),
+        broker=broker,
+        broker_positions={"JPM": {"quantity": 2.0, "avg_price": 100.0, "current_price": 95.0}},
+        broker_cash=1000.0,
+        broker_buying_power=1000.0,
+        broker_equity=1200.0,
+        execution_repo=repo,
+        cycle_run_id="cycle-stale-snapshot",
+        started_at="2026-08-23T15:00:00+00:00",
+        dry_run=False,
+        paper_execution_enabled=True,
+        allow_fractional=True,
+        reconciliation_tolerance=0.000001,
+        persist=True,
+    )
+
+    assert result["status"] == "failed"
+    assert result["paper_order"]["submission_status"] == "filled"
+    assert result["reconciliation"]["reconciliation_status"] == "mismatch"
+    assert repo.closed_trade["symbol"] == "JPM"
+    assert repo.closed_trade["realized_gross_pnl"] == -10.0

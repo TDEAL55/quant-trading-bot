@@ -11,6 +11,7 @@ from config import (
     CORRELATION_ALLOCATION_REDUCTION_FACTOR,
     CORRELATION_LOOKBACK_DAYS,
     CORRELATION_MIN_OVERLAP_DAYS,
+    CROSS_ASSET_CASH_RESERVE_PERCENT,
     DAILY_LOSS_LIMIT,
     MAX_DAILY_ORDERS,
     MAX_OPEN_POSITIONS,
@@ -596,18 +597,24 @@ def run_continuous_scan_cycle(
 
     try:
         account = _as_dict(getattr(broker, "get_account", lambda: {})())
-        broker_cash = float(account.get("cash") or 0.0)
+        raw_cash = account.get("cash")
+        broker_cash = float(raw_cash) if raw_cash not in {None, ""} else 0.0
         broker_buying_power = float(account.get("buying_power") or 0.0)
         broker_equity = float(account.get("equity") or account.get("portfolio_value") or 0.0)
         if broker_buying_power <= 0:
             broker_buying_power = float(getattr(broker, "get_buying_power", lambda: 0.0)() or 0.0)
-        if broker_cash <= 0:
+        if raw_cash in {None, ""}:
             broker_cash = broker_buying_power
         if broker_equity <= 0:
             broker_equity = float(getattr(broker, "get_equity", lambda: broker_buying_power)() or broker_buying_power)
     except Exception as exc:
-        broker_cash = float(getattr(broker, "get_cash", lambda: 0.0)() or 0.0)
+        cash_getter = getattr(broker, "get_cash", None)
         broker_buying_power = float(getattr(broker, "get_buying_power", lambda: broker_cash)() or broker_cash)
+        broker_cash = (
+            float(cash_getter() or 0.0)
+            if callable(cash_getter)
+            else broker_buying_power
+        )
         broker_equity = float(getattr(broker, "get_equity", lambda: broker_buying_power)() or broker_buying_power)
         _emit_notification(
             notification_callback,
@@ -1317,6 +1324,10 @@ def run_continuous_scan_cycle(
                 persistence_payload={"scan": {"status": "saved" if persist else "skipped"}, "execution": {"status": "skipped"}},
             )
 
+        shared_cash_reserve = max(
+            float(PAPER_VALIDATION_CASH_BUFFER),
+            float(CROSS_ASSET_CASH_RESERVE_PERCENT) / 100.0,
+        )
         planner_settings = OrderPlannerSettings(
             minimum_order_notional=float(PAPER_VALIDATION_MIN_ORDER_NOTIONAL),
             maximum_order_notional=min(
@@ -1331,7 +1342,7 @@ def run_continuous_scan_cycle(
                 if controlled_validation_mode
                 else max(1, int(PAPER_VALIDATION_MAX_ORDERS))
             ),
-            cash_buffer=float(PAPER_VALIDATION_CASH_BUFFER),
+            cash_buffer=shared_cash_reserve,
             allow_short=bool(PAPER_ALLOW_SHORT_SELLING),
         )
         direction_multiplier = -1.0 if requested_entry_side == "SELL" else 1.0
@@ -1456,6 +1467,11 @@ def run_continuous_scan_cycle(
             "position_size": bool(trade_value <= notional_cap_by_equity),
             "cash": bool(planned_side == "SELL" or float(broker_cash) >= trade_value),
             "buying_power": bool(float(broker_buying_power) >= trade_value),
+            "shared_cash_reserve": bool(
+                planned_side == "SELL"
+                or float(broker_cash) - trade_value
+                >= max(float(broker_equity), 0.0) * shared_cash_reserve
+            ),
             "daily_loss": bool(risk.daily_loss < float(DAILY_LOSS_LIMIT)),
             "existing_position": bool(abs(existing_qty) <= 1e-8 or supports_scaling),
             "open_entry_order": not _has_open_entry_order(broker_open_orders, selected_symbol, planned_side),

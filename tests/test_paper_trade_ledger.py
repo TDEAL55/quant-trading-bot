@@ -68,3 +68,45 @@ def test_sync_closed_trade_ledger_is_idempotent():
     assert first["new_records"] == 1
     assert second["new_records"] == 0
     assert len(Repository.saved) == 1
+
+
+def test_sync_closed_trade_ledger_backfills_stock_exit_without_duplicating_direct_record():
+    orders = [
+        _filled("stock-open", "AAPL", "buy", 2, 100, "2026-08-01T10:00:00Z"),
+        _filled("stock-close", "AAPL", "sell", 2, 110, "2026-08-02T10:00:00Z"),
+        _filled("short-open", "SBLK", "sell", 3, 20, "2026-08-03T10:00:00Z"),
+        _filled("short-close", "SBLK", "buy", 3, 18, "2026-08-04T10:00:00Z"),
+    ]
+
+    class Broker:
+        def __init__(self, mode):
+            assert mode == "PAPER"
+
+        def get_order_history(self, limit):
+            return orders
+
+    class Repository:
+        saved = {
+            "direct-aapl": {
+                "trade_id": "direct-aapl",
+                "symbol": "AAPL",
+                "quantity": 2.0,
+                "exit_price": 110.0,
+                "exit_timestamp": "2026-08-02T10:01:00Z",
+            }
+        }
+
+        def __init__(self, database_url=None):
+            self.db = type("DB", (), {"close": lambda self: None})()
+
+        def list_closed_trades(self, limit=5000):
+            return list(self.saved.values())
+
+        def save_closed_trade(self, record):
+            self.saved[record["trade_id"]] = dict(record)
+
+    result = sync_closed_trade_ledger(broker_factory=Broker, repository_factory=Repository)
+
+    assert result["new_records"] == 1
+    assert {row["symbol"] for row in Repository.saved.values()} == {"AAPL", "SBLK"}
+    assert sum(1 for row in Repository.saved.values() if row["symbol"] == "AAPL") == 1

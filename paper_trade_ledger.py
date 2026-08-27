@@ -148,6 +148,28 @@ def summarize_closed_trade_records(records: list[dict[str, Any]]) -> dict[str, A
     }
 
 
+def _same_closed_trade(candidate: dict[str, Any], existing: dict[str, Any]) -> bool:
+    if str(candidate.get("trade_id") or "") == str(existing.get("trade_id") or ""):
+        return True
+    if str(candidate.get("symbol") or "").upper() != str(existing.get("symbol") or "").upper():
+        return False
+    candidate_time = _parse_timestamp(candidate.get("exit_timestamp"))
+    existing_time = _parse_timestamp(existing.get("exit_timestamp"))
+    if candidate_time is None or existing_time is None:
+        return False
+    if abs((candidate_time - existing_time).total_seconds()) > 300:
+        return False
+    candidate_quantity = abs(_as_float(candidate.get("quantity"), 0.0))
+    existing_quantity = abs(_as_float(existing.get("quantity"), 0.0))
+    quantity_tolerance = max(1e-6, max(candidate_quantity, existing_quantity) * 0.001)
+    if abs(candidate_quantity - existing_quantity) > quantity_tolerance:
+        return False
+    candidate_exit = _as_float(candidate.get("exit_price"), 0.0)
+    existing_exit = _as_float(existing.get("exit_price"), 0.0)
+    price_tolerance = max(0.01, max(candidate_exit, existing_exit) * 0.001)
+    return abs(candidate_exit - existing_exit) <= price_tolerance
+
+
 def sync_closed_trade_ledger(
     *,
     database_url: str | None = None,
@@ -158,29 +180,25 @@ def sync_closed_trade_ledger(
     broker = broker_factory(mode="PAPER")
     orders = list(broker.get_order_history(limit=max(1, min(int(limit), 500))) or [])
     records = build_closed_trade_records(orders)
-    # Equity exits are already persisted by the stock execution paths. Sync the
-    # asset classes that previously had no durable ledger to avoid double-counting.
-    syncable_records = [
-        record
-        for record in records
-        if str(record.get("strategy_id") or "") in {"crypto_momentum", "options_directional"}
-    ]
     repository = repository_factory(database_url=database_url)
-    existing_ids = {
-        str(row.get("trade_id") or "")
-        for row in list(getattr(repository, "list_closed_trades", lambda limit=5000: [])(limit=5000) or [])
-    }
+    existing_records = list(
+        getattr(repository, "list_closed_trades", lambda limit=5000: [])(limit=5000) or []
+    )
     new_records = 0
-    for record in syncable_records:
-        if str(record.get("trade_id") or "") not in existing_ids:
-            new_records += 1
+    records_synced = 0
+    for record in records:
+        if any(_same_closed_trade(record, existing) for existing in existing_records):
+            continue
+        new_records += 1
+        records_synced += 1
         repository.save_closed_trade(record)
+        existing_records.append(dict(record))
     database = getattr(repository, "db", None)
     if database is not None:
         database.close()
     return {
         **summarize_closed_trade_records(records),
         "broker_order_count": len(orders),
-        "records_synced": len(syncable_records),
+        "records_synced": records_synced,
         "new_records": new_records,
     }

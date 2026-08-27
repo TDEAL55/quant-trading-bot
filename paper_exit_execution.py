@@ -328,8 +328,11 @@ def execute_guard_exit(
                 transitions=list(lifecycle.get("status_transitions") or []),
             )
 
-        post_quantity = _as_float((post_positions.get(symbol) or {}).get("quantity"), 0.0)
-        if completed and abs(post_quantity) <= float(reconciliation_tolerance):
+        broker_confirmed_fill = bool(
+            final_status == "filled"
+            and counted_quantity > float(reconciliation_tolerance)
+        )
+        if broker_confirmed_fill:
             entry_price = _as_float(entry_order.get("average_fill_price") or position.get("avg_price"), fill_price)
             closed_quantity = min(quantity, counted_quantity)
             gross_pnl = (

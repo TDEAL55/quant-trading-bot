@@ -258,6 +258,54 @@ def test_entry_cycle_never_sells_an_unrelated_existing_position(monkeypatch):
     assert broker.get_positions()["BBB"]["quantity"] == 2.0
 
 
+def test_continuous_scan_cycle_preserves_negative_cash_and_blocks_margin_buy(monkeypatch):
+    monkeypatch.setattr("continuous_scan_cycle.PAPER_EXECUTION_ENABLED", True)
+    monkeypatch.setattr("continuous_scan_cycle.CONTROLLED_PAPER_VALIDATION", False)
+    monkeypatch.setattr("continuous_scan_cycle.CROSS_ASSET_CASH_RESERVE_PERCENT", 30.0)
+
+    class _MarginBroker(_Broker):
+        def get_account(self):
+            return {"cash": -100.0, "buying_power": 5000.0, "equity": 5000.0}
+
+    broker = _MarginBroker()
+    observed_cash = []
+
+    def _shortlist_runner(scan_payload, positions, cash, portfolio_value):
+        observed_cash.append(cash)
+        return {
+            "selected": [{
+                "rank": 1,
+                "symbol": "AAA",
+                "score": 82.0,
+                "confidence": 76.0,
+                "suggested_paper_notional": 1000.0,
+                "suggested_max_allocation_percent": 10.0,
+            }],
+            "rejected": [],
+            "portfolio_warnings": [],
+            "selection_summary": {"selected_count": 1},
+        }
+
+    result = run_continuous_scan_cycle(
+        database_url="sqlite:///unused.db",
+        config_loader=_config_loader,
+        now_provider=lambda: datetime(2026, 7, 22, 10, 1, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=lambda universe: _scan_payload(),
+        shortlist_runner=_shortlist_runner,
+        scan_persistor=lambda **kwargs: {"storage": "database", "run_id": kwargs["run_payload"]["run_id"]},
+        execution_repo_factory=lambda **kwargs: _Repo(),
+        positions_loader=_positions_loader,
+        universe_loader=_universe_loader,
+        persist=False,
+    )
+
+    assert observed_cash == [-100.0]
+    assert result.execution_status == "no_trade"
+    assert result.execution["risk_result"]["reason"] == "planner_rejected"
+    assert broker.submissions == []
+
+
 def test_continuous_scan_cycle_returns_no_candidates_without_execution():
     repo = _Repo()
     scan_persist_calls = []
