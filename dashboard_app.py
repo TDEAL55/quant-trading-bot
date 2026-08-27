@@ -1273,6 +1273,7 @@ def build_dashboard_view_model(payload):
     latest_success = payload.get("latest_success") or {}
     latest_signal = payload.get("latest_signal") or {}
     latest_account = payload.get("latest_account") or {}
+    starting_account = payload.get("starting_account") or {}
     portfolio_history = payload.get("portfolio_history") or []
 
     bot_health_text, bot_health_style = classify_bot_health(latest_run)
@@ -1290,6 +1291,10 @@ def build_dashboard_view_model(payload):
     open_pl = _as_float(latest_account.get("unrealized_paper_pl"), 0.0)
     closed_pl = _as_float(latest_account.get("realized_paper_pl"), 0.0)
     total_pl = open_pl + closed_pl
+    current_portfolio_value = _as_float(latest_account.get("portfolio_value"), 0.0)
+    fallback_starting_value = _as_float((portfolio_history[0] if portfolio_history else {}).get("portfolio_value"), 0.0)
+    bot_starting_value = _as_float(starting_account.get("portfolio_value"), fallback_starting_value)
+    bot_net_pl = current_portfolio_value - bot_starting_value if bot_starting_value > 0 else total_pl
     previous_portfolio = (
         _as_float(portfolio_history[-2].get("portfolio_value"), 0.0)
         if len(portfolio_history) >= 2
@@ -1344,7 +1349,7 @@ def build_dashboard_view_model(payload):
         "duplicate_signal_status": friendly_status_text(latest_signal.get("duplicate_signal_status"), "Unknown"),
         "pending_order_status": friendly_status_text(latest_signal.get("pending_order_status"), "Unknown"),
         "daily_loss_stop_status": friendly_status_text(latest_signal.get("daily_loss_stop_status"), "Unknown"),
-        "portfolio_value": _as_float(latest_account.get("portfolio_value"), 0.0),
+        "portfolio_value": current_portfolio_value,
         "cash": _as_float(latest_account.get("cash"), 0.0),
         "buying_power": _as_float(latest_account.get("buying_power"), 0.0),
         "unrealized_paper_pl": open_pl,
@@ -1356,7 +1361,10 @@ def build_dashboard_view_model(payload):
         "short_positions": int(latest_account.get("short_positions") or sum(1 for item in position_rows if _as_float(item.get("quantity"), 0.0) < 0)),
         "today_pl": daily_pl,
         "total_pl": total_pl,
-        "account_change_since_tracking": historical_total_pl,
+        "bot_net_pl": bot_net_pl,
+        "bot_starting_value": bot_starting_value,
+        "bot_tracking_started_at": starting_account.get("snapshot_timestamp") or (portfolio_history[0] if portfolio_history else {}).get("snapshot_timestamp"),
+        "account_change_since_tracking": bot_net_pl,
         "ma_distance": moving_average_distance(latest_signal.get("short_moving_average"), latest_signal.get("long_moving_average")),
         "previous_portfolio_value": previous_portfolio,
         "previous_spy_price": previous_price,
@@ -2984,8 +2992,8 @@ def render_header(payload, view):
     bot_state = "RUNNING" if service_active or runner_recent else "STOPPED"
     market_is_open = bool(view.get("market_is_open"))
     market_label = "MARKET OPEN" if market_is_open else "MARKET CLOSED"
-    total_pl = _as_float(view.get("total_pl"), 0.0)
-    total_pl_class = "positive" if total_pl > 0 else "negative" if total_pl < 0 else "flat"
+    bot_net_pl = _as_float(view.get("bot_net_pl"), 0.0)
+    bot_net_pl_class = "positive" if bot_net_pl > 0 else "negative" if bot_net_pl < 0 else "flat"
     st.markdown(
         f"""
         <div class='dq-shell-header'>
@@ -3004,7 +3012,7 @@ def render_header(payload, view):
                 <div class='dq-equity-block'>
                     <div class='dq-eyebrow'>PAPER PORTFOLIO</div>
                     <div class='dq-equity-value'>{format_currency(view.get('portfolio_value'))}</div>
-                    <div class='dq-equity-change {total_pl_class}'>{'+' if total_pl > 0 else ''}{format_currency(total_pl)} total profit / loss</div>
+                    <div class='dq-equity-change {bot_net_pl_class}'>{'+' if bot_net_pl > 0 else ''}{format_currency(bot_net_pl)} bot net gain / loss</div>
                 </div>
                 <div class='dq-hero-facts'>
                     <div><span>Open positions</span><strong>{int(view.get('open_positions') or 0)}</strong></div>
@@ -3564,12 +3572,17 @@ def render_command_center_page(payload, view):
 
     st.markdown(
         "<div class='dq-section-intro dq-profit-heading'><div><span class='dq-section-index'>02</span>"
-        "<div><div class='dq-section-title'>Total profit / loss</div><div class='dq-section-copy'>One number for the whole PAPER account</div></div></div></div>",
+        "<div><div class='dq-section-title'>Bot net gain / loss</div><div class='dq-section-copy'>Current account value minus its value when tracking began</div></div></div></div>",
         unsafe_allow_html=True,
     )
     top = st.columns(1)
-    _metric_card(top[0], "Total Profit / Loss", format_currency(view["total_pl"]), "buy" if view["total_pl"] > 0 else "sell" if view["total_pl"] < 0 else "neutral")
-    st.caption("Includes current positions and completed trades.")
+    bot_net_pl = _as_float(view.get("bot_net_pl"), 0.0)
+    _metric_card(top[0], "Bot Net Gain / Loss Since Start", format_currency(bot_net_pl), "buy" if bot_net_pl > 0 else "sell" if bot_net_pl < 0 else "neutral")
+    st.caption(
+        f"Started at {format_currency(view.get('bot_starting_value'))} · "
+        f"Current value {format_currency(view.get('portfolio_value'))} · "
+        f"Tracking began {format_timestamp_eastern(view.get('bot_tracking_started_at'), 'with the first saved account snapshot')}."
+    )
 
     render_alert_banner(payload, view)
 
@@ -3667,7 +3680,7 @@ def render_account_page(payload, view):
     st.markdown("<div class='dq-section-tag'>PORTFOLIO</div>", unsafe_allow_html=True)
     order_count_by_day = payload.get("order_count_by_day") or []
     orders_today = int((order_count_by_day[-1] if order_count_by_day else {}).get("submitted_count") or 0)
-    total_pl = _as_float(view.get("total_pl"), _as_float(view.get("unrealized_paper_pl"), 0.0) + _as_float(view.get("realized_paper_pl"), 0.0))
+    bot_net_pl = _as_float(view.get("bot_net_pl"), _as_float(view.get("account_change_since_tracking"), 0.0))
 
     acc_cols = st.columns(4)
     _metric_card(acc_cols[0], "Portfolio Value", format_currency(view["portfolio_value"]), "neutral")
@@ -3676,12 +3689,15 @@ def render_account_page(payload, view):
     _metric_card(acc_cols[3], "Open Positions", int(view.get("open_positions") or 0), "neutral")
 
     second_row = st.columns(1)
-    _metric_card(second_row[0], "Total Profit / Loss", format_currency(total_pl), "buy" if total_pl > 0 else "sell" if total_pl < 0 else "neutral")
+    _metric_card(second_row[0], "Bot Net Gain / Loss Since Start", format_currency(bot_net_pl), "buy" if bot_net_pl > 0 else "sell" if bot_net_pl < 0 else "neutral")
 
     third_row = st.columns(2)
     _metric_card(third_row[0], "Orders Today", orders_today, "neutral")
     _metric_card(third_row[1], "Account Status", view["account_status"], "healthy" if _is_active_account_status(view["account_status"]) else "warning")
-    st.caption("One combined number including current positions and completed trades.")
+    st.caption(
+        f"Starting account value {format_currency(view.get('bot_starting_value'))} → "
+        f"current account value {format_currency(view.get('portfolio_value'))}."
+    )
 
     st.markdown("### Portfolio Allocation", unsafe_allow_html=True)
     if go is not None:
@@ -4947,7 +4963,7 @@ def render_dashboard(database_url: str | None = None):
         "signals": payload.get("signal_history") or [],
         "orders": payload.get("recent_orders") or [],
         "health": [{"component": component, "status": status, "timestamp": view.get("last_run_timestamp"), "reason": "Read only"} for component, status in _component_status(payload, view).items()],
-        "performance": [{"metric": "portfolio_value", "value": view.get("portfolio_value")}, {"metric": "today_pl", "value": view.get("today_pl")}, {"metric": "total_pl", "value": view.get("total_pl")}],
+        "performance": [{"metric": "portfolio_value", "value": view.get("portfolio_value")}, {"metric": "today_pl", "value": view.get("today_pl")}, {"metric": "bot_net_pl", "value": view.get("bot_net_pl")}],
     }
     st.session_state["dashboard_research_payload"] = payload.get("research") or {}
     st.session_state["dashboard_root_payload"] = payload

@@ -368,4 +368,39 @@ def test_total_pl_is_open_plus_closed_not_account_history_change():
     view = dashboard_app.build_dashboard_view_model(payload)
 
     assert view["total_pl"] == 65.0
+    assert view["bot_net_pl"] == 50.0
     assert view["account_change_since_tracking"] == 50.0
+
+
+def test_bot_net_pl_uses_first_account_snapshot_not_limited_chart_history():
+    payload = {
+        "db_connected": True,
+        "latest_run": {"bot_status": "healthy", "trading_mode": "PAPER"},
+        "latest_success": {},
+        "latest_signal": {"market_open": 1, "generated_signal": "HOLD"},
+        "starting_account": {
+            "snapshot_timestamp": "2026-08-01T13:30:00+00:00",
+            "portfolio_value": 100000.0,
+        },
+        "latest_account": {
+            "portfolio_value": 101250.25,
+            "cash": 50000.0,
+            "buying_power": 50000.0,
+            "unrealized_paper_pl": 400.0,
+            "realized_paper_pl": 300.0,
+        },
+        "recent_runs": [],
+        "recent_orders": [],
+        "portfolio_history": [
+            {"portfolio_value": 100900.0},
+            {"portfolio_value": 101250.25},
+        ],
+        "signal_history": [],
+        "order_count_by_day": [],
+    }
+
+    view = dashboard_app.build_dashboard_view_model(payload)
+
+    assert view["bot_starting_value"] == 100000.0
+    assert view["bot_net_pl"] == 1250.25
+    assert view["total_pl"] == 700.0

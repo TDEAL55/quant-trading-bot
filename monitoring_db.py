@@ -337,6 +337,9 @@ class MonitoringDatabase:
     def fetch_latest_account_snapshot(self) -> dict[str, Any] | None:
         return self.query_one("SELECT * FROM paper_account_snapshots ORDER BY snapshot_timestamp DESC LIMIT 1")
 
+    def fetch_first_account_snapshot(self) -> dict[str, Any] | None:
+        return self.query_one("SELECT * FROM paper_account_snapshots ORDER BY snapshot_timestamp ASC LIMIT 1")
+
     def fetch_recent_order_events(self, limit: int = 25) -> list[dict[str, Any]]:
         return self.query_all(
             "SELECT * FROM sanitized_order_events ORDER BY event_timestamp DESC LIMIT ?",

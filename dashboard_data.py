@@ -478,6 +478,7 @@ def fetch_dashboard_payload(
         "latest_success": {},
         "latest_signal": {},
         "latest_account": {},
+        "starting_account": {},
         "recent_runs": [],
         "recent_orders": [],
         "portfolio_history": [],
@@ -500,6 +501,9 @@ def fetch_dashboard_payload(
     payload["latest_success"] = db.fetch_latest_successful_run() or {}
     payload["latest_signal"] = db.fetch_latest_signal_snapshot() or {}
     database_account = db.fetch_latest_account_snapshot() or {}
+    fetch_first_account = getattr(db, "fetch_first_account_snapshot", None)
+    payload["starting_account"] = fetch_first_account() if callable(fetch_first_account) else {}
+    payload["starting_account"] = payload["starting_account"] or {}
     database_orders = db.fetch_recent_order_events(limit=120)
     payload["latest_account"] = database_account
     payload["recent_orders"] = database_orders
@@ -515,6 +519,8 @@ def fetch_dashboard_payload(
             payload["broker_sync_error"] = type(exc).__name__
     payload["recent_runs"] = db.fetch_recent_runs(limit=80)
     payload["portfolio_history"] = list(reversed(db.fetch_portfolio_history(limit=500)))
+    if not payload["starting_account"] and payload["portfolio_history"]:
+        payload["starting_account"] = dict(payload["portfolio_history"][0])
     payload["signal_history"] = list(reversed(db.fetch_signal_history(limit=500)))
     payload["order_count_by_day"] = list(reversed(db.fetch_order_count_by_day(limit=90)))
     payload["latest_scanner_run"] = db.fetch_latest_scanner_run() or {}
