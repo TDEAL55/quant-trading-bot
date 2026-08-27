@@ -1290,6 +1290,10 @@ def build_dashboard_view_model(payload):
     daily_pl = _as_float(broker_day_pl, historical_daily_pl) if broker_day_pl is not None else historical_daily_pl
     open_pl = _as_float(latest_account.get("unrealized_paper_pl"), 0.0)
     closed_pl = _as_float(latest_account.get("realized_paper_pl"), 0.0)
+    closed_by_asset = dict((payload.get("paper_tuning") or {}).get("closed_trades_by_asset") or {})
+    stock_closed = dict(closed_by_asset.get("stocks") or {})
+    crypto_closed = dict(closed_by_asset.get("crypto") or {})
+    options_closed = dict(closed_by_asset.get("options") or {})
     total_pl = open_pl + closed_pl
     current_portfolio_value = _as_float(latest_account.get("portfolio_value"), 0.0)
     fallback_starting_value = _as_float((portfolio_history[0] if portfolio_history else {}).get("portfolio_value"), 0.0)
@@ -1363,6 +1367,12 @@ def build_dashboard_view_model(payload):
         "unrealized_paper_pl": open_pl,
         "realized_paper_pl": closed_pl,
         "closed_trade_count": int(latest_account.get("closed_trade_count") or 0),
+        "stock_realized_pl": _as_float(stock_closed.get("net_pnl"), 0.0),
+        "stock_closed_trade_count": int(stock_closed.get("closed_trades") or 0),
+        "crypto_realized_pl": _as_float(crypto_closed.get("net_pnl"), 0.0),
+        "crypto_closed_trade_count": int(crypto_closed.get("closed_trades") or 0),
+        "options_realized_pl": _as_float(options_closed.get("net_pnl"), 0.0),
+        "options_closed_trade_count": int(options_closed.get("closed_trades") or 0),
         "open_positions": int(latest_account.get("open_positions") or 0),
         "account_status": friendly_status_text(latest_account.get("account_status"), "Unknown"),
         "account_source": _safe_text(latest_account.get("source"), "monitoring database"),
@@ -1562,9 +1572,6 @@ def build_compact_dashboard_summary(payload, view):
     )
     for position in ordered_positions:
         signed_quantity = _as_float(position.get("quantity"), 0.0)
-        average_entry = _as_float(position.get("average_entry_price"), 0.0)
-        unrealized_pl = _as_float(position.get("unrealized_pl"), 0.0)
-        cost_basis = abs(signed_quantity * average_entry)
         asset_class = str(position.get("asset_class") or "").strip().lower()
         asset_label = "Crypto" if "crypto" in asset_class else "Option" if "option" in asset_class else "Stock"
         position_rows.append(
@@ -1576,8 +1583,6 @@ def build_compact_dashboard_summary(payload, view):
                 "Avg entry": format_currency(position.get("average_entry_price")),
                 "Last": format_currency(position.get("current_price")),
                 "Exposure": format_currency(abs(_as_float(position.get("market_value"), 0.0))),
-                "Open P&L": format_currency(unrealized_pl),
-                "Return": format_percent((unrealized_pl / cost_basis) * 100.0 if cost_basis > 0 else 0.0, "0.00%"),
             }
         )
 
@@ -3346,7 +3351,8 @@ def _render_crypto_dashboard_panel(payload, *, detailed: bool = False) -> None:
     _metric_card(columns[1], "Cycle", cycle_status, "neutral")
     _metric_card(columns[2], "Universe", int(crypto.get("universe_count") or 0), "neutral")
     _metric_card(columns[3], "Top Signal", f"{_safe_text(top_signal.get('symbol'), 'None')} · {signal}", signal_style)
-    _metric_card(columns[4], "Crypto Open P/L", format_currency(crypto.get("unrealized_pl")), "buy" if _as_float(crypto.get("unrealized_pl"), 0.0) >= 0 else "sell")
+    crypto_realized = _as_float(crypto.get("realized_pl"), 0.0)
+    _metric_card(columns[4], "Crypto Realized P/L", format_currency(crypto_realized), "buy" if crypto_realized > 0 else "sell" if crypto_realized < 0 else "neutral")
 
     st.caption(
         f"Last cycle: {format_timestamp_eastern(crypto.get('updated_at'))} · "
@@ -3379,7 +3385,6 @@ def _render_crypto_dashboard_panel(payload, *, detailed: bool = False) -> None:
             "Avg entry": format_currency(row.get("average_entry_price")),
             "Last": format_currency(row.get("current_price")),
             "Exposure": format_currency(abs(_as_float(row.get("market_value"), 0.0))),
-            "Open P&L": format_currency(row.get("unrealized_pl")),
         }
         for row in positions
     ]
@@ -3471,7 +3476,8 @@ def _render_options_dashboard_panel(payload, *, detailed: bool = False) -> None:
     _metric_card(columns[1], "Cycle", cycle_status, "neutral")
     _metric_card(columns[2], "Underlyings", int(options.get("underlying_count") or 0), "neutral")
     _metric_card(columns[3], "Top Signal", f"{_safe_text(top_signal.get('symbol'), 'None')} · {signal}", signal_style)
-    _metric_card(columns[4], "Options Open P/L", format_currency(options.get("unrealized_pl")), "buy" if _as_float(options.get("unrealized_pl"), 0.0) >= 0 else "sell")
+    options_realized = _as_float(options.get("realized_pl"), 0.0)
+    _metric_card(columns[4], "Options Realized P/L", format_currency(options_realized), "buy" if options_realized > 0 else "sell" if options_realized < 0 else "neutral")
     st.caption(
         f"Last cycle: {format_timestamp_eastern(options.get('updated_at'))} · "
         f"{int(options.get('scanned_count') or 0)} scanned · "
@@ -3493,7 +3499,6 @@ def _render_options_dashboard_panel(payload, *, detailed: bool = False) -> None:
             "Avg premium": format_currency(row.get("average_entry_price")),
             "Last premium": format_currency(row.get("current_price")),
             "Market value": format_currency(abs(_as_float(row.get("market_value"), 0.0))),
-            "Open P&L": format_currency(row.get("unrealized_pl")),
         }
         for row in positions
     ]
@@ -3583,9 +3588,16 @@ def render_command_center_page(payload, view):
         "<div><div class='dq-section-title'>Realized profit / loss</div><div class='dq-section-copy'>Money made or lost only after the bot completes a sell</div></div></div></div>",
         unsafe_allow_html=True,
     )
-    top = st.columns(1)
+    top = st.columns(4)
     bot_net_pl = _as_float(view.get("bot_net_pl"), 0.0)
-    _metric_card(top[0], "Realized Profit / Loss", format_currency(bot_net_pl), "buy" if bot_net_pl > 0 else "sell" if bot_net_pl < 0 else "neutral")
+    realized_values = [
+        ("Realized Total", bot_net_pl),
+        ("Stocks", _as_float(view.get("stock_realized_pl"), 0.0)),
+        ("Crypto", _as_float(view.get("crypto_realized_pl"), 0.0)),
+        ("Options", _as_float(view.get("options_realized_pl"), 0.0)),
+    ]
+    for column, (label, value) in zip(top, realized_values):
+        _metric_card(column, label, format_currency(value), "buy" if value > 0 else "sell" if value < 0 else "neutral")
     st.caption(
         f"Total from {int(view.get('closed_trade_count') or 0)} completed trades. "
         "Buying or holding does not change this number; a completed sell adds its profit or loss."
@@ -3695,8 +3707,15 @@ def render_account_page(payload, view):
     _metric_card(acc_cols[2], "Buying Power", format_currency(view["buying_power"]), "neutral")
     _metric_card(acc_cols[3], "Open Positions", int(view.get("open_positions") or 0), "neutral")
 
-    second_row = st.columns(1)
-    _metric_card(second_row[0], "Realized Profit / Loss", format_currency(bot_net_pl), "buy" if bot_net_pl > 0 else "sell" if bot_net_pl < 0 else "neutral")
+    second_row = st.columns(4)
+    realized_values = [
+        ("Realized Total", bot_net_pl),
+        ("Stocks", _as_float(view.get("stock_realized_pl"), 0.0)),
+        ("Crypto", _as_float(view.get("crypto_realized_pl"), 0.0)),
+        ("Options", _as_float(view.get("options_realized_pl"), 0.0)),
+    ]
+    for column, (label, value) in zip(second_row, realized_values):
+        _metric_card(column, label, format_currency(value), "buy" if value > 0 else "sell" if value < 0 else "neutral")
 
     third_row = st.columns(2)
     _metric_card(third_row[0], "Orders Today", orders_today, "neutral")
@@ -3838,16 +3857,17 @@ def render_orders_page(payload):
 def render_performance_page(payload):
     view = build_dashboard_view_model(payload)
     bot_net_pl = _as_float(view.get("bot_net_pl"), 0.0)
-    style = "buy" if bot_net_pl > 0 else "sell" if bot_net_pl < 0 else "neutral"
 
     st.markdown("### BOT PERFORMANCE")
-    performance_card = st.columns(1)
-    _metric_card(
-        performance_card[0],
-        "Realized Profit / Loss",
-        format_currency(bot_net_pl),
-        style,
-    )
+    performance_card = st.columns(4)
+    realized_values = [
+        ("Realized Total", bot_net_pl),
+        ("Stocks", _as_float(view.get("stock_realized_pl"), 0.0)),
+        ("Crypto", _as_float(view.get("crypto_realized_pl"), 0.0)),
+        ("Options", _as_float(view.get("options_realized_pl"), 0.0)),
+    ]
+    for column, (label, value) in zip(performance_card, realized_values):
+        _metric_card(column, label, format_currency(value), "buy" if value > 0 else "sell" if value < 0 else "neutral")
     st.caption(
         f"Net result from {int(view.get('closed_trade_count') or 0)} completed trades. "
         "Each completed sell adds its gain or loss. Buys and open positions do not affect this number."

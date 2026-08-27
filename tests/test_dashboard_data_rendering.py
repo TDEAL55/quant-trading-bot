@@ -385,6 +385,13 @@ def test_bot_net_pl_uses_only_realized_closed_trade_profit_loss():
             "snapshot_timestamp": "2026-08-01T13:30:00+00:00",
             "portfolio_value": 100000.0,
         },
+        "paper_tuning": {
+            "closed_trades_by_asset": {
+                "stocks": {"closed_trades": 2, "net_pnl": 125.0},
+                "crypto": {"closed_trades": 1, "net_pnl": 200.0},
+                "options": {"closed_trades": 1, "net_pnl": -25.0},
+            }
+        },
         "latest_account": {
             "portfolio_value": 101250.25,
             "cash": 50000.0,
@@ -406,5 +413,8 @@ def test_bot_net_pl_uses_only_realized_closed_trade_profit_loss():
 
     assert view["bot_starting_value"] == 100000.0
     assert view["bot_net_pl"] == 300.0
+    assert view["stock_realized_pl"] == 125.0
+    assert view["crypto_realized_pl"] == 200.0
+    assert view["options_realized_pl"] == -25.0
     assert view["account_change_since_tracking"] == 1250.25
     assert view["total_pl"] == 700.0

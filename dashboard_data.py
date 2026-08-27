@@ -142,6 +142,7 @@ def _fetch_crypto_dashboard_snapshot(
     recent_orders: list[dict[str, Any]],
     *,
     status_path: str | Path | None = None,
+    closed_trade_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     path = Path(status_path or os.getenv("CRYPTO_STATUS_PATH", "/var/lib/quant-bot/crypto-status.json"))
     status: dict[str, Any] = {
@@ -167,6 +168,8 @@ def _fetch_crypto_dashboard_snapshot(
     status["open_position_count"] = len(positions)
     status["crypto_exposure"] = sum(abs(float(row.get("market_value") or 0.0)) for row in positions)
     status["unrealized_pl"] = sum(float(row.get("unrealized_pl") or 0.0) for row in positions)
+    status["realized_pl"] = float((closed_trade_summary or {}).get("net_pnl") or 0.0)
+    status["closed_trade_count"] = int((closed_trade_summary or {}).get("closed_trades") or 0)
     status["status_path"] = str(path)
     return status
 
@@ -182,6 +185,7 @@ def _fetch_options_dashboard_snapshot(
     recent_orders: list[dict[str, Any]],
     *,
     status_path: str | Path | None = None,
+    closed_trade_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     path = Path(status_path or os.getenv("OPTIONS_STATUS_PATH", "/var/lib/quant-bot/options-status.json"))
     status: dict[str, Any] = {
@@ -208,6 +212,8 @@ def _fetch_options_dashboard_snapshot(
     status["open_position_count"] = len(positions)
     status["options_exposure"] = sum(abs(float(row.get("market_value") or 0.0)) for row in positions)
     status["unrealized_pl"] = sum(float(row.get("unrealized_pl") or 0.0) for row in positions)
+    status["realized_pl"] = float((closed_trade_summary or {}).get("net_pnl") or 0.0)
+    status["closed_trade_count"] = int((closed_trade_summary or {}).get("closed_trades") or 0)
     status["status_path"] = str(path)
     return status
 
@@ -239,6 +245,32 @@ def _fetch_paper_tuning_snapshot(db: MonitoringDatabase) -> dict[str, Any]:
         FROM strategy_closed_trades
         """
     ) or {}
+    closed_trade_rows = db.query_all(
+        """
+        SELECT
+            CASE
+                WHEN LOWER(COALESCE(strategy_id, '')) LIKE '%crypto%' THEN 'crypto'
+                WHEN LOWER(COALESCE(strategy_id, '')) LIKE '%option%' THEN 'options'
+                ELSE 'stocks'
+            END AS asset_group,
+            COUNT(*) AS closed_trades,
+            COALESCE(SUM(net_pnl), 0) AS net_pnl
+        FROM strategy_closed_trades
+        GROUP BY asset_group
+        """
+    ) or []
+    closed_trades_by_asset = {
+        "stocks": {"closed_trades": 0, "net_pnl": 0.0},
+        "crypto": {"closed_trades": 0, "net_pnl": 0.0},
+        "options": {"closed_trades": 0, "net_pnl": 0.0},
+    }
+    for row in closed_trade_rows:
+        asset_group = str((row or {}).get("asset_group") or "").strip().lower()
+        if asset_group in closed_trades_by_asset:
+            closed_trades_by_asset[asset_group] = {
+                "closed_trades": int((row or {}).get("closed_trades") or 0),
+                "net_pnl": float((row or {}).get("net_pnl") or 0.0),
+            }
     order_statuses = db.query_all(
         """
         SELECT LOWER(submission_status) AS status, COUNT(*) AS count
@@ -267,6 +299,7 @@ def _fetch_paper_tuning_snapshot(db: MonitoringDatabase) -> dict[str, Any]:
     return {
         "validation": dict(validation),
         "closed_trades": dict(closed_trades),
+        "closed_trades_by_asset": closed_trades_by_asset,
         "order_statuses": list(order_statuses or []),
         "notification_statuses": list(notification_statuses or []),
         "latest_notification": dict(latest_notification),
@@ -534,8 +567,17 @@ def fetch_dashboard_payload(
         payload["latest_account"],
         payload["paper_tuning"],
     )
-    payload["crypto"] = _fetch_crypto_dashboard_snapshot(payload["latest_account"], payload["recent_orders"])
-    payload["options"] = _fetch_options_dashboard_snapshot(payload["latest_account"], payload["recent_orders"])
+    closed_by_asset = dict(payload["paper_tuning"].get("closed_trades_by_asset") or {})
+    payload["crypto"] = _fetch_crypto_dashboard_snapshot(
+        payload["latest_account"],
+        payload["recent_orders"],
+        closed_trade_summary=dict(closed_by_asset.get("crypto") or {}),
+    )
+    payload["options"] = _fetch_options_dashboard_snapshot(
+        payload["latest_account"],
+        payload["recent_orders"],
+        closed_trade_summary=dict(closed_by_asset.get("options") or {}),
+    )
 
     recent_runs = payload["recent_runs"] or []
     observed_restarts = 0

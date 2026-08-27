@@ -19,11 +19,18 @@ def test_options_dashboard_combines_status_with_live_broker_rows(tmp_path, monke
         {"symbol": "AAPL", "asset_class": "us_equity", "client_order_id": "qtb-stock-1"},
     ]
 
-    snapshot = _fetch_options_dashboard_snapshot(account, orders, status_path=status_path)
+    snapshot = _fetch_options_dashboard_snapshot(
+        account,
+        orders,
+        status_path=status_path,
+        closed_trade_summary={"closed_trades": 2, "net_pnl": -12.5},
+    )
 
     assert snapshot["enabled"] is True
     assert snapshot["underlying_count"] == 10
     assert snapshot["open_position_count"] == 1
     assert snapshot["options_exposure"] == 600
     assert snapshot["unrealized_pl"] == 25
+    assert snapshot["realized_pl"] == -12.5
+    assert snapshot["closed_trade_count"] == 2
     assert len(snapshot["recent_orders"]) == 1

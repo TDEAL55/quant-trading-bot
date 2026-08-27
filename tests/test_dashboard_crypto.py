@@ -53,12 +53,19 @@ def test_crypto_dashboard_combines_cycle_status_with_live_broker_positions(tmp_p
         {"symbol": "AAPL", "client_order_id": "qtb-stock-abc", "status": "filled"},
     ]
 
-    result = _fetch_crypto_dashboard_snapshot(account, orders, status_path=status_path)
+    result = _fetch_crypto_dashboard_snapshot(
+        account,
+        orders,
+        status_path=status_path,
+        closed_trade_summary={"closed_trades": 4, "net_pnl": 87.25},
+    )
 
     assert result["enabled"] is True
     assert result["universe_count"] == 12
     assert result["open_position_count"] == 1
     assert result["crypto_exposure"] == 6000
     assert result["unrealized_pl"] == 125
+    assert result["realized_pl"] == 87.25
+    assert result["closed_trade_count"] == 4
     assert [row["symbol"] for row in result["recent_orders"]] == ["BTC/USD"]
     assert result["recent_cancellations"][0]["symbol"] == "WIF/USD"
