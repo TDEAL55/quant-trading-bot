@@ -5,6 +5,7 @@ from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 EASTERN_TZ = ZoneInfo("America/New_York")
+CENTRAL_TZ = ZoneInfo("America/Chicago")
 MARKET_OPEN_ET = time(9, 30)
 MARKET_CLOSE_ET = time(16, 0)
 
@@ -42,10 +43,11 @@ def _parse_dt(value) -> datetime | None:
 
 
 def format_est(value, fallback="Waiting for the next market-hours update") -> str:
+    """Legacy name retained; dashboard timestamps are displayed in Central Time."""
     dt = _parse_dt(value)
     if dt is None:
         return fallback
-    return dt.astimezone(EASTERN_TZ).strftime("%Y-%m-%d %I:%M:%S %p ET")
+    return dt.astimezone(CENTRAL_TZ).strftime("%Y-%m-%d %I:%M:%S %p CT")
 
 
 def normalize_mode(mode: str | None) -> str:
@@ -54,23 +56,26 @@ def normalize_mode(mode: str | None) -> str:
 
 def classify_market_clock(now_et: datetime | None = None) -> dict[str, object]:
     now_et = now_et or datetime.now(EASTERN_TZ)
-    market_open = now_et.weekday() < 5 and MARKET_OPEN_ET <= now_et.time() < MARKET_CLOSE_ET
+    if now_et.tzinfo is None:
+        now_et = now_et.replace(tzinfo=EASTERN_TZ)
+    market_now = now_et.astimezone(EASTERN_TZ)
+    market_open = market_now.weekday() < 5 and MARKET_OPEN_ET <= market_now.time() < MARKET_CLOSE_ET
     if market_open:
-        target = now_et.replace(hour=MARKET_CLOSE_ET.hour, minute=MARKET_CLOSE_ET.minute, second=0, microsecond=0)
+        target = market_now.replace(hour=MARKET_CLOSE_ET.hour, minute=MARKET_CLOSE_ET.minute, second=0, microsecond=0)
         countdown_label = "Closes in"
         label = "MARKET OPEN"
         severity = "Healthy"
     else:
-        target = now_et
-        if now_et.time() >= MARKET_CLOSE_ET or now_et.weekday() >= 5:
-            target = now_et + timedelta(days=1)
+        target = market_now
+        if market_now.time() >= MARKET_CLOSE_ET or market_now.weekday() >= 5:
+            target = market_now + timedelta(days=1)
             while target.weekday() >= 5:
                 target += timedelta(days=1)
         target = target.replace(hour=MARKET_OPEN_ET.hour, minute=MARKET_OPEN_ET.minute, second=0, microsecond=0)
         countdown_label = "Opens in"
         label = "MARKET CLOSED"
         severity = "Waiting"
-    remaining = max(int((target - now_et).total_seconds()), 0)
+    remaining = max(int((target - market_now).total_seconds()), 0)
     return {
         "is_open": market_open,
         "label": label,
@@ -78,7 +83,7 @@ def classify_market_clock(now_et: datetime | None = None) -> dict[str, object]:
         "countdown_label": countdown_label,
         "countdown_seconds": remaining,
         "countdown_text": f"{remaining // 3600:02d}:{(remaining % 3600) // 60:02d}:{remaining % 60:02d}",
-        "timestamp": now_et.astimezone(EASTERN_TZ).strftime("%Y-%m-%d %I:%M:%S %p ET"),
+        "timestamp": market_now.astimezone(CENTRAL_TZ).strftime("%Y-%m-%d %I:%M:%S %p CT"),
     }
 
 

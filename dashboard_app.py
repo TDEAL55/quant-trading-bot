@@ -58,6 +58,7 @@ MAX_DAILY_SUBMITTED_NOTIONAL = 30.0
 DASHBOARD_VERSION = "v4.0"
 UI_BUILD_LABEL = "PAPER TRADING DESK"
 EASTERN_TZ = ZoneInfo("America/New_York")
+CENTRAL_TZ = ZoneInfo("America/Chicago")
 MARKET_OPEN_ET = time(9, 30)
 MARKET_CLOSE_ET = time(16, 0)
 
@@ -288,7 +289,7 @@ def build_ohlc_series(price_points, timeframe="1D"):
 
     candles = [buckets[key] for key in sorted(buckets.keys())]
     for candle in candles:
-        candle["timestamp"] = candle["timestamp"].astimezone(EASTERN_TZ)
+        candle["timestamp"] = candle["timestamp"].astimezone(CENTRAL_TZ)
     return candles
 
 
@@ -431,9 +432,9 @@ def format_compact_timestamp(value, fallback="Waiting for the next market-hours 
             "full": fallback,
             "relative": "",
         }
-    now_et = datetime.now(EASTERN_TZ)
-    dt_et = dt.astimezone(EASTERN_TZ)
-    delta_seconds = max(int((now_et - dt_et).total_seconds()), 0)
+    now_ct = datetime.now(CENTRAL_TZ)
+    dt_ct = dt.astimezone(CENTRAL_TZ)
+    delta_seconds = max(int((now_ct - dt_ct).total_seconds()), 0)
     if delta_seconds < 90:
         relative = "Updated moments ago"
     elif delta_seconds < 3600:
@@ -441,9 +442,9 @@ def format_compact_timestamp(value, fallback="Waiting for the next market-hours 
     else:
         relative = f"Updated {delta_seconds // 3600}h ago"
     return {
-        "time": dt_et.strftime("%I:%M %p ET").lstrip("0"),
-        "date": f"{dt_et.strftime('%B')} {dt_et.day}, {dt_et.year}",
-        "full": dt_et.strftime("%Y-%m-%d %I:%M:%S %p ET"),
+        "time": dt_ct.strftime("%I:%M %p CT").lstrip("0"),
+        "date": f"{dt_ct.strftime('%B')} {dt_ct.day}, {dt_ct.year}",
+        "full": dt_ct.strftime("%Y-%m-%d %I:%M:%S %p CT"),
         "relative": relative,
     }
 
@@ -3243,7 +3244,7 @@ def _next_worker_run_text(payload, view):
     latest_run = (payload.get("latest_run") or {}).get("run_timestamp")
     latest_dt = _parse_iso(latest_run)
     if latest_dt is not None:
-        return format_timestamp_eastern((latest_dt.astimezone(EASTERN_TZ) + timedelta(minutes=30)).isoformat())
+        return format_timestamp_eastern((latest_dt.astimezone(CENTRAL_TZ) + timedelta(minutes=30)).isoformat())
     return format_timestamp_eastern((datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat())
 
 
@@ -3895,9 +3896,9 @@ def _build_order_markers(recent_orders):
             continue
         signal = normalize_signal(order.get("signal", "HOLD"))
         if signal == "BUY":
-            buy_points.append(ts.astimezone(EASTERN_TZ))
+            buy_points.append(ts.astimezone(CENTRAL_TZ))
         elif signal == "SELL":
-            sell_points.append(ts.astimezone(EASTERN_TZ))
+            sell_points.append(ts.astimezone(CENTRAL_TZ))
     return buy_points, sell_points
 
 

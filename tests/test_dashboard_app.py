@@ -101,6 +101,15 @@ def test_format_percent_and_mobile_layout_helpers():
     assert dashboard_app.is_mobile_layout(1080) is False
 
 
+def test_dashboard_timestamps_display_in_central_time():
+    value = "2026-07-13T15:00:00+00:00"
+
+    assert dashboard_app.format_timestamp_eastern(value) == "2026-07-13 10:00:00 AM CT"
+    compact = dashboard_app.format_compact_timestamp(value)
+    assert compact["time"] == "10:00 AM CT"
+    assert compact["full"] == "2026-07-13 10:00:00 AM CT"
+
+
 def test_mobile_dashboard_query_flag_is_explicit_and_tolerates_list_values():
     assert dashboard_app.mobile_dashboard_requested({"mobile": "1"}) is True
     assert dashboard_app.mobile_dashboard_requested({"mobile": ["true"]}) is True
@@ -118,6 +127,7 @@ def test_market_clock_open_and_closed_states():
 
     assert open_clock["label"] == "MARKET OPEN"
     assert open_clock["is_open"] is True
+    assert open_clock["time_text"].endswith("09:00:00 AM CT")
     assert closed_clock["label"] == "MARKET CLOSED"
     assert closed_clock["is_open"] is False
 
