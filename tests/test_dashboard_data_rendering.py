@@ -124,10 +124,13 @@ def test_filled_bot_orders_reconstruct_long_short_crypto_and_option_closes():
     assert result["realized_paper_pl"] == 36.0
 
 
-def test_broker_closed_summary_wins_and_recorded_database_is_fallback():
+def test_recorded_database_closed_summary_is_the_all_time_source_of_truth():
     broker_account = {"closed_trade_count": 2, "realized_paper_pl": 50.0}
     tuning = {"closed_trades": {"closed_trades": 3, "net_pnl": 142.75}}
-    assert _attach_recorded_closed_trade_pl(broker_account, tuning)["realized_paper_pl"] == 50.0
+    result = _attach_recorded_closed_trade_pl(broker_account, tuning)
+    assert result["closed_trade_count"] == 3
+    assert result["realized_paper_pl"] == 142.75
+    assert result["closed_trade_source"] == "strategy_closed_trades"
 
     fallback = _attach_recorded_closed_trade_pl({}, tuning)
     assert fallback["closed_trade_count"] == 3
@@ -368,11 +371,11 @@ def test_total_pl_is_open_plus_closed_not_account_history_change():
     view = dashboard_app.build_dashboard_view_model(payload)
 
     assert view["total_pl"] == 65.0
-    assert view["bot_net_pl"] == 50.0
+    assert view["bot_net_pl"] == 40.0
     assert view["account_change_since_tracking"] == 50.0
 
 
-def test_bot_net_pl_uses_first_account_snapshot_not_limited_chart_history():
+def test_bot_net_pl_uses_only_realized_closed_trade_profit_loss():
     payload = {
         "db_connected": True,
         "latest_run": {"bot_status": "healthy", "trading_mode": "PAPER"},
@@ -402,5 +405,6 @@ def test_bot_net_pl_uses_first_account_snapshot_not_limited_chart_history():
     view = dashboard_app.build_dashboard_view_model(payload)
 
     assert view["bot_starting_value"] == 100000.0
-    assert view["bot_net_pl"] == 1250.25
+    assert view["bot_net_pl"] == 300.0
+    assert view["account_change_since_tracking"] == 1250.25
     assert view["total_pl"] == 700.0

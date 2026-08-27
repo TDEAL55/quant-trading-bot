@@ -1294,7 +1294,15 @@ def build_dashboard_view_model(payload):
     current_portfolio_value = _as_float(latest_account.get("portfolio_value"), 0.0)
     fallback_starting_value = _as_float((portfolio_history[0] if portfolio_history else {}).get("portfolio_value"), 0.0)
     bot_starting_value = _as_float(starting_account.get("portfolio_value"), fallback_starting_value)
-    bot_net_pl = current_portfolio_value - bot_starting_value if bot_starting_value > 0 else total_pl
+    account_change_since_tracking = (
+        current_portfolio_value - bot_starting_value
+        if bot_starting_value > 0
+        else total_pl
+    )
+    # The dashboard's headline result is intentionally closed-trade P/L only.
+    # Open positions can change account value, but they have not made or lost
+    # money for the bot until the exit order fills and the trade is recorded.
+    bot_net_pl = closed_pl
     previous_portfolio = (
         _as_float(portfolio_history[-2].get("portfolio_value"), 0.0)
         if len(portfolio_history) >= 2
@@ -1364,7 +1372,7 @@ def build_dashboard_view_model(payload):
         "bot_net_pl": bot_net_pl,
         "bot_starting_value": bot_starting_value,
         "bot_tracking_started_at": starting_account.get("snapshot_timestamp") or (portfolio_history[0] if portfolio_history else {}).get("snapshot_timestamp"),
-        "account_change_since_tracking": bot_net_pl,
+        "account_change_since_tracking": account_change_since_tracking,
         "ma_distance": moving_average_distance(latest_signal.get("short_moving_average"), latest_signal.get("long_moving_average")),
         "previous_portfolio_value": previous_portfolio,
         "previous_spy_price": previous_price,
@@ -3012,7 +3020,7 @@ def render_header(payload, view):
                 <div class='dq-equity-block'>
                     <div class='dq-eyebrow'>PAPER PORTFOLIO</div>
                     <div class='dq-equity-value'>{format_currency(view.get('portfolio_value'))}</div>
-                    <div class='dq-equity-change {bot_net_pl_class}'>{'+' if bot_net_pl > 0 else ''}{format_currency(bot_net_pl)} bot net gain / loss</div>
+                    <div class='dq-equity-change {bot_net_pl_class}'>{'+' if bot_net_pl > 0 else ''}{format_currency(bot_net_pl)} realized from closed trades</div>
                 </div>
                 <div class='dq-hero-facts'>
                     <div><span>Open positions</span><strong>{int(view.get('open_positions') or 0)}</strong></div>
@@ -3572,16 +3580,15 @@ def render_command_center_page(payload, view):
 
     st.markdown(
         "<div class='dq-section-intro dq-profit-heading'><div><span class='dq-section-index'>02</span>"
-        "<div><div class='dq-section-title'>Bot net gain / loss</div><div class='dq-section-copy'>Current account value minus its value when tracking began</div></div></div></div>",
+        "<div><div class='dq-section-title'>Realized profit / loss</div><div class='dq-section-copy'>Money made or lost only after the bot completes a sell</div></div></div></div>",
         unsafe_allow_html=True,
     )
     top = st.columns(1)
     bot_net_pl = _as_float(view.get("bot_net_pl"), 0.0)
-    _metric_card(top[0], "Bot Net Gain / Loss Since Start", format_currency(bot_net_pl), "buy" if bot_net_pl > 0 else "sell" if bot_net_pl < 0 else "neutral")
+    _metric_card(top[0], "Realized Profit / Loss", format_currency(bot_net_pl), "buy" if bot_net_pl > 0 else "sell" if bot_net_pl < 0 else "neutral")
     st.caption(
-        f"Started at {format_currency(view.get('bot_starting_value'))} · "
-        f"Current value {format_currency(view.get('portfolio_value'))} · "
-        f"Tracking began {format_timestamp_eastern(view.get('bot_tracking_started_at'), 'with the first saved account snapshot')}."
+        f"Total from {int(view.get('closed_trade_count') or 0)} completed trades. "
+        "Buying or holding does not change this number; a completed sell adds its profit or loss."
     )
 
     render_alert_banner(payload, view)
@@ -3680,7 +3687,7 @@ def render_account_page(payload, view):
     st.markdown("<div class='dq-section-tag'>PORTFOLIO</div>", unsafe_allow_html=True)
     order_count_by_day = payload.get("order_count_by_day") or []
     orders_today = int((order_count_by_day[-1] if order_count_by_day else {}).get("submitted_count") or 0)
-    bot_net_pl = _as_float(view.get("bot_net_pl"), _as_float(view.get("account_change_since_tracking"), 0.0))
+    bot_net_pl = _as_float(view.get("bot_net_pl"), 0.0)
 
     acc_cols = st.columns(4)
     _metric_card(acc_cols[0], "Portfolio Value", format_currency(view["portfolio_value"]), "neutral")
@@ -3689,15 +3696,12 @@ def render_account_page(payload, view):
     _metric_card(acc_cols[3], "Open Positions", int(view.get("open_positions") or 0), "neutral")
 
     second_row = st.columns(1)
-    _metric_card(second_row[0], "Bot Net Gain / Loss Since Start", format_currency(bot_net_pl), "buy" if bot_net_pl > 0 else "sell" if bot_net_pl < 0 else "neutral")
+    _metric_card(second_row[0], "Realized Profit / Loss", format_currency(bot_net_pl), "buy" if bot_net_pl > 0 else "sell" if bot_net_pl < 0 else "neutral")
 
     third_row = st.columns(2)
     _metric_card(third_row[0], "Orders Today", orders_today, "neutral")
     _metric_card(third_row[1], "Account Status", view["account_status"], "healthy" if _is_active_account_status(view["account_status"]) else "warning")
-    st.caption(
-        f"Starting account value {format_currency(view.get('bot_starting_value'))} → "
-        f"current account value {format_currency(view.get('portfolio_value'))}."
-    )
+    st.caption("Cumulative result from completed trades only; open-position price changes are excluded.")
 
     st.markdown("### Portfolio Allocation", unsafe_allow_html=True)
     if go is not None:
@@ -3832,118 +3836,23 @@ def render_orders_page(payload):
 
 
 def render_performance_page(payload):
-    tuning_scorecard = build_paper_tuning_scorecard(payload)
-    st.markdown("### PAPER EVIDENCE SCORECARD")
-    tuning_cols = st.columns(6)
-    for column, metric in zip(tuning_cols, tuning_scorecard["metrics"]):
-        _metric_card(column, metric["label"], metric["value"], "neutral")
-    st.caption(tuning_scorecard["evidence_status"])
+    view = build_dashboard_view_model(payload)
+    bot_net_pl = _as_float(view.get("bot_net_pl"), 0.0)
+    style = "buy" if bot_net_pl > 0 else "sell" if bot_net_pl < 0 else "neutral"
 
-    research_payload = st.session_state.get("dashboard_research_payload") or {}
-    perf_payload = research_payload.get("performance_intelligence") or {}
-    latest_perf_run = perf_payload.get("latest_run") or {}
-    perf_metrics = perf_payload.get("metrics_map") or {}
-    perf_daily_equity = list(perf_payload.get("daily_equity") or [])
-    perf_trade_stats = list(perf_payload.get("trade_statistics") or [])
-    perf_snapshots = list(perf_payload.get("portfolio_snapshots") or [])
-
-    if latest_perf_run and perf_daily_equity:
-        st.markdown("### PERFORMANCE INTELLIGENCE - READ ONLY")
-        metric_cols = st.columns(6)
-        _metric_card(metric_cols[0], "Portfolio Value", perf_metrics.get("portfolio_value", 0.0), "healthy")
-        _metric_card(metric_cols[1], "Cash", perf_metrics.get("cash", 0.0), "neutral")
-        _metric_card(metric_cols[2], "Win Rate", perf_metrics.get("win_rate", 0.0), "neutral")
-        _metric_card(metric_cols[3], "Sharpe", perf_metrics.get("sharpe_ratio", 0.0), "neutral")
-        _metric_card(metric_cols[4], "Sortino", perf_metrics.get("sortino_ratio", 0.0), "neutral")
-        _metric_card(metric_cols[5], "Calmar", perf_metrics.get("calmar_ratio", 0.0), "neutral")
-
-        st.markdown("#### Equity Curve")
-        st.line_chart({"portfolio_value": [_as_float(item.get("portfolio_value"), 0.0) for item in perf_daily_equity]})
-
-        st.markdown("#### Daily Returns")
-        st.line_chart({"daily_return": [_as_float(item.get("daily_return"), 0.0) for item in perf_daily_equity]})
-
-        st.markdown("#### Drawdown Chart")
-        st.line_chart({"drawdown": [_as_float(item.get("current_drawdown"), 0.0) for item in perf_daily_equity]})
-
-        st.markdown("#### Benchmark Comparison")
-        st.dataframe(
-            [
-                {
-                    "alpha": perf_metrics.get("alpha"),
-                    "beta": perf_metrics.get("beta"),
-                    "tracking_error": perf_metrics.get("tracking_error"),
-                    "excess_return": perf_metrics.get("excess_return"),
-                    "information_ratio": perf_metrics.get("information_ratio"),
-                }
-            ]
-        )
-
-        st.markdown("#### Trade Statistics")
-        st.dataframe(perf_trade_stats)
-
-        st.markdown("#### Sector Allocation")
-        latest_snapshot = perf_snapshots[-1] if perf_snapshots else {}
-        sector_alloc = latest_snapshot.get("sector_allocation") or {}
-        st.dataframe([{"sector": key, "weight": value} for key, value in sorted(sector_alloc.items())])
-
-        st.markdown("#### Position Concentration")
-        st.dataframe(
-            [
-                {
-                    "exposure_pct": perf_metrics.get("exposure_pct"),
-                    "position_concentration": perf_metrics.get("position_concentration"),
-                    "turnover": perf_metrics.get("turnover"),
-                }
-            ]
-        )
-
-        st.markdown("#### Reports")
-        st.dataframe([perf_payload.get("daily_report") or {}])
-        st.dataframe(perf_payload.get("weekly_summary") or [])
-        st.dataframe(perf_payload.get("monthly_summary") or [])
-        return
-
-    history = payload.get("portfolio_history") or []
-    signal_history = payload.get("signal_history") or []
-    order_count_by_day = payload.get("order_count_by_day") or []
-
-    if len(history) < 2:
-        st.info("More paper-trading history is needed before this metric is meaningful.")
-        return
-
-    values = [_as_float(item.get("portfolio_value"), 0.0) for item in history]
-    unrealized = [_as_float(item.get("unrealized_paper_pl"), 0.0) for item in history]
-    daily_pl = [values[i] - values[i - 1] if i > 0 else 0.0 for i in range(len(values))]
-    cumulative = [v - values[0] for v in values]
-    running_max = []
-    drawdown = []
-    max_val = values[0]
-    for v in values:
-        max_val = max(max_val, v)
-        running_max.append(max_val)
-        dd = 0.0 if max_val == 0 else ((v - max_val) / max_val) * 100.0
-        drawdown.append(dd)
-
-    st.subheader("Portfolio Value")
-    portfolio_fig = build_line_chart([{ "timestamp": idx, "value": value } for idx, value in enumerate(values)], "Portfolio Value", "value", "timestamp")
-    _safe_plotly_chart(portfolio_fig, "Portfolio chart unavailable")
-
-    st.subheader("Daily Account Value Change")
-    st.caption("How much the entire PAPER account value changed from one recorded snapshot to the next. This is not the same as closed-trade P/L.")
-    st.line_chart({"account_value_change": daily_pl})
-
-    st.subheader("Account Value Change Since Tracking Began")
-    st.caption("Current PAPER account value minus its first recorded value.")
-    cumulative_fig = build_line_chart([{ "timestamp": idx, "value": value } for idx, value in enumerate(cumulative)], "Account Value Change", "value", "timestamp")
-    _safe_plotly_chart(cumulative_fig, "Account value change chart unavailable")
-
-    if len(values) > 3:
-        st.subheader("Drawdown")
-        drawdown_fig = build_line_chart([{ "timestamp": idx, "value": value } for idx, value in enumerate(drawdown)], "Drawdown", "value", "timestamp")
-        _safe_plotly_chart(drawdown_fig, "Drawdown chart unavailable")
-    else:
-        st.info("More paper-trading history is needed before this metric is meaningful.")
+    st.markdown("### BOT PERFORMANCE")
+    performance_card = st.columns(1)
+    _metric_card(
+        performance_card[0],
+        "Realized Profit / Loss",
+        format_currency(bot_net_pl),
+        style,
+    )
+    st.caption(
+        f"Net result from {int(view.get('closed_trade_count') or 0)} completed trades. "
+        "Each completed sell adds its gain or loss. Buys and open positions do not affect this number."
+    )
+    st.info("This is the bot's locked-in result. Current gains or losses on positions it still owns are intentionally excluded.")
 
 
 def render_daily_run_page():

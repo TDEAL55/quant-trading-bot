@@ -281,10 +281,12 @@ def _attach_recorded_closed_trade_pl(
     account = dict(latest_account or {})
     closed = dict((paper_tuning or {}).get("closed_trades") or {})
     recorded_count = int(closed.get("closed_trades") or 0)
-    if int(account.get("closed_trade_count") or 0) <= 0 and recorded_count > 0:
+    # The durable ledger is the all-time source of truth. The broker-order
+    # reconstruction is deliberately limited to recent orders and is only a
+    # fallback while the ledger is still empty.
+    if recorded_count > 0:
         account["closed_trade_count"] = recorded_count
         account["closed_trade_source"] = "strategy_closed_trades"
-    if account.get("realized_paper_pl") is None:
         account["realized_paper_pl"] = float(closed.get("net_pnl") or 0.0)
     return account
 
