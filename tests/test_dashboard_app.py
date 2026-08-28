@@ -435,7 +435,38 @@ def test_paper_tuning_scorecard_does_not_claim_results_without_closed_trades():
 
 def test_action_reasons_explain_why_signals_did_not_become_orders():
     assert "no held coin" in dashboard_app.friendly_action_reason("no_crypto_order_selected")
-    assert "10% position cap" in dashboard_app.friendly_action_reason("option_premium_exceeds_position_cap")
+    assert "risk-adjusted position cap" in dashboard_app.friendly_action_reason("option_premium_exceeds_position_cap")
+    assert "Daily account loss" in dashboard_app.friendly_action_reason("daily_loss_stop")
+    assert "60-minute" in dashboard_app.friendly_action_reason("consecutive_loss_cooldown")
+
+
+def test_dashboard_view_exposes_actual_account_pnl_guard_status():
+    view = dashboard_app.build_dashboard_view_model(
+        {
+            "latest_account": {
+                "equity": 97_500,
+                "portfolio_value": 97_500,
+                "last_equity": 100_000,
+                "day_pl": -2_500,
+                "positions": [],
+            },
+            "latest_run": {},
+            "latest_success": {},
+            "latest_signal": {},
+            "starting_account": {},
+            "portfolio_history": [],
+            "signal_history": [],
+            "recent_orders": [],
+            "recent_runs": [],
+            "paper_tuning": {},
+            "crypto": {},
+            "options": {},
+        }
+    )
+
+    assert view["pnl_policy_status"] == "BLOCKED"
+    assert view["pnl_policy_reason"] == "daily_loss_stop"
+    assert view["pnl_policy"]["day_return_percent"] == -2.5
     assert dashboard_app.friendly_action_reason("crypto_take_profit") == "Crypto Take Profit"
 
 

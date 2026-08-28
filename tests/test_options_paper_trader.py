@@ -74,7 +74,9 @@ def test_options_cycle_builds_defined_risk_call_order(tmp_path, monkeypatch):
     assert result["last_order"]["side"] == "BUY"
     assert result["last_order"]["position_intent"] == "buy_to_open"
     assert result["last_order"]["estimated_premium"] <= 10000
-    assert result["maximum_position_percent"] == 10
+    assert result["maximum_position_percent"] == 4
+    assert result["stop_loss_percent"] == 25
+    assert result["take_profit_percent"] == 50
     assert broker.orders == []
 
 

@@ -12,6 +12,12 @@ from typing import Any, Callable
 from alpaca_paper_broker import AlpacaPaperBroker
 from crypto_market_data import AlpacaCryptoMarketData, analyze_crypto_bars
 from crypto_universe import canonical_crypto_symbol, load_crypto_universe
+from pnl_risk_policy import (
+    evaluate_account_pnl_policy,
+    load_recent_closed_trades,
+    risk_adjusted_position_percent,
+    settings_from_environment,
+)
 
 
 _TERMINAL_ORDER_STATUSES = {"filled", "canceled", "cancelled", "rejected", "expired"}
@@ -235,10 +241,16 @@ def run_crypto_paper_cycle(
     interval_minutes = max(int(os.getenv("CRYPTO_SCAN_INTERVAL_MINUTES", "1")), 1)
     buy_score = _as_float(os.getenv("CRYPTO_BUY_SCORE", "60"), 60.0)
     exit_score = _as_float(os.getenv("CRYPTO_EXIT_SCORE", "40"), 40.0)
-    stop_loss_percent = max(_as_float(os.getenv("CRYPTO_STOP_LOSS_PERCENT", "8"), 8.0), 0.1)
-    take_profit_percent = max(_as_float(os.getenv("CRYPTO_TAKE_PROFIT_PERCENT", "15"), 15.0), 0.1)
+    stop_loss_percent = max(_as_float(os.getenv("CRYPTO_STOP_LOSS_PERCENT", "5"), 5.0), 0.1)
+    take_profit_percent = max(_as_float(os.getenv("CRYPTO_TAKE_PROFIT_PERCENT", "10"), 10.0), 0.1)
     requested_position_percent = _as_float(os.getenv("CRYPTO_MAX_POSITION_EQUITY_PERCENT", "10"), 10.0)
-    maximum_position_percent = min(max(requested_position_percent, 0.1), 10.0)
+    pnl_settings = settings_from_environment(
+        maximum_position_percent=min(max(requested_position_percent, 0.1), 10.0)
+    )
+    maximum_position_percent = risk_adjusted_position_percent(
+        stop_loss_percent=stop_loss_percent,
+        settings=pnl_settings,
+    )
     minimum_order_notional = max(_as_float(os.getenv("CRYPTO_MIN_ORDER_NOTIONAL", "10"), 10.0), 1.0)
     maximum_order_notional = min(max(_as_float(os.getenv("CRYPTO_MAX_ORDER_NOTIONAL", "200000"), 200000.0), minimum_order_notional), 200000.0)
     buying_power_usage_percent = min(max(_as_float(os.getenv("CRYPTO_BUYING_POWER_USAGE_PERCENT", "95"), 95.0), 1.0), 99.0)
@@ -331,6 +343,12 @@ def run_crypto_paper_cycle(
         _as_float(account.get("cash"), 0.0),
     )
     positions_before = broker.get_positions()
+    pnl_policy = evaluate_account_pnl_policy(
+        account,
+        closed_trades=load_recent_closed_trades(os.getenv("DATABASE_URL")),
+        settings=pnl_settings,
+        now=cycle_now,
+    )
     crypto_positions_before = _crypto_positions(positions_before, symbol_set)
     open_orders = list(broker.get_open_orders() or [])
     open_orders, stale_orders_canceled, stale_order_cancel_failures = _clear_stale_bot_orders(
@@ -393,7 +411,9 @@ def run_crypto_paper_cycle(
         action_reason = exit_reason
         break
 
-    if not order:
+    if not order and bool(pnl_policy.get("block_new_entries")):
+        action_reason = str(pnl_policy.get("reason") or "pnl_rule_blocked")
+    elif not order:
         held_symbols = {str(row.get("symbol") or "") for row in crypto_positions_before}
         candidates = [
             row
@@ -483,6 +503,9 @@ def run_crypto_paper_cycle(
             "confirmed_order_count": confirmed,
             "dry_run": resolved_dry_run,
             "maximum_position_percent": maximum_position_percent,
+            "stop_loss_percent": stop_loss_percent,
+            "take_profit_percent": take_profit_percent,
+            "pnl_policy": pnl_policy,
             "equity": round(equity, 6),
             "non_marginable_buying_power": round(non_marginable_buying_power, 6),
             "spendable_crypto_buying_power": round(non_marginable_buying_power * (buying_power_usage_percent / 100.0), 6),

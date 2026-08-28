@@ -58,6 +58,12 @@ from paper_position_guard import PositionGuardSettings, review_paper_positions
 from paper_reconciliation import reconcile_paper_positions
 from portfolio_allocator import AllocationPolicy
 from portfolio_intelligence import run_portfolio_intelligence
+from pnl_risk_policy import (
+    evaluate_account_pnl_policy,
+    load_recent_closed_trades,
+    risk_adjusted_position_percent,
+    settings_from_environment,
+)
 from risk_manager import RiskManager
 from scanner_repository import save_scan_results
 from scanner_runner import SAMPLE_SYMBOLS, _load_paper_positions, _symbol_records_from_list, run_scan, run_shortlist_only
@@ -645,6 +651,27 @@ def run_continuous_scan_cycle(
         broker_open_orders = list(getattr(broker, "get_open_orders", lambda: [])() or [])
     except Exception:
         broker_open_orders = []
+
+    pnl_settings = settings_from_environment(
+        maximum_position_percent=min(_effective_max_position_equity_percent(config), 10.0)
+    )
+    recent_closed_trades = load_recent_closed_trades(
+        database_url=database_url or getattr(config, "database_url", None),
+        repository_factory=execution_repo_factory,
+    )
+    pnl_policy = evaluate_account_pnl_policy(
+        account,
+        closed_trades=recent_closed_trades,
+        settings=pnl_settings,
+        now=started_dt,
+    )
+    _emit_telemetry(
+        telemetry_callback,
+        "paper_pnl_policy_evaluated",
+        run_id=cycle_run_id,
+        dry_run=bool(dry_run),
+        **pnl_policy,
+    )
 
     if not broker_positions and broker_equity <= 0:
         # Preserve offline testability fallback when broker stubs expose only loader fixtures.
@@ -1268,7 +1295,11 @@ def run_continuous_scan_cycle(
             ),
         )[0]
 
-        max_position_equity_percent = _effective_max_position_equity_percent(config)
+        configured_position_percent = min(_effective_max_position_equity_percent(config), 10.0)
+        max_position_equity_percent = risk_adjusted_position_percent(
+            stop_loss_percent=float(getattr(config, "position_guard_stop_loss_percent", 4.0)),
+            settings=settings_from_environment(maximum_position_percent=configured_position_percent),
+        )
         max_open_positions = _effective_max_open_positions(config)
         per_strategy_allocation = float(selected_strategy.get("requested_risk_allocation") or 0.25)
         notional_cap_by_equity = max(float(broker_equity), 0.0) * (max_position_equity_percent / 100.0)
@@ -1472,7 +1503,8 @@ def run_continuous_scan_cycle(
                 or float(broker_cash) - trade_value
                 >= max(float(broker_equity), 0.0) * shared_cash_reserve
             ),
-            "daily_loss": bool(risk.daily_loss < float(DAILY_LOSS_LIMIT)),
+            "daily_loss": not bool(pnl_policy.get("daily_loss_stop_active")),
+            "loss_streak_cooldown": not bool(pnl_policy.get("loss_streak_cooldown_active")),
             "existing_position": bool(abs(existing_qty) <= 1e-8 or supports_scaling),
             "open_entry_order": not _has_open_entry_order(broker_open_orders, selected_symbol, planned_side),
             "max_open_positions": bool(_position_count(broker_positions) < int(max_open_positions) or (abs(existing_qty) > 1e-8 and supports_scaling)),
@@ -1544,7 +1576,13 @@ def run_continuous_scan_cycle(
                         "orders_filled": 0,
                         "orders_rejected": 0,
                     },
-                    "risk_result": {"approved": False, "checks": risk_checks, "duplicate_run": existing},
+                    "risk_result": {
+                        "approved": False,
+                        "reason": str(pnl_policy.get("reason") or rejected_status) if bool(pnl_policy.get("block_new_entries")) else rejected_status,
+                        "checks": risk_checks,
+                        "pnl_policy": pnl_policy,
+                        "duplicate_run": existing,
+                    },
                     "reconciliation": {},
                 },
                 persistence_payload={"scan": {"status": "saved" if persist else "skipped"}, "execution": {"status": "skipped"}},
@@ -1894,11 +1932,13 @@ def run_continuous_scan_cycle(
                                 "max_position_equity_percent": max_position_equity_percent,
                                 "max_daily_loss": float(MAX_DAILY_LOSS),
                                 "daily_loss_limit": float(DAILY_LOSS_LIMIT),
+                                "pnl_policy": pnl_policy,
                             },
                             "dry_run": bool(dry_run),
                         },
                         "risk_snapshot": {
                             "checks": risk_checks,
+                            "pnl_policy": pnl_policy,
                             "paused_strategies": sorted(paused),
                             "strategy_allocations": allocations,
                         },
@@ -2100,7 +2140,12 @@ def run_continuous_scan_cycle(
                     "orders_filled": int(orders_filled_count),
                     "orders_rejected": int(orders_rejected_count),
                 },
-                "risk_result": {"approved": True, "checks": risk_checks, "strategy_allocations": allocations},
+                "risk_result": {
+                    "approved": True,
+                    "checks": risk_checks,
+                    "pnl_policy": pnl_policy,
+                    "strategy_allocations": allocations,
+                },
                 "reconciliation": reconciliation,
                 "execution_fingerprint": execution_fingerprint,
                 "validation_run_id": validation_run_id,

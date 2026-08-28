@@ -10,6 +10,12 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from alpaca_paper_broker import AlpacaPaperBroker
+from pnl_risk_policy import (
+    evaluate_account_pnl_policy,
+    load_recent_closed_trades,
+    risk_adjusted_position_percent,
+    settings_from_environment,
+)
 from options_market_data import (
     AlpacaOptionsMarketData,
     analyze_underlying_bars,
@@ -175,13 +181,19 @@ def run_options_paper_cycle(
     min_dte = max(int(os.getenv("OPTIONS_MIN_DTE", "14")), 1)
     max_dte = max(int(os.getenv("OPTIONS_MAX_DTE", "45")), min_dte)
     exit_dte = max(int(os.getenv("OPTIONS_EXIT_DTE", "5")), 0)
-    stop_loss_percent = max(_float(os.getenv("OPTIONS_STOP_LOSS_PERCENT", "35"), 35.0), 0.1)
-    take_profit_percent = max(_float(os.getenv("OPTIONS_TAKE_PROFIT_PERCENT", "60"), 60.0), 0.1)
+    stop_loss_percent = max(_float(os.getenv("OPTIONS_STOP_LOSS_PERCENT", "25"), 25.0), 0.1)
+    take_profit_percent = max(_float(os.getenv("OPTIONS_TAKE_PROFIT_PERCENT", "50"), 50.0), 0.1)
     target_delta = min(max(_float(os.getenv("OPTIONS_TARGET_DELTA", "0.55"), 0.55), 0.05), 0.95)
     maximum_spread = max(_float(os.getenv("OPTIONS_MAX_SPREAD_PERCENT", "35"), 35.0), 1.0)
     minimum_open_interest = max(int(os.getenv("OPTIONS_MIN_OPEN_INTEREST", "0")), 0)
     requested_position_percent = _float(os.getenv("OPTIONS_MAX_POSITION_EQUITY_PERCENT", "10"), 10.0)
-    maximum_position_percent = min(max(requested_position_percent, 0.1), 10.0)
+    pnl_settings = settings_from_environment(
+        maximum_position_percent=min(max(requested_position_percent, 0.1), 10.0)
+    )
+    maximum_position_percent = risk_adjusted_position_percent(
+        stop_loss_percent=stop_loss_percent,
+        settings=pnl_settings,
+    )
     maximum_contracts = max(int(os.getenv("OPTIONS_MAX_CONTRACTS_PER_ORDER", "1000")), 1)
 
     broker = broker_factory(mode="PAPER")
@@ -208,6 +220,12 @@ def run_options_paper_cycle(
     signal_by_underlying = {str(row.get("symbol") or ""): row for row in signals}
 
     account = broker.get_account()
+    pnl_policy = evaluate_account_pnl_policy(
+        account,
+        closed_trades=load_recent_closed_trades(os.getenv("DATABASE_URL")),
+        settings=pnl_settings,
+        now=cycle_now,
+    )
     equity = _float(account.get("equity") or account.get("portfolio_value"), 0.0)
     options_buying_power = _float(account.get("options_buying_power"), 0.0)
     options_level = int(account.get("options_trading_level") or 0)
@@ -275,7 +293,9 @@ def run_options_paper_cycle(
         action_reason = exit_reason
         break
 
-    if not order:
+    if not order and bool(pnl_policy.get("block_new_entries")):
+        action_reason = str(pnl_policy.get("reason") or "pnl_rule_blocked")
+    elif not order:
         held_underlyings = {str(row.get("underlying_symbol") or "") for row in positions_before}
         directional = [
             row
@@ -390,6 +410,9 @@ def run_options_paper_cycle(
         {
             "confirmed_order_count": confirmed,
             "maximum_position_percent": maximum_position_percent,
+            "stop_loss_percent": stop_loss_percent,
+            "take_profit_percent": take_profit_percent,
+            "pnl_policy": pnl_policy,
             "options_buying_power": round(options_buying_power, 2),
             "options_trading_level": options_level,
             "equity": round(equity, 2),

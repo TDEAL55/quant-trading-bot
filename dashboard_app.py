@@ -47,6 +47,7 @@ from evaluation_data import fetch_evaluation_dashboard_payload
 from factor_attribution import fetch_factor_attribution_dashboard_payload
 from factor_intelligence_data import fetch_factor_intelligence_dashboard_payload
 from paper_validation_data import fetch_paper_validation_dashboard_payload
+from pnl_risk_policy import evaluate_account_pnl_policy, settings_from_environment
 from portfolio_research_data import fetch_portfolio_research_dashboard_payload
 from research_data import fetch_research_dashboard_payload
 from strategy_lab_data import fetch_strategy_lab_dashboard_payload
@@ -412,9 +413,12 @@ def friendly_action_reason(value: Any, fallback="Waiting for the next cycle") ->
         "options_level_2_required": "Alpaca options level 2 is required",
         "insufficient_options_buying_power": "Not enough options buying power",
         "no_liquid_option_contract": "Signal found, but no liquid contract passed the spread rules",
-        "option_premium_exceeds_position_cap": "Contract premium exceeds the 10% position cap",
+        "option_premium_exceeds_position_cap": "Contract premium exceeds the risk-adjusted position cap",
         "options_open_order_already_exists": "An entry order is already open for this contract",
         "options_close_order_already_open": "A closing order is already open for this contract",
+        "daily_loss_stop": "Daily account loss reached 2%; new entries are paused",
+        "consecutive_loss_cooldown": "Three consecutive losses triggered a 60-minute entry cooldown",
+        "pnl_rules_clear": "P&L rules are armed and new entries are allowed",
     }
     return explanations.get(raw, friendly_status_text(raw, fallback))
 
@@ -1308,6 +1312,16 @@ def build_dashboard_view_model(payload):
     open_pl = _as_float(latest_account.get("unrealized_paper_pl"), 0.0)
     closed_pl = _as_float(latest_account.get("realized_paper_pl"), 0.0)
     closed_by_asset = dict((payload.get("paper_tuning") or {}).get("closed_trades_by_asset") or {})
+    account_pnl_policy = evaluate_account_pnl_policy(
+        latest_account,
+        settings=settings_from_environment(maximum_position_percent=10.0),
+    )
+    asset_policies = [
+        dict((payload.get("crypto") or {}).get("pnl_policy") or {}),
+        dict((payload.get("options") or {}).get("pnl_policy") or {}),
+    ]
+    blocked_asset_policy = next((item for item in asset_policies if bool(item.get("block_new_entries"))), {})
+    dashboard_pnl_policy = blocked_asset_policy or account_pnl_policy
     stock_closed = dict(closed_by_asset.get("stocks") or {})
     crypto_closed = dict(closed_by_asset.get("crypto") or {})
     options_closed = dict(closed_by_asset.get("options") or {})
@@ -1378,6 +1392,9 @@ def build_dashboard_view_model(payload):
         "duplicate_signal_status": friendly_status_text(latest_signal.get("duplicate_signal_status"), "Unknown"),
         "pending_order_status": friendly_status_text(latest_signal.get("pending_order_status"), "Unknown"),
         "daily_loss_stop_status": friendly_status_text(latest_signal.get("daily_loss_stop_status"), "Unknown"),
+        "pnl_policy": dashboard_pnl_policy,
+        "pnl_policy_status": _safe_text(dashboard_pnl_policy.get("status"), "ARMED"),
+        "pnl_policy_reason": _safe_text(dashboard_pnl_policy.get("reason"), "pnl_rules_clear"),
         "portfolio_value": current_portfolio_value,
         "cash": _as_float(latest_account.get("cash"), 0.0),
         "buying_power": _as_float(latest_account.get("buying_power"), 0.0),
@@ -3234,6 +3251,8 @@ def render_alert_banner(payload, view):
         alert_messages.append("Market data appears stale")
     if "loss limit" in str(view.get("latest_stop_reason", "")).lower() or "loss" in str(view.get("daily_loss_stop_status", "")).lower():
         alert_messages.append("Daily loss stop condition detected")
+    if bool((view.get("pnl_policy") or {}).get("block_new_entries")):
+        alert_messages.append(f"P&L guard blocked new entries: {friendly_action_reason(view.get('pnl_policy_reason'))}")
 
     if alert_messages:
         st.markdown(
@@ -3679,6 +3698,16 @@ def render_command_center_page(payload, view):
     st.caption(
         f"Total from {int(view.get('closed_trade_count') or 0)} completed trades. "
         "Buying or holding does not change this number; a completed sell adds its profit or loss."
+    )
+
+    pnl_policy = dict(view.get("pnl_policy") or {})
+    pnl_state = _safe_text(view.get("pnl_policy_status"), "ARMED")
+    st.markdown(
+        f"<div class='dq-activity-line'><span>P&amp;L guard</span><strong>{pnl_state}</strong> · "
+        f"today {format_currency(pnl_policy.get('day_pl'))} ({format_percent(_as_float(pnl_policy.get('day_return_percent'), 0.0) / 100.0)}) · "
+        f"daily stop −{_safe_text(pnl_policy.get('daily_loss_stop_percent'), '2')}% · "
+        f"{int(pnl_policy.get('consecutive_losses') or 0)}/{int(pnl_policy.get('maximum_consecutive_losses') or 3)} consecutive losses</div>",
+        unsafe_allow_html=True,
     )
 
     render_alert_banner(payload, view)

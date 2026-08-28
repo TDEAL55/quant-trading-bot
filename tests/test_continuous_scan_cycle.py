@@ -425,6 +425,61 @@ def test_continuous_scan_cycle_enforces_duplicate_protection():
     assert repo.saved is None
 
 
+def test_continuous_scan_cycle_blocks_stock_entry_at_daily_loss_stop(monkeypatch):
+    monkeypatch.setattr("continuous_scan_cycle.PAPER_EXECUTION_ENABLED", True)
+    monkeypatch.setattr("continuous_scan_cycle.CONTROLLED_PAPER_VALIDATION", False)
+
+    class _LossBroker(_Broker):
+        def get_account(self):
+            return {
+                "status": "ACTIVE",
+                "equity": 97_500.0,
+                "last_equity": 100_000.0,
+                "day_pl": -2_500.0,
+                "cash": 50_000.0,
+                "buying_power": 50_000.0,
+            }
+
+    broker = _LossBroker()
+    repo = _Repo()
+
+    def _shortlist_runner(scan_payload, positions, cash, portfolio_value):
+        return {
+            "selected": [
+                {
+                    "rank": 1,
+                    "symbol": "AAA",
+                    "score": 82.0,
+                    "confidence": 76.0,
+                    "suggested_paper_notional": 1000.0,
+                    "suggested_max_allocation_percent": 10.0,
+                }
+            ],
+            "rejected": [],
+            "portfolio_warnings": [],
+            "selection_summary": {"selected_count": 1},
+        }
+
+    result = run_continuous_scan_cycle(
+        database_url="sqlite:///unused.db",
+        config_loader=_config_loader,
+        now_provider=lambda: datetime(2026, 7, 22, 10, 10, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=lambda universe: _scan_payload(),
+        shortlist_runner=_shortlist_runner,
+        scan_persistor=lambda **kwargs: {"storage": "database", "run_id": kwargs["run_payload"]["run_id"]},
+        execution_repo_factory=lambda **kwargs: repo,
+        positions_loader=_positions_loader,
+        universe_loader=_universe_loader,
+        persist=True,
+    )
+
+    assert result.execution_status == "risk_rejected"
+    assert result.execution["risk_result"]["reason"] == "daily_loss_stop"
+    assert result.execution["risk_result"]["pnl_policy"]["day_return_percent"] == -2.5
+    assert broker.submissions == []
+
+
 def test_continuous_scan_cycle_dry_run_never_submits_orders():
     broker = _Broker()
     repo = _Repo()

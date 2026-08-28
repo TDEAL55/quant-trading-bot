@@ -219,6 +219,33 @@ def test_crypto_cycle_reserves_buying_power_for_price_movement(monkeypatch, tmp_
     assert broker.calls[0]["quantity"] * broker.calls[0]["reference_price"] <= 86.0415
 
 
+def test_crypto_cycle_blocks_new_entry_at_two_percent_daily_loss(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    broker = _Broker(
+        account={
+            "equity": 97_500.0,
+            "last_equity": 100_000.0,
+            "day_pl": -2_500.0,
+            "cash": 50_000.0,
+            "non_marginable_buying_power": 50_000.0,
+        }
+    )
+
+    result = run_crypto_paper_cycle(
+        broker_factory=lambda **_kwargs: broker,
+        market_data_factory=lambda: _MarketData(rising=True),
+        universe_loader=_universe,
+        now=NOW,
+        status_path=tmp_path / "status.json",
+        trades_path=tmp_path / "trades.jsonl",
+    )
+
+    assert result["confirmed_order_count"] == 0
+    assert result["action_reason"] == "daily_loss_stop"
+    assert result["pnl_policy"]["status"] == "BLOCKED"
+    assert broker.calls == []
+
+
 def test_crypto_cycle_skips_candidate_with_open_buy_and_tries_next(monkeypatch, tmp_path):
     _enable(monkeypatch)
     broker = _Broker(
