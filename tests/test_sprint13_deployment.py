@@ -327,3 +327,4 @@ def test_systemd_files_parse_and_contain_expected_settings():
     assert "Timezone=America/New_York" in timer_text
     assert "09:30:00" in timer_text
     assert "PROJECT_PATH=\"/home/quantbot/quant-trading-bot\"" in install_text
+    assert "quant-bot-mobile-dashboard.service" in install_text

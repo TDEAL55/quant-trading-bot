@@ -16,9 +16,12 @@ git fetch origin $Branch
 git merge --ff-only origin/$Branch
 sudo -n systemctl restart quant-bot-continuous.service
 sudo -n systemctl restart quant-bot-dashboard.service
+sudo -n systemctl restart quant-bot-mobile-dashboard.service
 test "`$(systemctl is-active quant-bot-continuous.service)" = active
 test "`$(systemctl is-active quant-bot-dashboard.service)" = active
+test "`$(systemctl is-active quant-bot-mobile-dashboard.service)" = active
 curl -fsS http://127.0.0.1:8501/_stcore/health
+curl -fsS http://127.0.0.1:8502/mobile/_stcore/health
 git rev-parse --short HEAD
 "@
 

@@ -51,6 +51,18 @@ def test_dashboard_service_targets_streamlit_dashboard():
     assert "Environment=DASHBOARD_BROKER_ACCOUNT_FALLBACK_ENABLED=true" in text
 
 
+def test_public_mobile_dashboard_has_separate_read_only_service():
+    text = (REPO_ROOT / "deployment" / "quant-bot-mobile-dashboard.service").read_text(encoding="utf-8")
+    assert "User=quantbot" in text
+    assert "streamlit run" in text
+    assert "dashboard_app.py" in text
+    assert "--server.address 127.0.0.1" in text
+    assert "--server.port 8502" in text
+    assert "--server.baseUrlPath mobile" in text
+    assert "Environment=DASHBOARD_FORCE_MOBILE=true" in text
+    assert "continuous_paper_runner.py" not in text
+
+
 def test_dashboard_path_is_read_only_for_trading_actions():
     module_text = (REPO_ROOT / "dashboard_app.py").read_text(encoding="utf-8")
     assert dashboard_app.has_write_capability(module_text) is False
@@ -66,12 +78,16 @@ def test_nginx_dashboard_proxy_keeps_streamlit_localhost_only():
     assert "proxy_set_header Upgrade $http_upgrade" in text
     assert "auth_basic" in text
     assert "auth_basic_user_file" in text
+    assert "location /mobile/" in text
+    assert "auth_basic off" in text
+    assert "proxy_pass http://127.0.0.1:8502" in text
 
 
 def test_nginx_dashboard_proxy_does_not_expose_runner():
     text = (REPO_ROOT / "deployment" / "nginx-quant-bot-dashboard.conf").read_text(encoding="utf-8")
     assert "continuous_paper_runner.py" not in text
     assert "127.0.0.1:8501" in text
+    assert "127.0.0.1:8502" in text
 
 
 def test_paper_and_dry_run_defaults(monkeypatch):

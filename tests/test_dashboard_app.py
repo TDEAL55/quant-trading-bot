@@ -110,11 +110,15 @@ def test_dashboard_timestamps_display_in_central_time():
     assert compact["full"] == "2026-07-13 10:00:00 AM CT"
 
 
-def test_mobile_dashboard_query_flag_is_explicit_and_tolerates_list_values():
+def test_mobile_dashboard_query_flag_is_explicit_and_tolerates_list_values(monkeypatch):
+    monkeypatch.delenv("DASHBOARD_FORCE_MOBILE", raising=False)
     assert dashboard_app.mobile_dashboard_requested({"mobile": "1"}) is True
     assert dashboard_app.mobile_dashboard_requested({"mobile": ["true"]}) is True
     assert dashboard_app.mobile_dashboard_requested({"mobile": "0"}) is False
     assert dashboard_app.mobile_dashboard_requested({}) is False
+
+    monkeypatch.setenv("DASHBOARD_FORCE_MOBILE", "true")
+    assert dashboard_app.mobile_dashboard_requested({}) is True
 
 
 def test_market_clock_open_and_closed_states():

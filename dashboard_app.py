@@ -560,6 +560,8 @@ def is_mobile_layout(viewport_width):
 
 def mobile_dashboard_requested(query_params=None) -> bool:
     """Return whether the dedicated phone command center was requested."""
+    if _as_bool(os.getenv("DASHBOARD_FORCE_MOBILE", "false")):
+        return True
     source = query_params
     if source is None and st is not None:
         source = getattr(st, "query_params", {})

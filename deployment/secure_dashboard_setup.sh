@@ -45,6 +45,7 @@ systemctl restart nginx
 
 # Keep streamlit local-only service binding.
 systemctl restart quant-bot-dashboard.service
+systemctl restart quant-bot-mobile-dashboard.service
 
 if command -v ufw >/dev/null 2>&1; then
     ufw allow OpenSSH || true
@@ -55,6 +56,7 @@ if command -v ufw >/dev/null 2>&1; then
         ufw --force delete allow 443/tcp || true
     fi
     ufw deny 8501/tcp || true
+    ufw deny 8502/tcp || true
     ufw --force enable
 fi
 
