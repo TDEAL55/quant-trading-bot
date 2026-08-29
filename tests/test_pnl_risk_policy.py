@@ -76,3 +76,9 @@ def test_environment_settings_keep_daily_stop_active_in_aggressive_paper_mode(mo
     monkeypatch.setenv("PAPER_AGGRESSIVE_TEST_MODE", "true")
     monkeypatch.setenv("PAPER_DAILY_LOSS_STOP_PERCENT", "2")
     assert settings_from_environment().daily_loss_stop_percent == 2
+
+
+def test_environment_can_effectively_disable_daily_stop_for_paper_testing(monkeypatch):
+    monkeypatch.setenv("PAPER_DAILY_LOSS_STOP_PERCENT", "100")
+
+    assert settings_from_environment().daily_loss_stop_percent == 100

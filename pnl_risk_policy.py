@@ -35,8 +35,8 @@ class PnLRiskSettings:
     loss_cooldown_minutes: int = 60
 
     def validate(self) -> None:
-        if not 0 < float(self.daily_loss_stop_percent) <= 25:
-            raise ValueError("daily_loss_stop_percent must be > 0 and <= 25")
+        if not 0 < float(self.daily_loss_stop_percent) <= 100:
+            raise ValueError("daily_loss_stop_percent must be > 0 and <= 100")
         if not 0 < float(self.maximum_position_percent) <= 10:
             raise ValueError("maximum_position_percent must be > 0 and <= 10")
         if not 0 < float(self.maximum_risk_per_trade_percent) <= 5:
