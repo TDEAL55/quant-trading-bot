@@ -60,11 +60,14 @@ def build_strategy_leaderboard(closed_trades: list[dict[str, Any]]) -> list[dict
         std_returns = _std(returns)
         sharpe = _safe_div((sum(returns) / max(len(returns), 1)), std_returns)
 
-        equity_curve = []
-        running = 0.0
-        for value in pnl:
-            running += value
-            equity_curve.append(running)
+        # Drawdown is a percentage of a normalized strategy equity curve, not
+        # a drawdown of cumulative dollar P/L starting at zero. The old method
+        # produced impossible values above 100% and missed losing-first runs.
+        equity_curve = [1.0]
+        running_equity = 1.0
+        for value in returns:
+            running_equity *= max(1.0 + float(value), 0.0)
+            equity_curve.append(running_equity)
 
         sample_count = len(trades)
         sample_status = "READY" if sample_count >= 30 else "INSUFFICIENT_SAMPLE"

@@ -91,8 +91,8 @@ def test_scan_symbol_can_emit_an_intentional_short_candidate(monkeypatch):
         "score_version": "quantum-test",
     })
     monkeypatch.setattr(market_scanner, "compute_strategy_specific_scores", lambda payload: {
-        "bearish_trend_short_v1": {
-            "strategy_id": "bearish_trend_short_v1",
+        "stock_bearish_trend_v2": {
+            "strategy_id": "stock_bearish_trend_v2",
             "strategy_score": 82.0,
             "confidence": 76.0,
             "eligible": True,

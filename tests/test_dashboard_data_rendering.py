@@ -412,9 +412,38 @@ def test_bot_net_pl_uses_only_realized_closed_trade_profit_loss():
     view = dashboard_app.build_dashboard_view_model(payload)
 
     assert view["bot_starting_value"] == 100000.0
-    assert view["bot_net_pl"] == 300.0
+    assert view["bot_net_pl"] == 125.0
     assert view["stock_realized_pl"] == 125.0
     assert view["crypto_realized_pl"] == 200.0
     assert view["options_realized_pl"] == -25.0
     assert view["account_change_since_tracking"] == 1250.25
     assert view["total_pl"] == 700.0
+
+
+def test_broker_sell_order_displays_locked_in_profit_loss():
+    event = dashboard_data._broker_order_to_dashboard_event(
+        {
+            "order_id": "sell-1",
+            "symbol": "AAPL",
+            "asset_class": "us_equity",
+            "side": "sell",
+            "status": "filled",
+            "filled_quantity": 2,
+            "average_fill_price": 190,
+            "updated_at": "2026-08-28T15:00:00Z",
+        },
+        {"net_pnl": 20.0, "percentage_return": 0.0588},
+    )
+
+    assert event["closed_trade"] is True
+    assert event["realized_profit_loss"] == 20.0
+    summary = dashboard_app.build_compact_dashboard_summary(
+        {
+            "latest_account": {"positions": []},
+            "recent_orders": [event],
+            "latest_scanner_run": {},
+            "top_scanner_results": [],
+        },
+        {"trade_or_skip_reason": "Waiting"},
+    )
+    assert summary["order_rows"][0]["Realized P/L"] == "$20.00"

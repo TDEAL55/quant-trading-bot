@@ -516,11 +516,11 @@ def _market_regime_alignment(
 
     # Strategy-specific compatibility overlay.
     sid = str(strategy_id or "")
-    if sid == "short_term_mean_reversion_v1" and regime in {"sideways", "weak_bull"}:
+    if sid == "stock_mean_reversion_v2" and regime in {"sideways", "weak_bull"}:
         score += 6.0
-    if sid in {"trend_momentum_v1", "moving_average_trend_v1", "volume_breakout_v1"} and regime == "bull":
+    if sid == "stock_trend_ensemble_v2" and regime == "bull":
         score += 6.0
-    if sid in {"trend_momentum_v1", "moving_average_trend_v1", "volume_breakout_v1"} and regime in {"bear", "high_volatility_risk_off"}:
+    if sid == "stock_trend_ensemble_v2" and regime in {"bear", "high_volatility_risk_off"}:
         score -= 8.0
 
     return (
@@ -661,18 +661,14 @@ def compute_strategy_specific_scores(quantum_payload: dict[str, Any]) -> dict[st
     regime = str(quantum_payload.get("market_regime") or "unknown")
     rr_ratio = _safe_float(((quantum_payload.get("risk_reward") or {}).get("reward_risk_ratio")), 0.0) or 0.0
     data_quality_status = str(quantum_payload.get("data_quality_status") or "warn")
+    factor_values = dict(quantum_payload.get("factor_values") or {})
+    momentum_values = dict(factor_values.get("momentum_quality") or {})
+    rsi14 = _safe_float(momentum_values.get("rsi14"), None)
 
     def _component(name: str) -> float:
         return float(component_scores.get(name) or 0.0)
 
-    def _build(
-        strategy_id: str,
-        weights: dict[str, float],
-        required_checks: list[tuple[bool, str]],
-        confidence_bias: float,
-    ) -> dict[str, Any]:
-        total_weight = sum(weights.values()) or 1.0
-        raw = sum(_component(name) * value for name, value in weights.items()) / total_weight
+    def _build(strategy_id: str, raw: float, required_checks: list[tuple[bool, str]], *, direction: str, confirmations: dict[str, bool]) -> dict[str, Any]:
         warnings: list[str] = []
         rejections = [reason for passed, reason in required_checks if not passed]
         if data_quality_status == "fail":
@@ -680,117 +676,108 @@ def compute_strategy_specific_scores(quantum_payload: dict[str, Any]) -> dict[st
         if data_quality_status == "warn":
             warnings.append("data quality warnings present")
         eligible = len(rejections) == 0
-        confidence = _clamp((raw * 0.8) + confidence_bias)
         return {
             "strategy_id": strategy_id,
-            "strategy_version": "1.0.0",
+            "strategy_version": "2.0.0",
             "strategy_score": round(_clamp(raw), 4),
-            "required_factors": sorted(weights.keys()),
+            "required_factors": sorted(confirmations.keys()),
             "rejection_reasons": sorted(set(rejections)),
             "warnings": list(dict.fromkeys(warnings)),
             "eligible": eligible,
-            "confidence": round(confidence, 4),
+            "confidence": round(_clamp((raw * 0.85) + (5.0 if eligible else 0.0)), 4),
             "market_regime": regime,
+            "direction": direction,
+            "confirmation_count": sum(1 for passed in confirmations.values() if passed),
+            "confirmations": dict(confirmations),
         }
 
-    def _build_bearish_trend_short() -> dict[str, Any]:
-        inverted = {
-            "trend_weakness": 100.0 - _component("trend_strength"),
-            "momentum_weakness": 100.0 - _component("momentum_quality"),
-            "relative_weakness": 100.0 - _component("relative_strength"),
-            "liquidity_quality": _component("liquidity_quality"),
-        }
-        weights = {
-            "trend_weakness": 0.35,
-            "momentum_weakness": 0.30,
-            "relative_weakness": 0.20,
-            "liquidity_quality": 0.15,
-        }
-        raw = sum(inverted[name] * weight for name, weight in weights.items())
-        rejections: list[str] = []
-        if inverted["trend_weakness"] < 52.0:
-            rejections.append("bearish_trend_too_weak")
-        if inverted["momentum_weakness"] < 52.0:
-            rejections.append("bearish_momentum_too_weak")
-        if inverted["liquidity_quality"] < 45.0:
-            rejections.append("liquidity_too_low")
-        if data_quality_status == "fail":
-            rejections.append("data_quality_failed")
-        return {
-            "strategy_id": "bearish_trend_short_v1",
-            "strategy_version": "1.0.0",
-            "strategy_score": round(_clamp(raw), 4),
-            "required_factors": sorted(inverted.keys()),
-            "rejection_reasons": sorted(set(rejections)),
-            "warnings": ["data quality warnings present"] if data_quality_status == "warn" else [],
-            "eligible": len(rejections) == 0,
-            "confidence": round(_clamp((raw * 0.85) + 5.0), 4),
-            "market_regime": regime,
-            "direction": "SHORT",
-            "component_scores": {name: round(value, 4) for name, value in inverted.items()},
-        }
+    trend_confirmations = {
+        "trend_strength": _component("trend_strength") >= 60.0,
+        "relative_strength": _component("relative_strength") >= 52.0,
+        "momentum_quality": _component("momentum_quality") >= 55.0,
+        "volume_breakout_confirmation": _component("volume_confirmation") >= 55.0,
+    }
+    trend_raw = (
+        (_component("trend_strength") * 0.30)
+        + (_component("relative_strength") * 0.22)
+        + (_component("momentum_quality") * 0.20)
+        + (_component("volume_confirmation") * 0.10)
+        + (_component("market_regime_alignment") * 0.10)
+        + (_component("risk_reward_quality") * 0.08)
+    )
+
+    oversold_score = _clamp(((40.0 - float(rsi14)) / 15.0) * 100.0) if rsi14 is not None else 0.0
+    mean_reversion_confirmations = {
+        "rsi_oversold": bool(rsi14 is not None and 25.0 <= float(rsi14) <= 38.0),
+        "range_regime": regime in {"sideways", "weak_bull"},
+        "liquidity_quality": _component("liquidity_quality") >= 55.0,
+        "risk_reward_quality": rr_ratio >= 1.2,
+    }
+    mean_reversion_raw = (
+        (oversold_score * 0.35)
+        + (_component("risk_reward_quality") * 0.20)
+        + (_component("liquidity_quality") * 0.20)
+        + (_component("volatility_quality") * 0.15)
+        + (_component("market_regime_alignment") * 0.10)
+    )
+
+    trend_weakness = 100.0 - _component("trend_strength")
+    momentum_weakness = 100.0 - _component("momentum_quality")
+    relative_weakness = 100.0 - _component("relative_strength")
+    bearish_confirmations = {
+        "trend_weakness": trend_weakness >= 55.0,
+        "momentum_weakness": momentum_weakness >= 55.0,
+        "relative_weakness": relative_weakness >= 50.0,
+        "liquidity_quality": _component("liquidity_quality") >= 55.0,
+    }
+    bearish_raw = (
+        (trend_weakness * 0.35)
+        + (momentum_weakness * 0.25)
+        + (relative_weakness * 0.20)
+        + (_component("liquidity_quality") * 0.12)
+        + (_component("volatility_quality") * 0.08)
+    )
 
     return {
-        "trend_momentum_v1": _build(
-            "trend_momentum_v1",
-            {
-                "trend_strength": 0.35,
-                "momentum_quality": 0.30,
-                "relative_strength": 0.20,
-                "market_regime_alignment": 0.15,
-            },
+        "stock_trend_ensemble_v2": _build(
+            "stock_trend_ensemble_v2",
+            trend_raw,
             [
-                (_component("trend_strength") >= 55.0, "trend_strength_too_low"),
-                (_component("momentum_quality") >= 55.0, "momentum_quality_too_low"),
-                (_component("market_regime_alignment") >= 45.0, "regime_alignment_too_low"),
-            ],
-            confidence_bias=8.0,
-        ),
-        "moving_average_trend_v1": _build(
-            "moving_average_trend_v1",
-            {
-                "trend_strength": 0.45,
-                "relative_strength": 0.25,
-                "volatility_quality": 0.15,
-                "market_regime_alignment": 0.15,
-            },
-            [
-                (_component("trend_strength") >= 60.0, "trend_strength_too_low"),
-                (_component("relative_strength") >= 50.0, "relative_strength_too_low"),
-            ],
-            confidence_bias=6.0,
-        ),
-        "short_term_mean_reversion_v1": _build(
-            "short_term_mean_reversion_v1",
-            {
-                "momentum_quality": 0.35,
-                "volatility_quality": 0.25,
-                "liquidity_quality": 0.20,
-                "risk_reward_quality": 0.20,
-            },
-            [
-                (_component("liquidity_quality") >= 50.0, "liquidity_too_low"),
-                (rr_ratio >= 1.2, "reward_risk_below_minimum"),
-                (regime not in {"bear", "high_volatility_risk_off"}, "regime_incompatible"),
-            ],
-            confidence_bias=4.0,
-        ),
-        "volume_breakout_v1": _build(
-            "volume_breakout_v1",
-            {
-                "volume_confirmation": 0.40,
-                "trend_strength": 0.25,
-                "liquidity_quality": 0.20,
-                "risk_reward_quality": 0.15,
-            },
-            [
-                (_component("volume_confirmation") >= 60.0, "volume_confirmation_too_low"),
+                (regime in {"bull", "weak_bull"}, "regime_incompatible"),
+                (sum(trend_confirmations.values()) >= 3, "insufficient_factor_confirmation"),
                 (_component("liquidity_quality") >= 55.0, "liquidity_too_low"),
+                (_component("volatility_quality") >= 40.0, "volatility_quality_too_low"),
                 (rr_ratio >= 1.2, "reward_risk_below_minimum"),
             ],
-            confidence_bias=7.0,
+            direction="LONG",
+            confirmations=trend_confirmations,
         ),
-        "bearish_trend_short_v1": _build_bearish_trend_short(),
+        "stock_mean_reversion_v2": _build(
+            "stock_mean_reversion_v2",
+            mean_reversion_raw,
+            [
+                (mean_reversion_confirmations["range_regime"], "regime_incompatible"),
+                (mean_reversion_confirmations["rsi_oversold"], "rsi_not_oversold"),
+                (mean_reversion_confirmations["liquidity_quality"], "liquidity_too_low"),
+                (mean_reversion_confirmations["risk_reward_quality"], "reward_risk_below_minimum"),
+                (_component("trend_strength") >= 35.0, "falling_knife_risk"),
+                (_component("volatility_quality") >= 40.0, "volatility_quality_too_low"),
+            ],
+            direction="LONG",
+            confirmations=mean_reversion_confirmations,
+        ),
+        "stock_bearish_trend_v2": _build(
+            "stock_bearish_trend_v2",
+            bearish_raw,
+            [
+                (regime == "bear", "regime_incompatible"),
+                (sum(bearish_confirmations.values()) >= 3, "insufficient_factor_confirmation"),
+                (bearish_confirmations["liquidity_quality"], "liquidity_too_low"),
+                (_component("volatility_quality") >= 40.0, "volatility_quality_too_low"),
+            ],
+            direction="SHORT",
+            confirmations=bearish_confirmations,
+        ),
     }
 
 

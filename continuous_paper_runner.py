@@ -324,7 +324,8 @@ def run_continuous_paper_runner(
     max_daily_orders = configured_max_daily_orders
     scan_only_during_market_hours = bool(getattr(config, "scan_only_during_market_hours", True))
     dry_run = bool(getattr(config, "continuous_runner_dry_run", False)) if dry_run_override is None else bool(dry_run_override)
-    crypto_enabled = str(os.getenv("CRYPTO_TRADING_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    stocks_only_mode = str(os.getenv("STOCKS_ONLY_MODE", "true")).strip().lower() in {"1", "true", "yes", "on"}
+    crypto_enabled = (not stocks_only_mode) and str(os.getenv("CRYPTO_TRADING_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
     crypto_interval_minutes = max(int(os.getenv("CRYPTO_SCAN_INTERVAL_MINUTES", "1")), 1)
     crypto_interval_seconds = max(
         int(os.getenv("CRYPTO_SCAN_INTERVAL_SECONDS", str(crypto_interval_minutes * 60))),
@@ -335,7 +336,7 @@ def run_continuous_paper_runner(
         from crypto_paper_trader import run_crypto_paper_cycle
 
         crypto_runner = run_crypto_paper_cycle
-    options_enabled = str(os.getenv("OPTIONS_TRADING_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    options_enabled = (not stocks_only_mode) and str(os.getenv("OPTIONS_TRADING_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
     options_interval_minutes = max(int(os.getenv("OPTIONS_SCAN_INTERVAL_MINUTES", "15")), 1)
     options_interval_seconds = options_interval_minutes * 60
     if options_enabled and options_runner is None:
@@ -407,6 +408,7 @@ def run_continuous_paper_runner(
         max_universe_mode=("unlimited" if int(resolved_max_universe_size) <= 0 else "capped"),
         max_universe_source=max_universe_source,
         universe_source="alpaca_assets_api",
+        stocks_only_mode=bool(stocks_only_mode),
         crypto_trading_enabled=bool(crypto_enabled),
         crypto_scan_interval_minutes=int(crypto_interval_minutes),
         crypto_scan_interval_seconds=int(crypto_interval_seconds),

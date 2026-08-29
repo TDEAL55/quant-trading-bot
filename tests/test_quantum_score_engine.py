@@ -114,14 +114,52 @@ def test_strategy_specific_scores_remain_separate():
     quantum = calculate_quantum_score("AAA", frame, frame)
     strategy_scores = compute_strategy_specific_scores(quantum)
     assert set(strategy_scores.keys()) == {
-        "trend_momentum_v1",
-        "moving_average_trend_v1",
-        "short_term_mean_reversion_v1",
-        "volume_breakout_v1",
-        "bearish_trend_short_v1",
+        "stock_trend_ensemble_v2",
+        "stock_mean_reversion_v2",
+        "stock_bearish_trend_v2",
     }
     values = [float(item["strategy_score"]) for item in strategy_scores.values()]
     assert len(set(values)) >= 2
+
+
+def test_stock_strategy_sleeves_are_mutually_regime_gated():
+    base = {
+        "data_quality_status": "ok",
+        "risk_reward": {"reward_risk_ratio": 2.0},
+        "factor_values": {"momentum_quality": {"rsi14": 60.0}},
+        "normalized_component_scores": {
+            "trend_strength": 72.0,
+            "relative_strength": 65.0,
+            "momentum_quality": 68.0,
+            "volume_confirmation": 62.0,
+            "volatility_quality": 65.0,
+            "liquidity_quality": 80.0,
+            "risk_reward_quality": 70.0,
+            "market_regime_alignment": 76.0,
+        },
+    }
+    bull = compute_strategy_specific_scores({**base, "market_regime": "bull"})
+    assert bull["stock_trend_ensemble_v2"]["eligible"] is True
+    assert bull["stock_mean_reversion_v2"]["eligible"] is False
+    assert bull["stock_bearish_trend_v2"]["eligible"] is False
+
+    sideways = compute_strategy_specific_scores(
+        {
+            **base,
+            "market_regime": "sideways",
+            "factor_values": {"momentum_quality": {"rsi14": 30.0}},
+            "normalized_component_scores": {
+                **base["normalized_component_scores"],
+                "trend_strength": 45.0,
+                "momentum_quality": 35.0,
+                "relative_strength": 45.0,
+                "market_regime_alignment": 55.0,
+            },
+        }
+    )
+    assert sideways["stock_trend_ensemble_v2"]["eligible"] is False
+    assert sideways["stock_mean_reversion_v2"]["eligible"] is True
+    assert sideways["stock_bearish_trend_v2"]["eligible"] is False
 
 
 def test_ranking_tie_breaks_are_deterministic():

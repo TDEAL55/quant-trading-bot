@@ -108,8 +108,8 @@ THEMES = {
     },
 }
 
-PRIMARY_PAGE_OPTIONS = ["Overview", "Portfolio", "Orders", "Crypto", "Options"]
-PAGE_OPTIONS = ["Overview", "Crypto", "Options", "Portfolio", "Orders", "Risk", "Operations", "Strategy", "Performance", "Alerts", "Research", "LIVE Readiness", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
+PRIMARY_PAGE_OPTIONS = ["Overview", "Portfolio", "Orders", "Strategy", "Performance"]
+PAGE_OPTIONS = ["Overview", "Portfolio", "Orders", "Risk", "Operations", "Strategy", "Performance", "Alerts", "Research", "LIVE Readiness", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
 NAVIGATION_SCOPE_OPTIONS = ["Essentials", "All pages"]
 MODE_OPTIONS = ["Standard Mode", "Focus Mode", "Presentation Mode"]
 THEME_OPTIONS = ["Studio"]
@@ -1316,12 +1316,7 @@ def build_dashboard_view_model(payload):
         latest_account,
         settings=settings_from_environment(maximum_position_percent=10.0),
     )
-    asset_policies = [
-        dict((payload.get("crypto") or {}).get("pnl_policy") or {}),
-        dict((payload.get("options") or {}).get("pnl_policy") or {}),
-    ]
-    blocked_asset_policy = next((item for item in asset_policies if bool(item.get("block_new_entries"))), {})
-    dashboard_pnl_policy = blocked_asset_policy or account_pnl_policy
+    dashboard_pnl_policy = account_pnl_policy
     stock_closed = dict(closed_by_asset.get("stocks") or {})
     crypto_closed = dict(closed_by_asset.get("crypto") or {})
     options_closed = dict(closed_by_asset.get("options") or {})
@@ -1337,7 +1332,8 @@ def build_dashboard_view_model(payload):
     # The dashboard's headline result is intentionally closed-trade P/L only.
     # Open positions can change account value, but they have not made or lost
     # money for the bot until the exit order fills and the trade is recorded.
-    bot_net_pl = closed_pl
+    has_asset_breakdown = bool(closed_by_asset)
+    bot_net_pl = _as_float(stock_closed.get("net_pnl"), 0.0) if has_asset_breakdown else closed_pl
     previous_portfolio = (
         _as_float(portfolio_history[-2].get("portfolio_value"), 0.0)
         if len(portfolio_history) >= 2
@@ -1363,9 +1359,16 @@ def build_dashboard_view_model(payload):
     daily_notional_used = _as_float(latest_signal.get("daily_submitted_notional"), 0.0)
     remaining_order_capacity = max(MAX_DAILY_ORDERS - int(latest_signal.get("daily_submitted_order_count") or 0), 0)
     position_rows = list(latest_account.get("positions") or [])
+    stock_position_rows = [
+        item
+        for item in position_rows
+        if "crypto" not in str((item or {}).get("asset_class") or "").lower()
+        and "option" not in str((item or {}).get("asset_class") or "").lower()
+        and "/" not in str((item or {}).get("symbol") or "")
+    ]
     open_position_value = _as_float(
-        latest_account.get("gross_exposure"),
-        sum(abs(_as_float(item.get("market_value"), 0.0)) for item in position_rows),
+        sum(abs(_as_float(item.get("market_value"), 0.0)) for item in stock_position_rows),
+        0.0,
     )
 
     return {
@@ -1400,17 +1403,18 @@ def build_dashboard_view_model(payload):
         "buying_power": _as_float(latest_account.get("buying_power"), 0.0),
         "unrealized_paper_pl": open_pl,
         "realized_paper_pl": closed_pl,
-        "closed_trade_count": int(latest_account.get("closed_trade_count") or 0),
+        "closed_trade_count": int(stock_closed.get("closed_trades") or 0) if has_asset_breakdown else int(latest_account.get("closed_trade_count") or 0),
+        "all_asset_closed_trade_count": int(latest_account.get("closed_trade_count") or 0),
         "stock_realized_pl": _as_float(stock_closed.get("net_pnl"), 0.0),
         "stock_closed_trade_count": int(stock_closed.get("closed_trades") or 0),
         "crypto_realized_pl": _as_float(crypto_closed.get("net_pnl"), 0.0),
         "crypto_closed_trade_count": int(crypto_closed.get("closed_trades") or 0),
         "options_realized_pl": _as_float(options_closed.get("net_pnl"), 0.0),
         "options_closed_trade_count": int(options_closed.get("closed_trades") or 0),
-        "open_positions": int(latest_account.get("open_positions") or 0),
+        "open_positions": len(stock_position_rows),
         "account_status": friendly_status_text(latest_account.get("account_status"), "Unknown"),
         "account_source": _safe_text(latest_account.get("source"), "monitoring database"),
-        "short_positions": int(latest_account.get("short_positions") or sum(1 for item in position_rows if _as_float(item.get("quantity"), 0.0) < 0)),
+        "short_positions": sum(1 for item in stock_position_rows if _as_float(item.get("quantity"), 0.0) < 0),
         "today_pl": daily_pl,
         "total_pl": total_pl,
         "bot_net_pl": bot_net_pl,
@@ -1584,8 +1588,20 @@ def build_compact_dashboard_summary(payload, view):
     status = build_monitor_status_snapshot(payload, view)
     scanner = payload.get("latest_scanner_run") or {}
     top_candidates = payload.get("top_scanner_results") or []
-    positions = (payload.get("latest_account") or {}).get("positions") or []
-    recent_orders = payload.get("recent_orders") or []
+    def _is_stock_row(row):
+        asset_class = str((row or {}).get("asset_class") or "").strip().lower()
+        symbol = str((row or {}).get("symbol") or "").strip().upper()
+        client_order_id = str((row or {}).get("client_order_id") or "").strip().lower()
+        return not (
+            "crypto" in asset_class
+            or "option" in asset_class
+            or "/" in symbol
+            or client_order_id.startswith("qtb-crypto-")
+            or client_order_id.startswith("qtb-option-")
+        )
+
+    positions = [row for row in ((payload.get("latest_account") or {}).get("positions") or []) if _is_stock_row(row)]
+    recent_orders = [row for row in (payload.get("recent_orders") or []) if _is_stock_row(row)]
     eligible = _safe_int(scanner.get("eligible_count"), 0)
     submitted = _safe_int(status.get("orders_submitted_today"), 0)
 
@@ -1606,12 +1622,10 @@ def build_compact_dashboard_summary(payload, view):
     )
     for position in ordered_positions:
         signed_quantity = _as_float(position.get("quantity"), 0.0)
-        asset_class = str(position.get("asset_class") or "").strip().lower()
-        asset_label = "Crypto" if "crypto" in asset_class else "Option" if "option" in asset_class else "Stock"
         position_rows.append(
             {
                 "Symbol": _safe_text(position.get("symbol"), "N/A"),
-                "Asset": asset_label,
+                "Asset": "Stock",
                 "Direction": "SHORT" if signed_quantity < 0 else "LONG",
                 "Quantity": round(abs(signed_quantity), 8),
                 "Avg entry": format_currency(position.get("average_entry_price")),
@@ -1625,16 +1639,16 @@ def build_compact_dashboard_summary(payload, view):
     for order in recent_orders[:10]:
         side = str(order.get("side") or order.get("signal") or "").strip().upper()
         quantity = abs(_as_float(order.get("filled_quantity") or order.get("quantity"), 0.0))
-        asset_class = str(order.get("asset_class") or "").strip().lower()
-        asset_label = "Crypto" if "crypto" in asset_class else "Option" if "option" in asset_class else "Stock"
+        realized_pl = order.get("realized_profit_loss")
         order_rows.append(
             {
                 "Time": format_timestamp_eastern(order.get("event_timestamp")),
                 "Symbol": _safe_text(order.get("symbol"), "N/A"),
-                "Asset": asset_label,
+                "Asset": "Stock",
                 "Side": side if side in {"BUY", "SELL"} else normalize_signal(side),
                 "Quantity": round(quantity, 8),
                 "Fill": format_currency(order.get("average_fill_price")),
+                "Realized P/L": format_currency(realized_pl) if realized_pl is not None else "—",
                 "Status": friendly_status_text(order.get("safe_order_status") or order.get("status"), "Unknown"),
             }
         )
@@ -2801,6 +2815,7 @@ def apply_dashboard_css(theme_name="Studio"):
         }}
         .dq-refresh-note {{ color: #747b86; font-size: 0.65rem; padding: 0.4rem 0.1rem; }}
         .st-key-dashboard_page_selector {{ width: 100% !important; }}
+        div[data-testid="stElementContainer"]:has(div[data-testid="stRadio"]) {{ width: 100% !important; }}
         div[data-testid="stRadio"] {{ width: 100% !important; margin: 0.2rem 0 0.85rem; }}
         div[data-testid="stRadio"] > div {{ width: 100% !important; }}
         div[data-testid="stRadio"] > label {{ display: none; }}
@@ -2822,6 +2837,7 @@ def apply_dashboard_css(theme_name="Studio"):
         }}
         div[role="radiogroup"] label:has(input:checked) {{ background: #25292e; }}
         div[role="radiogroup"] label p {{ color: #a9b0bb !important; font-size: 0.73rem !important; font-weight: 750; }}
+        div[role="radiogroup"] label p {{ white-space: nowrap; }}
         div[role="radiogroup"] label:has(input:checked) p {{ color: #f4f6f1 !important; }}
         div[role="radiogroup"] [data-testid="stMarkdownContainer"] {{ margin: 0; }}
         label[data-testid="stRadioOption"] > div > div > div:first-child {{ display: none !important; }}
@@ -2969,6 +2985,8 @@ def apply_dashboard_css(theme_name="Studio"):
         .dq-mobile-subtitle {{ color: #747b86; font-size: 0.61rem; margin-top: 0.05rem; }}
         .dq-mobile-live {{ display: flex; align-items: center; gap: 0.35rem; color: #b6f542; font-size: 0.65rem; font-weight: 850; }}
         .dq-mobile-live i {{ width: 7px; height: 7px; border-radius: 50%; background: #b6f542; box-shadow: 0 0 0 3px rgba(182,245,66,0.1); }}
+        .dq-mobile-live.off {{ color: #ffca58; }}
+        .dq-mobile-live.off i {{ background: #ffca58; box-shadow: 0 0 0 3px rgba(255,202,88,0.1); }}
         .dq-mobile-balance {{
             padding: 1rem;
             margin-bottom: 0.65rem;
@@ -2985,7 +3003,7 @@ def apply_dashboard_css(theme_name="Studio"):
         .dq-mobile-stat {{ padding: 0.72rem; border-radius: 10px; background: #121417; border: 1px solid rgba(245,247,242,0.08); }}
         .dq-mobile-stat span {{ display: block; color: #747b86; font-size: 0.61rem; text-transform: uppercase; letter-spacing: 0.05rem; }}
         .dq-mobile-stat strong {{ display: block; color: #f4f6f1; font-size: 0.92rem; margin-top: 0.3rem; font-weight: 780; overflow: hidden; text-overflow: ellipsis; }}
-        .dq-mobile-engine-row {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.4rem; margin: 0.65rem 0 0.75rem; }}
+        .dq-mobile-engine-row {{ display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.4rem; margin: 0.65rem 0 0.75rem; }}
         .dq-mobile-engine {{ padding: 0.58rem 0.48rem; text-align: center; border-radius: 9px; background: #121417; border: 1px solid rgba(245,247,242,0.08); }}
         .dq-mobile-engine span {{ display: block; color: #747b86; font-size: 0.6rem; }}
         .dq-mobile-engine strong {{ display: block; margin-top: 0.22rem; font-size: 0.68rem; color: #b6f542; }}
@@ -2999,6 +3017,8 @@ def apply_dashboard_css(theme_name="Studio"):
         .dq-mobile-card-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem; margin-top: 0.62rem; }}
         .dq-mobile-card-grid span {{ display: block; color: #747b86; font-size: 0.57rem; text-transform: uppercase; }}
         .dq-mobile-card-grid strong {{ display: block; color: #d7dbe0; font-size: 0.7rem; margin-top: 0.18rem; overflow: hidden; text-overflow: ellipsis; }}
+        .dq-mobile-card-grid strong.positive {{ color: #b6f542; }}
+        .dq-mobile-card-grid strong.negative {{ color: #ff5d73; }}
         .dq-mobile-back {{ display: block; color: #747b86; font-size: 0.65rem; text-align: center; margin-top: 1.2rem; }}
         .dq-mobile-back a {{ color: #a9b0bb; text-decoration: none; }}
         .dq-mobile-install {{ color: #747b86; font-size: 0.62rem; text-align: center; line-height: 1.4; margin: 0.8rem 0; }}
@@ -3012,8 +3032,8 @@ def apply_dashboard_css(theme_name="Studio"):
             .dq-equity-value {{ font-size: 2.35rem; }}
             .dq-hero-facts {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
             .dq-hero-facts > div:last-child {{ display: none; }}
-            div[role="radiogroup"] {{ overflow-x: auto; justify-content: flex-start; }}
-            div[role="radiogroup"] label {{ flex: 0 0 auto; }}
+            div[role="radiogroup"] {{ overflow-x: hidden; justify-content: stretch; }}
+            div[role="radiogroup"] label {{ flex: 1 1 0; min-width: 0; }}
             .dq-engine-grid {{ grid-template-columns: 1fr; }}
             .dq-section-copy {{ display: none; }}
             .dq-mobile-app {{ padding-bottom: 4rem; }}
@@ -3655,16 +3675,9 @@ def render_options_page(payload, view):
 def render_command_center_page(payload, view):
     summary = build_compact_dashboard_summary(payload, view)
     status = summary["status"]
-    crypto = dict(payload.get("crypto") or {})
-    options = dict(payload.get("options") or {})
     stock_market = "Open" if bool(view.get("market_is_open")) else "Closed"
     trading_enabled = status.get("kill_switch") != "ON" and status.get("autonomous_paper_trading") == "ENABLED"
-    option_market = "OPEN" if stock_market.upper() == "OPEN" else "CLOSED"
-    engine_items = [
-        ("EQ", "Stocks", "Enabled" if trading_enabled else "Paused", stock_market, trading_enabled),
-        ("CR", "Crypto", "Enabled" if bool(crypto.get("enabled")) else "Disabled", "Open 24/7", bool(crypto.get("enabled"))),
-        ("OP", "Options", "Enabled" if bool(options.get("enabled")) else "Disabled", option_market.title(), bool(options.get("enabled"))),
-    ]
+    engine_items = [("EQ", "Stocks only", "Enabled" if trading_enabled else "Paused", stock_market, trading_enabled)]
     engine_html = "".join(
         "<div class='dq-engine-card'>"
         f"<span class='dq-engine-symbol'>{_safe_text(symbol)}</span>"
@@ -3685,16 +3698,15 @@ def render_command_center_page(payload, view):
         "<div><div class='dq-section-title'>Realized profit / loss</div><div class='dq-section-copy'>Money made or lost only after the bot completes a sell</div></div></div></div>",
         unsafe_allow_html=True,
     )
-    top = st.columns(4)
+    top = st.columns(2)
     bot_net_pl = _as_float(view.get("bot_net_pl"), 0.0)
     realized_values = [
-        ("Realized Total", bot_net_pl),
-        ("Stocks", _as_float(view.get("stock_realized_pl"), 0.0)),
-        ("Crypto", _as_float(view.get("crypto_realized_pl"), 0.0)),
-        ("Options", _as_float(view.get("options_realized_pl"), 0.0)),
+        ("Realized Stock P/L", bot_net_pl),
+        ("Completed Stock Trades", int(view.get("stock_closed_trade_count") or 0)),
     ]
     for column, (label, value) in zip(top, realized_values):
-        _metric_card(column, label, format_currency(value), "buy" if value > 0 else "sell" if value < 0 else "neutral")
+        display = format_currency(value) if label != "Completed Stock Trades" else value
+        _metric_card(column, label, display, "buy" if label != "Completed Stock Trades" and value > 0 else "sell" if label != "Completed Stock Trades" and value < 0 else "neutral")
     st.caption(
         f"Total from {int(view.get('closed_trade_count') or 0)} completed trades. "
         "Buying or holding does not change this number; a completed sell adds its profit or loss."
@@ -3747,18 +3759,6 @@ def render_command_center_page(payload, view):
         f"{scan['symbols']} checked · {scan['eligible']} passed · {_safe_text(scan['outcome'])}</div>",
         unsafe_allow_html=True,
     )
-    st.markdown(
-        f"<div class='dq-activity-line'><span>Latest crypto cycle</span><strong>{friendly_status_text(crypto.get('cycle_status'), 'Waiting')}</strong> · "
-        f"{int(crypto.get('buy_signal_count') or 0)} BUY / {int(crypto.get('sell_signal_count') or 0)} SELL signals · "
-        f"{_safe_text(friendly_action_reason(crypto.get('action_reason')))}</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f"<div class='dq-activity-line'><span>Latest options cycle</span><strong>{friendly_status_text(options.get('cycle_status'), 'Waiting')}</strong> · "
-        f"{int(options.get('call_signal_count') or 0)} CALL / {int(options.get('put_signal_count') or 0)} PUT signals · "
-        f"{_safe_text(friendly_action_reason(options.get('action_reason')))}</div>",
-        unsafe_allow_html=True,
-    )
 
 
 def _render_mobile_position_cards(rows, *, limit=None):
@@ -3790,6 +3790,9 @@ def _render_mobile_order_cards(rows, *, limit=None):
         _empty_state("No paper orders have been recorded yet.")
         return
     for row in selected:
+        realized_text = _safe_text(row.get("Realized P/L"), "—")
+        realized_value = _as_float(str(realized_text).replace("$", "").replace(",", ""), 0.0)
+        realized_class = "positive" if realized_value > 0 else "negative" if realized_value < 0 else ""
         st.markdown(
             "<div class='dq-mobile-card'>"
             "<div class='dq-mobile-card-top'>"
@@ -3799,6 +3802,7 @@ def _render_mobile_order_cards(rows, *, limit=None):
             f"<div><span>Asset</span><strong>{_safe_text(row.get('Asset'), 'Stock')}</strong></div>"
             f"<div><span>Quantity</span><strong>{_safe_text(row.get('Quantity'), '0')}</strong></div>"
             f"<div><span>Fill</span><strong>{_safe_text(row.get('Fill'), '$0.00')}</strong></div>"
+            f"<div><span>Closed P/L</span><strong class='{realized_class}'>{realized_text}</strong></div>"
             f"<div style='grid-column:1/-1'><span>Time</span><strong>{_safe_text(row.get('Time'), 'Waiting')}</strong></div>"
             "</div></div>",
             unsafe_allow_html=True,
@@ -3808,8 +3812,6 @@ def _render_mobile_order_cards(rows, *, limit=None):
 def render_mobile_command_center(payload, view):
     summary = build_compact_dashboard_summary(payload, view)
     status = dict(summary.get("status") or {})
-    crypto = dict(payload.get("crypto") or {})
-    options = dict(payload.get("options") or {})
     service_active = status.get("bot_service") == "RUNNING"
     market_open = bool(view.get("market_is_open"))
     total_pl = _as_float(view.get("bot_net_pl"), 0.0)
@@ -3819,20 +3821,15 @@ def render_mobile_command_center(payload, view):
     st.markdown(
         "<div class='dq-mobile-topbar'>"
         "<div class='dq-mobile-brand'><span class='dq-brand-mark'>DQ</span>"
-        "<div><div class='dq-mobile-title'>Deal Quant</div><div class='dq-mobile-subtitle'>MOBILE PAPER COMMAND</div></div></div>"
-        f"<div class='dq-mobile-live'><i></i>{'LIVE DATA' if service_active else 'OFFLINE'}</div>"
+        "<div><div class='dq-mobile-title'>Deal Quant</div><div class='dq-mobile-subtitle'>STOCKS · PAPER MODE</div></div></div>"
+        f"<div class='dq-mobile-live {'' if service_active else 'off'}'><i></i>{'BOT ON' if service_active else 'BOT OFF'}</div>"
         "</div>",
         unsafe_allow_html=True,
     )
 
-    if st.button("Refresh live data", key="mobile_refresh_button", help="Refresh read-only dashboard data"):
-        clear_dashboard_cache()
-        st.session_state["dashboard_force_refresh"] = True
-        st.rerun()
-
     st.markdown(
         "<div class='dq-mobile-balance'>"
-        "<div class='dq-mobile-kicker'>Realized bot profit / loss</div>"
+        "<div class='dq-mobile-kicker'>Profit after completed sells</div>"
         f"<div class='dq-mobile-pl {total_class}'>{format_currency(total_pl)}</div>"
         f"<div class='dq-mobile-caption'>Locked-in result from {int(view.get('closed_trade_count') or 0)} completed trades. Open price changes are separate.</div>"
         "</div>",
@@ -3840,7 +3837,7 @@ def render_mobile_command_center(payload, view):
     )
     st.markdown(
         "<div class='dq-mobile-stat-grid'>"
-        f"<div class='dq-mobile-stat'><span>Portfolio</span><strong>{format_currency(view.get('portfolio_value'))}</strong></div>"
+        f"<div class='dq-mobile-stat'><span>Buying power</span><strong>{format_currency(view.get('buying_power'))}</strong></div>"
         f"<div class='dq-mobile-stat'><span>Cash</span><strong>{format_currency(view.get('cash'))}</strong></div>"
         f"<div class='dq-mobile-stat'><span>Positions</span><strong>{int(view.get('open_positions') or 0)}</strong></div>"
         f"<div class='dq-mobile-stat'><span>Market</span><strong>{'OPEN' if market_open else 'CLOSED'}</strong></div>"
@@ -3848,11 +3845,7 @@ def render_mobile_command_center(payload, view):
         unsafe_allow_html=True,
     )
 
-    engines = [
-        ("Stocks", stock_enabled, "Open" if market_open else "Closed"),
-        ("Crypto", bool(crypto.get("enabled")), "24/7"),
-        ("Options", bool(options.get("enabled")), "Open" if market_open else "Closed"),
-    ]
+    engines = [("Stocks only", stock_enabled, "Open" if market_open else "Closed")]
     engine_html = "".join(
         f"<div class='dq-mobile-engine'><span>{_safe_text(name)} · {_safe_text(market)}</span>"
         f"<strong class='{'' if enabled else 'off'}'>{'ENABLED' if enabled else 'PAUSED'}</strong></div>"
@@ -3881,12 +3874,12 @@ def render_mobile_command_center(payload, view):
         )
         _render_mobile_order_cards(summary["order_rows"])
     else:
-        st.markdown("<div class='dq-mobile-section'>Realized breakdown <span>completed trades only</span></div>", unsafe_allow_html=True)
+        st.markdown("<div class='dq-mobile-section'>Stock results <span>completed trades only</span></div>", unsafe_allow_html=True)
         st.markdown(
             "<div class='dq-mobile-stat-grid'>"
-            f"<div class='dq-mobile-stat'><span>Stocks</span><strong>{format_currency(view.get('stock_realized_pl'))}</strong></div>"
-            f"<div class='dq-mobile-stat'><span>Crypto</span><strong>{format_currency(view.get('crypto_realized_pl'))}</strong></div>"
-            f"<div class='dq-mobile-stat'><span>Options</span><strong>{format_currency(view.get('options_realized_pl'))}</strong></div>"
+            f"<div class='dq-mobile-stat'><span>Realized profit</span><strong>{format_currency(view.get('stock_realized_pl'))}</strong></div>"
+            f"<div class='dq-mobile-stat'><span>Closed trades</span><strong>{int(view.get('stock_closed_trade_count') or 0)}</strong></div>"
+            f"<div class='dq-mobile-stat'><span>Open positions</span><strong>{len(summary['position_rows'])}</strong></div>"
             f"<div class='dq-mobile-stat'><span>Last refresh</span><strong>{_safe_text(format_compact_timestamp(datetime.now(timezone.utc).isoformat()).get('time'), 'Now')}</strong></div>"
             "</div>",
             unsafe_allow_html=True,
@@ -3897,7 +3890,7 @@ def render_mobile_command_center(payload, view):
         _render_mobile_order_cards(summary["order_rows"], limit=3)
 
     st.markdown(
-        "<div class='dq-mobile-install'>On iPhone: Share → Add to Home Screen.<br>On Android: browser menu → Add to Home screen.</div>"
+        "<div class='dq-mobile-install'>On iPhone: Share → Add to Home Screen.</div>"
         "<div class='dq-mobile-back'><a href='?mobile=0' target='_self'>Open full desktop dashboard</a></div>",
         unsafe_allow_html=True,
     )
@@ -3956,15 +3949,14 @@ def render_account_page(payload, view):
     _metric_card(acc_cols[2], "Buying Power", format_currency(view["buying_power"]), "neutral")
     _metric_card(acc_cols[3], "Open Positions", int(view.get("open_positions") or 0), "neutral")
 
-    second_row = st.columns(4)
+    second_row = st.columns(2)
     realized_values = [
-        ("Realized Total", bot_net_pl),
-        ("Stocks", _as_float(view.get("stock_realized_pl"), 0.0)),
-        ("Crypto", _as_float(view.get("crypto_realized_pl"), 0.0)),
-        ("Options", _as_float(view.get("options_realized_pl"), 0.0)),
+        ("Realized Stock P/L", bot_net_pl),
+        ("Completed Stock Trades", int(view.get("stock_closed_trade_count") or 0)),
     ]
     for column, (label, value) in zip(second_row, realized_values):
-        _metric_card(column, label, format_currency(value), "buy" if value > 0 else "sell" if value < 0 else "neutral")
+        display = format_currency(value) if label != "Completed Stock Trades" else value
+        _metric_card(column, label, display, "buy" if label != "Completed Stock Trades" and value > 0 else "sell" if label != "Completed Stock Trades" and value < 0 else "neutral")
 
     third_row = st.columns(2)
     _metric_card(third_row[0], "Orders Today", orders_today, "neutral")
@@ -3995,16 +3987,18 @@ def render_account_page(payload, view):
         position_rows = []
         now_utc = datetime.now(timezone.utc)
         for position in positions:
+            asset_class = str(position.get("asset_class") or "").strip().lower()
+            symbol = str(position.get("symbol") or "").strip().upper()
+            if "crypto" in asset_class or "option" in asset_class or "/" in symbol:
+                continue
             entry_ts = position.get("entry_timestamp")
             hold_seconds = _seconds_since_iso(entry_ts)
             holding_time = "Unknown" if hold_seconds is None else (f"{hold_seconds // 3600}h" if hold_seconds >= 3600 else f"{max(hold_seconds // 60, 0)}m")
             signed_quantity = _as_float(position.get("quantity"), 0.0)
-            asset_class = str(position.get("asset_class") or "").strip().lower()
-            asset_label = "Crypto" if "crypto" in asset_class else "Option" if "option" in asset_class else "Stock"
             position_rows.append(
                 {
                     "symbol": position.get("symbol"),
-                    "asset": asset_label,
+                    "asset": "Stock",
                     "direction": "SHORT" if signed_quantity < 0 else "LONG",
                     "quantity": abs(signed_quantity),
                     "entry_price": position.get("average_entry_price"),
@@ -4062,6 +4056,11 @@ def render_risk_page(payload, view):
 def render_orders_page(payload):
     rows = []
     for order in payload.get("recent_orders") or []:
+        asset_class = str(order.get("asset_class") or "").strip().lower()
+        symbol = str(order.get("symbol") or "").strip().upper()
+        client_order_id = str(order.get("client_order_id") or "").strip().lower()
+        if "crypto" in asset_class or "option" in asset_class or "/" in symbol or client_order_id.startswith(("qtb-crypto-", "qtb-option-")):
+            continue
         side = str(order.get("side") or order.get("signal") or "").strip().upper()
         rows.append(
             {
@@ -4073,6 +4072,7 @@ def render_orders_page(payload):
                 "order_type": order.get("order_type") or "market",
                 "status": friendly_status_text(order.get("safe_order_status") or order.get("status"), "unknown"),
                 "average_fill": format_currency(order.get("average_fill_price"), "$0.00"),
+                "realized_profit_loss": format_currency(order.get("realized_profit_loss")) if order.get("realized_profit_loss") is not None else "—",
                 "source": friendly_status_text(order.get("source"), "monitoring database"),
                 "submitted": bool(_as_bool(order.get("submitted"))),
                 "stop_reason": _safe_text(order.get("stop_reason"), "N/A"),
@@ -4108,15 +4108,14 @@ def render_performance_page(payload):
     bot_net_pl = _as_float(view.get("bot_net_pl"), 0.0)
 
     st.markdown("### BOT PERFORMANCE")
-    performance_card = st.columns(4)
+    performance_card = st.columns(2)
     realized_values = [
-        ("Realized Total", bot_net_pl),
-        ("Stocks", _as_float(view.get("stock_realized_pl"), 0.0)),
-        ("Crypto", _as_float(view.get("crypto_realized_pl"), 0.0)),
-        ("Options", _as_float(view.get("options_realized_pl"), 0.0)),
+        ("Realized Stock P/L", bot_net_pl),
+        ("Completed Stock Trades", int(view.get("stock_closed_trade_count") or 0)),
     ]
     for column, (label, value) in zip(performance_card, realized_values):
-        _metric_card(column, label, format_currency(value), "buy" if value > 0 else "sell" if value < 0 else "neutral")
+        display = format_currency(value) if label != "Completed Stock Trades" else value
+        _metric_card(column, label, display, "buy" if label != "Completed Stock Trades" and value > 0 else "sell" if label != "Completed Stock Trades" and value < 0 else "neutral")
     st.caption(
         f"Net result from {int(view.get('closed_trade_count') or 0)} completed trades. "
         "Each completed sell adds its gain or loss. Buys and open positions do not affect this number."
@@ -5177,8 +5176,6 @@ def render_dashboard(database_url: str | None = None):
 
     page_renderers = {
         "Overview": render_overview_page,
-        "Crypto": render_crypto_page,
-        "Options": render_options_page,
         "Strategy": render_strategy_page,
         "Risk": render_risk_page,
         "Portfolio": render_account_page,

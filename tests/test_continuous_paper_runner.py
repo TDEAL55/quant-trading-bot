@@ -781,6 +781,7 @@ def test_crypto_cycle_runs_while_stock_market_is_closed(tmp_path, monkeypatch):
     cfg = _config(tmp_path)
     calls = {"stock": 0, "crypto": 0}
     sleeps = []
+    monkeypatch.setenv("STOCKS_ONLY_MODE", "false")
     monkeypatch.setenv("CRYPTO_TRADING_ENABLED", "true")
     monkeypatch.setenv("CRYPTO_SCAN_INTERVAL_MINUTES", "15")
 
@@ -817,6 +818,7 @@ def test_crypto_cycle_runs_while_stock_market_is_closed(tmp_path, monkeypatch):
 def test_closed_market_logging_is_throttled_during_fast_crypto_loops(tmp_path, monkeypatch):
     cfg = _config(tmp_path)
     events = []
+    monkeypatch.setenv("STOCKS_ONLY_MODE", "false")
     monkeypatch.setenv("CRYPTO_TRADING_ENABLED", "true")
     monkeypatch.setenv("CRYPTO_SCAN_INTERVAL_SECONDS", "10")
     monkeypatch.setenv("MARKET_CLOSED_LOG_INTERVAL_SECONDS", "300")
@@ -844,6 +846,7 @@ def test_closed_market_logging_is_throttled_during_fast_crypto_loops(tmp_path, m
 def test_options_cycle_runs_during_regular_market_hours(tmp_path, monkeypatch):
     cfg = _config(tmp_path)
     calls = {"stock": 0, "options": 0}
+    monkeypatch.setenv("STOCKS_ONLY_MODE", "false")
     monkeypatch.setenv("OPTIONS_TRADING_ENABLED", "true")
     monkeypatch.setenv("OPTIONS_SCAN_INTERVAL_MINUTES", "15")
 
@@ -876,6 +879,41 @@ def test_options_cycle_runs_during_regular_market_hours(tmp_path, monkeypatch):
     assert stats["options_cycles_attempted"] == 1
     assert stats["options_cycles_completed"] == 1
     assert stats["options_cycles_failed"] == 0
+
+
+def test_stocks_only_mode_blocks_crypto_and_options_even_if_legacy_flags_are_enabled(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    calls = {"stock": 0, "crypto": 0, "options": 0}
+    monkeypatch.setenv("STOCKS_ONLY_MODE", "true")
+    monkeypatch.setenv("CRYPTO_TRADING_ENABLED", "true")
+    monkeypatch.setenv("OPTIONS_TRADING_ENABLED", "true")
+
+    def _stock(**_kwargs):
+        calls["stock"] += 1
+        return _failed_result(status="no_candidates")
+
+    def _crypto(**_kwargs):
+        calls["crypto"] += 1
+        return {"cycle_status": "no_trade", "confirmed_order_count": 0}
+
+    def _options(**_kwargs):
+        calls["options"] += 1
+        return {"cycle_status": "no_trade", "confirmed_order_count": 0}
+
+    stats = run_continuous_paper_runner(
+        config_loader=lambda: cfg,
+        runner=_stock,
+        crypto_runner=_crypto,
+        options_runner=_options,
+        state_path=_state_path(tmp_path),
+        now_provider=_Clock([datetime(2026, 7, 22, 10, 0, tzinfo=EASTERN_TZ)]),
+        sleep_fn=lambda _seconds: None,
+        max_iterations=1,
+    )
+
+    assert calls == {"stock": 1, "crypto": 0, "options": 0}
+    assert stats["crypto_cycles_attempted"] == 0
+    assert stats["options_cycles_attempted"] == 0
 
 
 def test_daily_reconciliation_runs_once_after_configured_time(tmp_path, monkeypatch):

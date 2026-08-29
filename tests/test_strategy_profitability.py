@@ -42,3 +42,13 @@ def test_equal_risk_allocation_and_drawdown_pause():
         max_drawdown_threshold=0.20,
     )
     assert paused == ["b"]
+
+
+def test_drawdown_is_a_fraction_even_when_first_trade_loses():
+    board = build_strategy_leaderboard(
+        [
+            _trade("stock_trend_ensemble_v2", "2.0.0", -100.0, -0.10),
+            _trade("stock_trend_ensemble_v2", "2.0.0", 25.0, 0.03),
+        ]
+    )
+    assert board[0]["maximum_drawdown"] == 0.10

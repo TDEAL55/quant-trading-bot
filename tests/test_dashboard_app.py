@@ -742,7 +742,7 @@ def test_render_dashboard_executes_all_sections_with_populated_data(monkeypatch)
 
     nav_calls = [call for call in fake_st._calls if call[0] == "radio" and call[1] == "Navigate"]
     assert nav_calls
-    assert nav_calls[0][2] == ["Overview", "Portfolio", "Orders", "Crypto", "Options"]
+    assert nav_calls[0][2] == ["Overview", "Portfolio", "Orders", "Strategy", "Performance"]
     assert nav_calls[0][3] is True
     assert all("trade" not in str(page).lower() for page in nav_calls[0][2])
 

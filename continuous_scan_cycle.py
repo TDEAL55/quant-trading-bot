@@ -1223,7 +1223,12 @@ def run_continuous_scan_cycle(
         leaderboard = fetch_leaderboard() if persist and callable(fetch_leaderboard) else []
         paused = set(paused_strategies_from_drawdown(leaderboard, max_drawdown_threshold=float(os.getenv("STRATEGY_MAX_DRAWDOWN", "0.20"))))
 
-        active_strategy_ids = [str(item.get("strategy_id") or "") for item in strategy_signals if str(item.get("strategy_id") or "") not in paused]
+        active_strategy_ids = [
+            str(item.get("strategy_id") or "")
+            for item in strategy_signals
+            if str(item.get("strategy_id") or "") not in paused
+            and str(item.get("signal") or "").upper() == requested_entry_side
+        ]
         allocations = allocate_equal_risk(active_strategy_ids)
         for row in strategy_signals:
             sid = str(row.get("strategy_id") or "")
@@ -2033,12 +2038,37 @@ def run_continuous_scan_cycle(
                     est_fees = abs(float(os.getenv("ESTIMATED_FEES_PER_TRADE", "0")))
                     net = gross - est_slippage - est_fees
                     pct = (net / (entry_price * qty)) if entry_price > 0 and qty > 0 else 0.0
+                    entry_lookup = getattr(execution_repo, "fetch_latest_filled_entry", None)
+                    entry_order = (
+                        dict(entry_lookup(selected_symbol, "BUY") or {})
+                        if callable(entry_lookup)
+                        else {}
+                    )
+                    entry_strategy_payload = dict(entry_order.get("order_payload") or {})
+                    original_strategy = dict(entry_strategy_payload.get("strategy") or {})
+                    closing_strategy_id = str(
+                        entry_order.get("strategy_id")
+                        or original_strategy.get("strategy_id")
+                        or selected_strategy.get("strategy_id")
+                        or "unknown"
+                    )
+                    closing_strategy_version = str(
+                        entry_order.get("strategy_version")
+                        or original_strategy.get("strategy_version")
+                        or selected_strategy.get("strategy_version")
+                        or "unknown"
+                    )
+                    closing_regime = str(
+                        original_strategy.get("market_regime")
+                        or selected_strategy.get("market_regime")
+                        or "unknown"
+                    )
                     save_closed_trade = getattr(execution_repo, "save_closed_trade", None)
                     if callable(save_closed_trade):
                         save_closed_trade(
                             {
-                                "strategy_id": str(selected_strategy.get("strategy_id") or "unknown"),
-                                "strategy_version": str(selected_strategy.get("strategy_version") or "unknown"),
+                                "strategy_id": closing_strategy_id,
+                                "strategy_version": closing_strategy_version,
                                 "symbol": selected_symbol,
                                 "entry_timestamp": started_at,
                                 "exit_timestamp": _utc_iso(),
@@ -2054,7 +2084,7 @@ def run_continuous_scan_cycle(
                                 "max_adverse_excursion": 0.0,
                                 "max_favorable_excursion": 0.0,
                                 "exit_reason": str(final_order.get("rejection_reason") or "filled_exit"),
-                                "market_regime": str(selected_strategy.get("market_regime") or "unknown"),
+                                "market_regime": closing_regime,
                                 "close_type": "signal_exit",
                             }
                         )

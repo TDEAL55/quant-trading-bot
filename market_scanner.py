@@ -500,7 +500,7 @@ def scan_symbol(
         raw_signal = str(strategy_result.get("signal") or "HOLD").strip().upper()
         raw_score = float(quantum_score.get("final_score") or 0.0)
         long_signal_score = float(strategy_result.get("overall_score") or raw_score)
-        short_payload = dict(strategy_specific_scores.get("bearish_trend_short_v1") or {})
+        short_payload = dict(strategy_specific_scores.get("stock_bearish_trend_v2") or {})
         short_requested = bool(
             PAPER_ALLOW_SHORT_SELLING
             and raw_signal in {value.upper() for value in SCANNER_SHORT_ALLOWED_SIGNALS}
@@ -644,7 +644,7 @@ def rank_scan_results(
     for item in eligible:
         components = item.get("component_scores") or {}
         risk_quality = float(components.get("risk_reward_quality", components.get("risk_quality", 0.0)) or 0.0)
-        short_payload = dict((item.get("strategy_specific_scores") or {}).get("bearish_trend_short_v1") or {})
+        short_payload = dict((item.get("strategy_specific_scores") or {}).get("stock_bearish_trend_v2") or {})
         short_components = dict(short_payload.get("component_scores") or {})
         trend = (
             float(short_components.get("trend_weakness") or 0.0)

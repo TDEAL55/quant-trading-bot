@@ -4,9 +4,9 @@ from dashboard_app import PAGE_OPTIONS, PRIMARY_PAGE_OPTIONS
 from dashboard_data import _fetch_crypto_dashboard_snapshot
 
 
-def test_crypto_is_an_essential_dashboard_page():
-    assert "Crypto" in PRIMARY_PAGE_OPTIONS
-    assert "Crypto" in PAGE_OPTIONS
+def test_crypto_is_removed_from_stock_only_navigation():
+    assert "Crypto" not in PRIMARY_PAGE_OPTIONS
+    assert "Crypto" not in PAGE_OPTIONS
 
 
 def test_crypto_dashboard_combines_cycle_status_with_live_broker_positions(tmp_path, monkeypatch):

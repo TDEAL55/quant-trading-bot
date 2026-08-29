@@ -11,6 +11,8 @@ def test_strategy_plugins_emit_expected_fields_and_ids():
         "confidence": 70.0,
         "quantum_score": {
             "data_quality_status": "ok",
+            "final_score": 82.0,
+            "market_regime": "bull",
             "normalized_component_scores": {
                 "trend_strength": 70.0,
                 "relative_strength": 65.0,
@@ -29,15 +31,9 @@ def test_strategy_plugins_emit_expected_fields_and_ids():
     rows = evaluate_all_strategies(payload)
 
     ids = {row["strategy_id"] for row in rows}
-    assert ids == {
-        "trend_momentum_v1",
-        "moving_average_trend_v1",
-        "short_term_mean_reversion_v1",
-        "volume_breakout_v1",
-        "bearish_trend_short_v1",
-    }
+    assert ids == {"stock_trend_ensemble_v2", "stock_mean_reversion_v2", "stock_bearish_trend_v2"}
     for row in rows:
-        assert row["strategy_version"] == "1.0.0"
+        assert row["strategy_version"] == "2.0.0"
         assert row["symbol"] == "JPM"
         assert "entry_reason" in row
         assert "proposed_entry" in row
@@ -60,17 +56,18 @@ def test_bearish_strategy_emits_sell_only_for_explicit_paper_short(monkeypatch):
         "confidence": 70.0,
         "trade_side": "SELL",
         "strategy_specific_scores": {
-            "bearish_trend_short_v1": {
+            "stock_bearish_trend_v2": {
                 "eligible": True,
                 "strategy_score": 82.0,
                 "confidence": 76.0,
+                "strategy_version": "2.0.0",
             }
         },
-        "quantum_score": {"data_quality_status": "ok", "warnings": [], "rejection_reasons": []},
+        "quantum_score": {"data_quality_status": "ok", "market_regime": "bear", "warnings": [], "rejection_reasons": []},
     }
 
     rows = evaluate_all_strategies(payload)
-    short_signal = next(row for row in rows if row["strategy_id"] == "bearish_trend_short_v1")
+    short_signal = next(row for row in rows if row["strategy_id"] == "stock_bearish_trend_v2")
 
     assert short_signal["signal"] == "SELL"
     assert short_signal["stop"] > payload["latest_price"]

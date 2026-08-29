@@ -43,7 +43,7 @@ def _systemd_service_active(service_name: str) -> bool:
     return result.returncode == 0
 
 
-def _broker_order_to_dashboard_event(order: dict[str, Any]) -> dict[str, Any]:
+def _broker_order_to_dashboard_event(order: dict[str, Any], closed_trade: dict[str, Any] | None = None) -> dict[str, Any]:
     status = str(order.get("status") or "unknown").strip().lower()
     side = str(order.get("side") or "").strip().upper()
     timestamp = str(order.get("updated_at") or order.get("submitted_at") or "")
@@ -51,6 +51,7 @@ def _broker_order_to_dashboard_event(order: dict[str, Any]) -> dict[str, Any]:
     filled_quantity = abs(float(order.get("filled_quantity") or 0.0))
     fill_price = float(order.get("average_fill_price") or 0.0)
     event_quantity = filled_quantity if filled_quantity > 0 else requested_quantity
+    trade = dict(closed_trade or {})
     return {
         "event_timestamp": timestamp,
         "market_date": timestamp[:10] if len(timestamp) >= 10 else "",
@@ -70,6 +71,9 @@ def _broker_order_to_dashboard_event(order: dict[str, Any]) -> dict[str, Any]:
         "broker_order_id": str(order.get("order_id") or ""),
         "client_order_id": str(order.get("client_order_id") or ""),
         "stop_reason": str(order.get("rejection_reason") or ""),
+        "realized_profit_loss": float(trade.get("net_pnl")) if trade.get("net_pnl") is not None else None,
+        "realized_return_percentage": float(trade.get("percentage_return")) if trade.get("percentage_return") is not None else None,
+        "closed_trade": bool(trade),
         "source": "alpaca_paper_broker",
     }
 
@@ -84,7 +88,8 @@ def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dic
     positions_by_symbol = broker.get_positions()
     open_orders = broker.get_open_orders()
     broker_orders = list(getattr(broker, "get_order_history", lambda limit=50: [])(limit=500) or [])
-    closed_summary = _summarize_bot_closed_orders(broker_orders)
+    closed_records = build_closed_trade_records(broker_orders)
+    closed_summary = summarize_closed_trade_records(closed_records)
     try:
         market_clock = dict(getattr(broker, "get_market_clock", lambda: {})() or {})
     except Exception:
@@ -102,7 +107,17 @@ def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dic
         }
         for symbol, details in sorted(positions_by_symbol.items())
     ]
-    recent_orders = [_broker_order_to_dashboard_event(order) for order in broker_orders[:120]]
+    closed_by_order_id = {
+        str(record.get("trade_id") or "").removeprefix("alpaca-").removesuffix("-closed"): record
+        for record in closed_records
+    }
+    recent_orders = [
+        _broker_order_to_dashboard_event(
+            order,
+            closed_by_order_id.get(str(order.get("order_id") or order.get("client_order_id") or "")),
+        )
+        for order in broker_orders[:120]
+    ]
     equity = float(account.get("equity") or account.get("portfolio_value") or 0.0)
     last_equity = float(account.get("last_equity") or equity)
     return {

@@ -21,6 +21,19 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return float(default)
 
 
+def _holding_hours(entry_timestamp: Any, exit_timestamp: str) -> float:
+    try:
+        entry = datetime.fromisoformat(str(entry_timestamp or "").replace("Z", "+00:00"))
+        exit_dt = datetime.fromisoformat(str(exit_timestamp or "").replace("Z", "+00:00"))
+        if entry.tzinfo is None:
+            entry = entry.replace(tzinfo=timezone.utc)
+        if exit_dt.tzinfo is None:
+            exit_dt = exit_dt.replace(tzinfo=timezone.utc)
+        return max((exit_dt - entry).total_seconds() / 3600.0, 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _position_weights(positions: dict[str, dict[str, Any]], equity: float) -> dict[str, dict[str, float]]:
     base = max(float(equity), 1.0)
     return {
@@ -334,6 +347,9 @@ def execute_guard_exit(
         )
         if broker_confirmed_fill:
             entry_price = _as_float(entry_order.get("average_fill_price") or position.get("avg_price"), fill_price)
+            entry_strategy = dict((entry_order.get("order_payload") or {}).get("strategy") or {})
+            entry_timestamp = entry_order.get("filled_at") or entry_order.get("submitted_at") or started_at
+            exit_timestamp = _utc_iso()
             closed_quantity = min(quantity, counted_quantity)
             gross_pnl = (
                 (entry_price - fill_price) * closed_quantity
@@ -349,11 +365,11 @@ def execute_guard_exit(
             execution_repo.save_closed_trade(
                 {
                     "trade_id": f"{execution_fingerprint}-closed",
-                    "strategy_id": str(entry_order.get("strategy_id") or "position_guard"),
-                    "strategy_version": str(entry_order.get("strategy_version") or "v1"),
+                    "strategy_id": str(entry_order.get("strategy_id") or entry_strategy.get("strategy_id") or "stock_unattributed"),
+                    "strategy_version": str(entry_order.get("strategy_version") or entry_strategy.get("strategy_version") or "unknown"),
                     "symbol": symbol,
-                    "entry_timestamp": entry_order.get("filled_at") or entry_order.get("submitted_at") or started_at,
-                    "exit_timestamp": _utc_iso(),
+                    "entry_timestamp": entry_timestamp,
+                    "exit_timestamp": exit_timestamp,
                     "entry_price": entry_price,
                     "exit_price": fill_price,
                     "quantity": closed_quantity,
@@ -362,11 +378,11 @@ def execute_guard_exit(
                     "estimated_slippage": round(estimated_slippage, 6),
                     "net_pnl": round(net_pnl, 6),
                     "percentage_return": round(percentage_return, 6),
-                    "holding_duration_hours": 0.0,
+                    "holding_duration_hours": round(_holding_hours(entry_timestamp, exit_timestamp), 6),
                     "max_adverse_excursion": min(float(exit_candidate.get("return_percent") or 0.0) / 100.0, 0.0),
                     "max_favorable_excursion": max(float(exit_candidate.get("return_percent") or 0.0) / 100.0, 0.0),
                     "exit_reason": reason,
-                    "market_regime": "unknown",
+                    "market_regime": str(entry_strategy.get("market_regime") or "unknown"),
                     "close_type": "risk_guard_exit",
                 }
             )
