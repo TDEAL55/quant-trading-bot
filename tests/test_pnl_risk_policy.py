@@ -79,6 +79,15 @@ def test_environment_settings_keep_daily_stop_active_in_aggressive_paper_mode(mo
 
 
 def test_environment_can_effectively_disable_daily_stop_for_paper_testing(monkeypatch):
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
     monkeypatch.setenv("PAPER_DAILY_LOSS_STOP_PERCENT", "100")
 
     assert settings_from_environment().daily_loss_stop_percent == 100
+
+
+def test_live_mode_keeps_daily_loss_ceiling(monkeypatch):
+    monkeypatch.setenv("TRADING_MODE", "LIVE")
+    monkeypatch.setenv("PAPER_DAILY_LOSS_STOP_PERCENT", "100")
+
+    with pytest.raises(ValueError, match="LIVE mode"):
+        settings_from_environment()
