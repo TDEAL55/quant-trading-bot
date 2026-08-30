@@ -25,7 +25,7 @@ def test_order_planner_generates_buy_reduce_close_and_hold():
         current_positions=current_positions,
         reference_prices=reference_prices,
         portfolio_value=10000,
-        current_cash=3000,
+        current_cash=3300,
         settings=settings,
     )
 
@@ -97,3 +97,30 @@ def test_order_planner_rejects_negative_target_without_short_flag():
     )
     assert result["orders"] == []
     assert result["rejections"][0]["reason"] == "short_target_not_allowed"
+
+
+def test_order_planner_counts_sell_proceeds_once():
+    settings = OrderPlannerSettings(
+        minimum_order_notional=1.0,
+        maximum_order_notional=10_000.0,
+        allow_fractional=True,
+        quantity_precision=4,
+        rebalance_tolerance=0.0,
+        maximum_orders=2,
+        cash_buffer=0.0,
+    )
+
+    result = plan_paper_orders(
+        target_weights={"HELD": 0.0, "NEW": 0.15},
+        current_positions={"HELD": {"quantity": 10.0, "avg_price": 100.0}},
+        reference_prices={"HELD": 100.0, "NEW": 100.0},
+        portfolio_value=10_000.0,
+        current_cash=500.0,
+        settings=settings,
+    )
+
+    assert [(order["symbol"], order["side"]) for order in result["orders"]] == [
+        ("HELD", "SELL"),
+        ("NEW", "BUY"),
+    ]
+    assert result["summary"]["estimated_post_trade_cash"] == 0.0

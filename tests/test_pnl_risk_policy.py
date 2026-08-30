@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import pytest
 
 from pnl_risk_policy import (
+    confidence_adjusted_position_percent,
     PnLRiskSettings,
     evaluate_account_pnl_policy,
     risk_adjusted_position_percent,
@@ -65,6 +66,63 @@ def test_risk_adjusted_position_size_honors_one_percent_risk_and_ten_percent_cap
     assert risk_adjusted_position_percent(stop_loss_percent=4, settings=settings) == 10
     assert risk_adjusted_position_percent(stop_loss_percent=5, settings=settings) == 10
     assert risk_adjusted_position_percent(stop_loss_percent=25, settings=settings) == 4
+
+
+def test_confidence_sizing_can_exceed_ten_percent_in_paper_only(monkeypatch):
+    monkeypatch.setenv("PAPER_CONFIDENCE_SIZING_ENABLED", "true")
+    monkeypatch.setenv("PAPER_CONFIDENCE_MAX_POSITION_PERCENT", "20")
+    settings = PnLRiskSettings(maximum_position_percent=10, maximum_risk_per_trade_percent=1)
+    signal = {
+        "strategy_id": "stock_trend_ensemble_v2",
+        "confidence": 88.0,
+        "strategy_score": 84.0,
+        "supporting_factors": {"confirmations": {"trend": True, "relative": True, "momentum": True}},
+    }
+
+    assert confidence_adjusted_position_percent(
+        stop_loss_percent=4,
+        settings=settings,
+        strategy_signal=signal,
+        trading_mode="PAPER",
+    ) == 15.0
+    assert confidence_adjusted_position_percent(
+        stop_loss_percent=4,
+        settings=settings,
+        strategy_signal=signal,
+        trading_mode="LIVE",
+    ) == 10.0
+
+
+def test_twenty_percent_confidence_tier_requires_validated_strategy(monkeypatch):
+    monkeypatch.setenv("PAPER_CONFIDENCE_SIZING_ENABLED", "true")
+    settings = PnLRiskSettings(maximum_position_percent=10, maximum_risk_per_trade_percent=1)
+    signal = {
+        "strategy_id": "stock_trend_ensemble_v2",
+        "confidence": 94.0,
+        "strategy_score": 90.0,
+        "supporting_factors": {"confirmations": {"trend": True, "relative": True, "momentum": True, "volume": True}},
+    }
+    leaderboard = [{
+        "strategy_id": "stock_trend_ensemble_v2",
+        "sample_status": "READY",
+        "expectancy": 25.0,
+        "profit_factor": 1.4,
+    }]
+
+    assert confidence_adjusted_position_percent(
+        stop_loss_percent=4,
+        settings=settings,
+        strategy_signal=signal,
+        strategy_leaderboard=[],
+        trading_mode="PAPER",
+    ) == 15.0
+    assert confidence_adjusted_position_percent(
+        stop_loss_percent=4,
+        settings=settings,
+        strategy_signal=signal,
+        strategy_leaderboard=leaderboard,
+        trading_mode="PAPER",
+    ) == 20.0
 
 
 def test_settings_reject_position_limits_above_ten_percent():

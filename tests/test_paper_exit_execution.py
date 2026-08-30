@@ -75,6 +75,8 @@ def test_guard_exit_fills_reconciles_and_records_closed_trade():
     assert repo.validation_payload is not None
     assert repo.closed_trade["symbol"] == "JPM"
     assert repo.closed_trade["exit_reason"] == "stop_loss_threshold_reached"
+    assert repo.closed_trade["net_pnl"] == repo.closed_trade["realized_gross_pnl"]
+    assert repo.closed_trade["estimated_slippage"] == 0.0
 
 
 def test_guard_exit_duplicate_is_rejected_before_broker_submission():
@@ -219,3 +221,43 @@ def test_guard_exit_records_broker_fill_when_position_snapshot_is_stale():
     assert result["reconciliation"]["reconciliation_status"] == "mismatch"
     assert repo.closed_trade["symbol"] == "JPM"
     assert repo.closed_trade["realized_gross_pnl"] == -10.0
+
+
+def test_guard_exit_uses_broker_weighted_average_after_scale_ins():
+    class _LatestEntryRepo(_Repo):
+        def fetch_latest_filled_buy(self, symbol):
+            return {
+                "symbol": symbol,
+                "average_fill_price": 110.0,
+                "filled_at": "2026-08-02T14:00:00+00:00",
+                "strategy_id": "stock_trend_ensemble_v2",
+                "strategy_version": "2.0.0",
+            }
+
+    broker = SimulatedPaperBroker(
+        mode="PAPER",
+        buying_power=1000.0,
+        positions={"JPM": {"quantity": 2.0, "avg_price": 105.0}},
+    )
+    repo = _LatestEntryRepo()
+
+    execute_guard_exit(
+        _candidate(),
+        broker=broker,
+        broker_positions={"JPM": {"quantity": 2.0, "avg_price": 105.0, "current_price": 95.0}},
+        broker_cash=1000.0,
+        broker_buying_power=1000.0,
+        broker_equity=1200.0,
+        execution_repo=repo,
+        cycle_run_id="cycle-scale-in",
+        started_at="2026-08-23T15:00:00+00:00",
+        dry_run=False,
+        paper_execution_enabled=True,
+        allow_fractional=True,
+        reconciliation_tolerance=0.000001,
+        persist=True,
+    )
+
+    assert repo.closed_trade["entry_price"] == 105.0
+    assert repo.closed_trade["realized_gross_pnl"] == -20.0
+    assert repo.closed_trade["net_pnl"] == -20.0

@@ -61,6 +61,7 @@ from portfolio_intelligence import run_portfolio_intelligence
 from pnl_risk_policy import (
     evaluate_account_pnl_policy,
     load_recent_closed_trades,
+    confidence_adjusted_position_percent,
     risk_adjusted_position_percent,
     settings_from_environment,
 )
@@ -1085,6 +1086,18 @@ def run_continuous_scan_cycle(
 
     selected_candidates = list(shortlist_payload.get("selected") or [])
     selected_candidate = dict(selected_candidates[0]) if selected_candidates else {}
+    if selected_candidate:
+        # Preserve the scanner's complete factor/regime evidence even when a
+        # selector returns only portfolio fields. Strategy eligibility must not
+        # fall back to a bare shortlist score.
+        selected_symbol_key = str(selected_candidate.get("symbol") or "").upper()
+        source_candidate: dict[str, Any] = {}
+        for collection_name in ("scan_results", "ranked_candidates"):
+            for row in list(scan_payload.get(collection_name) or []):
+                if str((row or {}).get("symbol") or "").upper() == selected_symbol_key:
+                    source_candidate.update(dict(row or {}))
+                    break
+        selected_candidate = {**source_candidate, **selected_candidate}
     completed_at = _utc_iso()
     scan_run_payload = _scan_run_payload(cycle_run_id, scan_payload, len(universe_records), completed_at)
 
@@ -1301,9 +1314,12 @@ def run_continuous_scan_cycle(
         )[0]
 
         configured_position_percent = min(_effective_max_position_equity_percent(config), 10.0)
-        max_position_equity_percent = risk_adjusted_position_percent(
+        max_position_equity_percent = confidence_adjusted_position_percent(
             stop_loss_percent=float(getattr(config, "position_guard_stop_loss_percent", 4.0)),
             settings=settings_from_environment(maximum_position_percent=configured_position_percent),
+            strategy_signal=selected_strategy,
+            strategy_leaderboard=leaderboard,
+            trading_mode=str(getattr(config, "trading_mode", "PAPER")),
         )
         max_open_positions = _effective_max_open_positions(config)
         per_strategy_allocation = float(selected_strategy.get("requested_risk_allocation") or 0.25)
@@ -1490,7 +1506,11 @@ def run_continuous_scan_cycle(
             deduplication_key=f"trade_recommended:{cycle_run_id}:{selected_symbol}:{selected_strategy.get('strategy_id')}",
         )
 
-        risk = RiskManager(max_position_size=float(MAX_POSITION_SIZE), max_daily_loss=float(MAX_DAILY_LOSS), daily_loss_limit=float(DAILY_LOSS_LIMIT))
+        risk = RiskManager(
+            max_position_size=max(float(MAX_POSITION_SIZE), float(max_position_equity_percent) / 100.0),
+            max_daily_loss=float(MAX_DAILY_LOSS),
+            daily_loss_limit=float(DAILY_LOSS_LIMIT),
+        )
         trade_value = float(planned_order.get("notional") or 0.0)
         supports_scaling = bool(selected_strategy.get("supports_scaling", False))
         existing_qty = float((broker_positions.get(selected_symbol) or {}).get("quantity") or 0.0)
@@ -2034,8 +2054,11 @@ def run_continuous_scan_cycle(
                     entry_price = float((broker_pre_positions.get(selected_symbol) or {}).get("avg_price") or fill_price)
                     qty = min(pre_qty, counted_filled_qty)
                     gross = (fill_price - entry_price) * qty
-                    est_slippage = abs(float(os.getenv("ESTIMATED_SLIPPAGE_BPS", "5")) / 10000.0 * fill_price * qty)
-                    est_fees = abs(float(os.getenv("ESTIMATED_FEES_PER_TRADE", "0")))
+                    # The Alpaca PAPER fill is the realized execution price.
+                    # Modeled costs belong in research analytics, not headline
+                    # fill-to-fill realized P/L.
+                    est_slippage = 0.0
+                    est_fees = 0.0
                     net = gross - est_slippage - est_fees
                     pct = (net / (entry_price * qty)) if entry_price > 0 and qty > 0 else 0.0
                     entry_lookup = getattr(execution_repo, "fetch_latest_filled_entry", None)

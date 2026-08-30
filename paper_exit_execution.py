@@ -346,7 +346,9 @@ def execute_guard_exit(
             and counted_quantity > float(reconciliation_tolerance)
         )
         if broker_confirmed_fill:
-            entry_price = _as_float(entry_order.get("average_fill_price") or position.get("avg_price"), fill_price)
+            # Broker position average cost is canonical for aggregate/scale-in
+            # exits. The latest entry order is retained only for attribution.
+            entry_price = _as_float(position.get("avg_price") or entry_order.get("average_fill_price"), fill_price)
             entry_strategy = dict((entry_order.get("order_payload") or {}).get("strategy") or {})
             entry_timestamp = entry_order.get("filled_at") or entry_order.get("submitted_at") or started_at
             exit_timestamp = _utc_iso()
@@ -356,10 +358,11 @@ def execute_guard_exit(
                 if position_side == "SHORT"
                 else (fill_price - entry_price) * closed_quantity
             )
-            estimated_slippage = abs(
-                float(os.getenv("ESTIMATED_SLIPPAGE_BPS", "5")) / 10000.0 * fill_price * closed_quantity
-            )
-            estimated_fees = abs(float(os.getenv("ESTIMATED_FEES_PER_TRADE", "0")))
+            # PAPER fill prices already include the broker simulator's execution
+            # result. Do not subtract a second modeled slippage charge from the
+            # user's fill-to-fill realized P/L.
+            estimated_slippage = 0.0
+            estimated_fees = 0.0
             net_pnl = gross_pnl - estimated_slippage - estimated_fees
             percentage_return = net_pnl / (entry_price * closed_quantity) if entry_price > 0 and closed_quantity > 0 else 0.0
             execution_repo.save_closed_trade(

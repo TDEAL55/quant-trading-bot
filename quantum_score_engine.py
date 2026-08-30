@@ -743,7 +743,11 @@ def compute_strategy_specific_scores(quantum_payload: dict[str, Any]) -> dict[st
             "stock_trend_ensemble_v2",
             trend_raw,
             [
-                (regime in {"bull", "weak_bull"}, "regime_incompatible"),
+                (
+                    regime == "bull"
+                    or (regime == "weak_bull" and not mean_reversion_confirmations["rsi_oversold"]),
+                    "regime_incompatible",
+                ),
                 (sum(trend_confirmations.values()) >= 3, "insufficient_factor_confirmation"),
                 (_component("liquidity_quality") >= 55.0, "liquidity_too_low"),
                 (_component("volatility_quality") >= 40.0, "volatility_quality_too_low"),

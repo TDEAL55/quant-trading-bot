@@ -70,6 +70,26 @@ def _universe_loader():
 
 
 def _scan_payload(symbol="AAA", price=100.0):
+    strategy_evidence = {
+        "strategy_specific_scores": {
+            "stock_trend_ensemble_v2": {
+                "strategy_id": "stock_trend_ensemble_v2",
+                "strategy_version": "2.0.0",
+                "strategy_score": 82.0,
+                "confidence": 76.0,
+                "eligible": True,
+                "confirmations": {"trend_strength": True, "relative_strength": True, "momentum_quality": True},
+                "confirmation_count": 3,
+            }
+        },
+        "quantum_score": {
+            "data_quality_status": "ok",
+            "final_score": 82.0,
+            "market_regime": "bull",
+            "warnings": [],
+            "rejection_reasons": [],
+        },
+    }
     return {
         "scan_results": [
             {
@@ -79,6 +99,7 @@ def _scan_payload(symbol="AAA", price=100.0):
                 "confidence": 76.0,
                 "eligible": True,
                 "rejection_reasons": [],
+                **strategy_evidence,
             }
         ],
         "ranked_candidates": [
@@ -88,6 +109,7 @@ def _scan_payload(symbol="AAA", price=100.0):
                 "latest_price": price,
                 "overall_score": 82.0,
                 "confidence": 76.0,
+                **strategy_evidence,
             }
         ],
         "summary": {"symbol_count": 1, "success_count": 1, "rejection_count": 0, "error_count": 0, "eligible_count": 1, "duration_seconds": 0.01},

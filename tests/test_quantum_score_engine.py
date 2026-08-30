@@ -161,6 +161,21 @@ def test_stock_strategy_sleeves_are_mutually_regime_gated():
     assert sideways["stock_mean_reversion_v2"]["eligible"] is True
     assert sideways["stock_bearish_trend_v2"]["eligible"] is False
 
+    weak_bull_oversold = compute_strategy_specific_scores(
+        {
+            **base,
+            "market_regime": "weak_bull",
+            "factor_values": {"momentum_quality": {"rsi14": 30.0}},
+            "normalized_component_scores": {
+                **base["normalized_component_scores"],
+                "momentum_quality": 35.0,
+            },
+        }
+    )
+    assert weak_bull_oversold["stock_trend_ensemble_v2"]["eligible"] is False
+    assert weak_bull_oversold["stock_mean_reversion_v2"]["eligible"] is True
+    assert weak_bull_oversold["stock_bearish_trend_v2"]["eligible"] is False
+
 
 def test_ranking_tie_breaks_are_deterministic():
     base_quantum = {

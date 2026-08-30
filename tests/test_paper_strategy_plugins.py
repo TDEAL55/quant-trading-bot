@@ -71,3 +71,18 @@ def test_bearish_strategy_emits_sell_only_for_explicit_paper_short(monkeypatch):
 
     assert short_signal["signal"] == "SELL"
     assert short_signal["stop"] > payload["latest_price"]
+
+
+def test_strategy_plugins_fail_closed_without_quantum_factor_payload():
+    rows = evaluate_all_strategies(
+        {
+            "symbol": "JPM",
+            "latest_price": 100.0,
+            "overall_score": 99.0,
+            "confidence": 99.0,
+            "regime": "bull",
+        }
+    )
+
+    assert all(row["signal"] == "HOLD" for row in rows)
+    assert all(row["strategy_score"] == 0.0 for row in rows)

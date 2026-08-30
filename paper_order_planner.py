@@ -142,7 +142,7 @@ def plan_paper_orders(
 
     approved_orders: list[dict[str, Any]] = []
     rejected_orders = list(rejections)
-    estimated_cash = current_cash + sum(item["notional"] for item in sells)
+    estimated_cash = current_cash
     min_cash_required = max(portfolio_value * _as_float(settings.cash_buffer, 0.0), 0.0)
 
     for order in sells + buys:

@@ -48,6 +48,12 @@ def build_strategy_leaderboard(closed_trades: list[dict[str, Any]]) -> list[dict
     for (strategy_id, strategy_version), trades in sorted(grouped.items()):
         if not trades:
             continue
+        # Repositories return newest trades first; performance curves must be
+        # compounded in chronological order.
+        trades = sorted(
+            trades,
+            key=lambda item: str(item.get("exit_timestamp") or item.get("entry_timestamp") or ""),
+        )
         pnl = [_as_float(item.get("net_pnl"), 0.0) for item in trades]
         winners = [value for value in pnl if value > 0]
         losers = [value for value in pnl if value < 0]

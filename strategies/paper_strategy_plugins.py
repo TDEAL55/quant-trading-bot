@@ -62,26 +62,9 @@ def _payloads(candidate: dict[str, Any]) -> dict[str, dict[str, Any]]:
     if quantum.get("normalized_component_scores"):
         return compute_strategy_specific_scores(quantum)
 
-    # Compatibility for already-shortlisted callers that do not carry the
-    # scanner's full quantum payload. Only the primary trend sleeve can pass;
-    # regime-specific sleeves still require their complete factor evidence.
-    score = _safe_float(candidate.get("overall_score") or candidate.get("score"), 0.0)
-    confidence = _safe_float(candidate.get("confidence"), score)
-    eligible = score >= 70.0 and confidence >= 50.0
-    return {
-        "stock_trend_ensemble_v2": {
-            "strategy_id": "stock_trend_ensemble_v2",
-            "strategy_version": "2.0.0",
-            "strategy_score": score,
-            "confidence": confidence,
-            "market_regime": str(candidate.get("regime") or "unknown"),
-            "eligible": eligible,
-            "confirmations": {"shortlist_approved": eligible},
-            "confirmation_count": 1 if eligible else 0,
-            "warnings": ["full quantum factor payload unavailable"],
-            "rejection_reasons": [] if eligible else ["shortlist_score_below_minimum"],
-        }
-    }
+    # A shortlist score is not a substitute for the factor and regime evidence
+    # required by the v2 sleeves. Missing quantum evidence must fail closed.
+    return {}
 
 
 def _supporting(candidate: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:

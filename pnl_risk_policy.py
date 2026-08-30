@@ -112,6 +112,64 @@ def risk_adjusted_position_percent(
     return round(min(float(settings.maximum_position_percent), risk_limited), 6)
 
 
+def confidence_adjusted_position_percent(
+    *,
+    stop_loss_percent: float,
+    settings: PnLRiskSettings,
+    strategy_signal: dict[str, Any] | None,
+    strategy_leaderboard: Iterable[dict[str, Any]] | None = None,
+    trading_mode: str | None = None,
+) -> float:
+    """Allow bounded PAPER conviction sizing without bypassing risk-per-trade.
+
+    Ten percent remains the ordinary cap. A fully confirmed, unusually strong
+    signal may reach 15%; 20% additionally requires a ready, profitable live
+    paper sample for that exact strategy. LIVE mode never receives this boost.
+    """
+    settings.validate()
+    base_cap = float(settings.maximum_position_percent)
+    mode = str(trading_mode or os.getenv("TRADING_MODE", "SIMULATION")).strip().upper()
+    if mode != "PAPER" or str(os.getenv("PAPER_CONFIDENCE_SIZING_ENABLED", "true")).strip().lower() not in {"1", "true", "yes", "on"}:
+        return risk_adjusted_position_percent(stop_loss_percent=stop_loss_percent, settings=settings)
+
+    signal = dict(strategy_signal or {})
+    confirmations = dict((signal.get("supporting_factors") or {}).get("confirmations") or {})
+    full_confirmation = bool(len(confirmations) >= 3 and all(bool(value) for value in confirmations.values()))
+    confidence = _as_float(signal.get("confidence"), 0.0)
+    strategy_score = _as_float(signal.get("strategy_score"), 0.0)
+    requested_cap = base_cap
+    absolute_cap = min(
+        max(_as_float(os.getenv("PAPER_CONFIDENCE_MAX_POSITION_PERCENT", "20"), 20.0), base_cap),
+        25.0,
+    )
+
+    if full_confirmation and confidence >= 85.0 and strategy_score >= 80.0:
+        requested_cap = min(max(base_cap, 15.0), absolute_cap)
+
+        strategy_id = str(signal.get("strategy_id") or "")
+        validated = next(
+            (
+                dict(row or {})
+                for row in list(strategy_leaderboard or [])
+                if str((row or {}).get("strategy_id") or "") == strategy_id
+                and str((row or {}).get("sample_status") or "").upper() == "READY"
+                and _as_float((row or {}).get("expectancy"), 0.0) > 0.0
+                and _as_float((row or {}).get("profit_factor"), 0.0) >= 1.2
+            ),
+            None,
+        )
+        if validated and confidence >= 92.0 and strategy_score >= 88.0:
+            requested_cap = min(max(requested_cap, 20.0), absolute_cap)
+
+    stop = abs(_as_float(stop_loss_percent, 0.0))
+    risk_limited = (
+        (float(settings.maximum_risk_per_trade_percent) / stop) * 100.0
+        if stop > 0
+        else requested_cap
+    )
+    return round(min(requested_cap, risk_limited), 6)
+
+
 def evaluate_account_pnl_policy(
     account: dict[str, Any] | None,
     *,

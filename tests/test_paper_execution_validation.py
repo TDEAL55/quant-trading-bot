@@ -92,8 +92,16 @@ def _shortlist_runner(scan_payload, positions, cash, portfolio_value):
                 "confidence": 76.0,
                 "suggested_paper_notional": 1000.0,
                 "quantum_score": {"rejection_reasons": []},
-                "strategy_specific_scores": {"trend_momentum_v1": {"strategy_id": "trend_momentum_v1", "strategy_score": 80.0, "eligible": True}},
-                "eligible_strategy_ids": ["trend_momentum_v1"],
+                "strategy_specific_scores": {
+                    "stock_trend_ensemble_v2": {
+                        "strategy_id": "stock_trend_ensemble_v2",
+                        "strategy_version": "2.0.0",
+                        "strategy_score": 80.0,
+                        "confidence": 76.0,
+                        "eligible": True,
+                    }
+                },
+                "eligible_strategy_ids": ["stock_trend_ensemble_v2"],
             }
         ],
         "rejected": [],

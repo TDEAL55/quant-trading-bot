@@ -157,6 +157,60 @@ def test_rank_scan_results_deterministic_tie_breakers():
     assert ranked[0]["symbol"] == "AAA"
 
 
+def test_rank_scan_results_uses_configured_weighted_score_as_primary_order():
+    rows = [
+        {
+            "symbol": "RAW",
+            "eligible": True,
+            "overall_score": 95.0,
+            "confidence": 10.0,
+            "average_dollar_volume": 20_000_000,
+            "component_scores": {"risk_quality": 50.0, "trend": 50.0},
+        },
+        {
+            "symbol": "CONF",
+            "eligible": True,
+            "overall_score": 70.0,
+            "confidence": 90.0,
+            "average_dollar_volume": 20_000_000,
+            "component_scores": {"risk_quality": 50.0, "trend": 50.0},
+        },
+    ]
+
+    ranked = market_scanner.rank_scan_results(
+        rows,
+        weight_overall=0.10,
+        weight_confidence=0.90,
+        weight_risk_quality=0.0,
+        weight_trend=0.0,
+        weight_liquidity=0.0,
+    )
+
+    assert ranked[0]["symbol"] == "CONF"
+    assert ranked[0]["ranking_score"] > ranked[1]["ranking_score"]
+
+
+def test_rank_scan_results_applies_sector_and_extension_penalties():
+    rows = [
+        {
+            "symbol": symbol,
+            "sector": "Technology",
+            "eligible": True,
+            "overall_score": 80.0,
+            "confidence": 70.0,
+            "average_dollar_volume": 40_000_000,
+            "component_scores": {"risk_quality": 60.0, "trend": 70.0},
+            "factors": {"trend": {"raw_values": {"distance_from_ema200_pct": 25.0}}},
+        }
+        for symbol in ("AAA", "BBB", "CCC")
+    ]
+
+    ranked = market_scanner.rank_scan_results(rows)
+
+    assert all(row["diversification_penalty"] == 0.5 for row in ranked)
+    assert all(row["extension_penalty"] == 10.0 for row in ranked)
+
+
 def test_scan_universe_timeout_handling(monkeypatch):
     def _slow_loader(symbol, start, end):
         time.sleep(0.2)

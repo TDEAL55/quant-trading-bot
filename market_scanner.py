@@ -539,6 +539,7 @@ def scan_symbol(
                 "warnings": list(dict.fromkeys(result["warnings"] + list(strategy_result.get("warnings") or []) + list(quantum_score.get("warnings") or []))),
                 "quantum_score": quantum_score,
                 "strategy_specific_scores": strategy_specific_scores,
+                "factors": dict(strategy_result.get("factors") or {}),
                 "score_version": str(quantum_score.get("score_version") or "quantum_v1"),
             }
         )
@@ -638,7 +639,7 @@ def rank_scan_results(
     sector_counts: dict[str, int] = {}
     for item in sorted(eligible, key=lambda value: value.get("symbol", "")):
         sector = str(item.get("sector") or "Unknown")
-        sector_counts.setdefault(sector, 0)
+        sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
     scored: list[dict[str, Any]] = []
     for item in eligible:
@@ -670,12 +671,14 @@ def rank_scan_results(
         item["diversification_penalty"] = round(diversification_penalty, 4)
         scored.append(item)
 
-    scored = rank_scored_candidates(scored)
-
+    tie_break_order = {
+        str(item.get("symbol") or ""): int(item.get("rank") or 9_999_999)
+        for item in rank_scored_candidates(scored)
+    }
     scored.sort(
         key=lambda item: (
-            int(item.get("rank") or 9_999_999),
             -float(item.get("ranking_score") or 0.0),
+            tie_break_order.get(str(item.get("symbol") or ""), 9_999_999),
             str(item.get("symbol") or ""),
         )
     )
