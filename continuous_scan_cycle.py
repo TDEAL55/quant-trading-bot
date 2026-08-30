@@ -51,8 +51,9 @@ from market_data import download_price_data, download_price_data_batch
 from deployment_config import load_deployment_config
 from order_lifecycle import track_order_lifecycle
 from paper_broker import create_paper_broker
+from paper_entry_guard import evaluate_entry_exposure
 from paper_execution_repository import MonitoringPaperExecutionRepository, PaperValidationRunPayload
-from paper_exit_execution import execute_guard_exit
+from paper_exit_execution import execute_guard_exit, load_stock_entry_contexts
 from paper_order_planner import OrderPlannerSettings, plan_paper_orders
 from paper_position_guard import PositionGuardSettings, review_paper_positions
 from paper_reconciliation import reconcile_paper_positions
@@ -684,29 +685,34 @@ def run_continuous_scan_cycle(
 
     position_guard_payload: dict[str, Any] = {"reviews": [], "exit_candidates": [], "summary": {"enabled": False}}
     if bool(getattr(config, "position_guard_enabled", False)):
-        position_guard_payload = review_paper_positions(
-            positions=broker_positions,
-            open_orders=broker_open_orders,
-            settings=PositionGuardSettings(
-                stop_loss_percent=float(getattr(config, "position_guard_stop_loss_percent", 4.0)),
-                take_profit_percent=float(getattr(config, "position_guard_take_profit_percent", 8.0)),
-                max_exits_per_cycle=int(getattr(config, "position_guard_max_exits_per_cycle", 1)),
-            ),
-        )
-        position_guard_payload.setdefault("summary", {})["enabled"] = True
-        _emit_telemetry(
-            telemetry_callback,
-            "paper_position_guard_complete",
-            run_id=cycle_run_id,
-            dry_run=bool(dry_run),
-            **dict(position_guard_payload.get("summary") or {}),
-        )
+        execution_repo = execution_repo_factory(database_url=database_url or getattr(config, "database_url", None))
+        exit_candidates: list[dict[str, Any]] = []
+        try:
+            entry_contexts = load_stock_entry_contexts(broker_positions, execution_repo)
+            position_guard_payload = review_paper_positions(
+                positions=broker_positions,
+                open_orders=broker_open_orders,
+                settings=PositionGuardSettings(
+                    stop_loss_percent=float(getattr(config, "position_guard_stop_loss_percent", 4.0)),
+                    take_profit_percent=float(getattr(config, "position_guard_take_profit_percent", 8.0)),
+                    max_exits_per_cycle=int(getattr(config, "position_guard_max_exits_per_cycle", 1)),
+                ),
+                entry_contexts=entry_contexts,
+                current_timestamp=started_at,
+                trading_mode=str(getattr(config, "trading_mode", "PAPER")),
+            )
+            position_guard_payload.setdefault("summary", {})["enabled"] = True
+            _emit_telemetry(
+                telemetry_callback,
+                "paper_position_guard_complete",
+                run_id=cycle_run_id,
+                dry_run=bool(dry_run),
+                **dict(position_guard_payload.get("summary") or {}),
+            )
 
-        exit_candidates = list(position_guard_payload.get("exit_candidates") or [])
-        if exit_candidates:
-            selected_exit = dict(exit_candidates[0])
-            execution_repo = execution_repo_factory(database_url=database_url or getattr(config, "database_url", None))
-            try:
+            exit_candidates = list(position_guard_payload.get("exit_candidates") or [])
+            if exit_candidates:
+                selected_exit = dict(exit_candidates[0])
                 exit_execution = execute_guard_exit(
                     selected_exit,
                     broker=broker,
@@ -724,9 +730,10 @@ def run_continuous_scan_cycle(
                     reconciliation_tolerance=float(PAPER_VALIDATION_RECONCILIATION_TOLERANCE),
                     persist=bool(persist),
                 )
-            finally:
-                execution_repo.close()
+        finally:
+            execution_repo.close()
 
+        if exit_candidates:
             exit_status = str(exit_execution.get("status") or "failed")
             exit_order = dict(exit_execution.get("paper_order") or {})
             if exit_status == "completed":
@@ -1512,8 +1519,69 @@ def run_continuous_scan_cycle(
             daily_loss_limit=float(DAILY_LOSS_LIMIT),
         )
         trade_value = float(planned_order.get("notional") or 0.0)
+        submission_requested = (not bool(dry_run)) and bool(autonomous_execution_enabled)
         supports_scaling = bool(selected_strategy.get("supports_scaling", False))
-        existing_qty = float((broker_positions.get(selected_symbol) or {}).get("quantity") or 0.0)
+        entry_positions: dict[str, dict[str, Any]] | None = None
+        entry_open_orders: list[dict[str, Any]] | None = None
+        active_entry_reservations: list[dict[str, Any]] | None = None
+        try:
+            refreshed_positions = broker.get_positions()
+            if not isinstance(refreshed_positions, dict):
+                raise RuntimeError("broker positions are unavailable")
+            entry_positions = _as_dict(refreshed_positions)
+            open_orders_loader = getattr(broker, "get_open_orders", None)
+            if callable(open_orders_loader):
+                try:
+                    refreshed_open_orders = open_orders_loader()
+                except Exception:
+                    if submission_requested:
+                        raise
+                    refreshed_open_orders = []
+            elif submission_requested:
+                raise RuntimeError("broker open orders are unavailable")
+            else:
+                refreshed_open_orders = []
+            if not isinstance(refreshed_open_orders, (list, tuple)):
+                raise RuntimeError("broker open orders are unavailable")
+            entry_open_orders = [dict(row or {}) for row in refreshed_open_orders]
+            reservation_loader = getattr(execution_repo, "list_active_entry_reservations", None)
+            if callable(reservation_loader):
+                try:
+                    active_entry_reservations = list(reservation_loader(symbol=selected_symbol) or [])
+                except Exception:
+                    if submission_requested:
+                        raise
+                    active_entry_reservations = []
+            elif submission_requested:
+                raise RuntimeError("entry reservation storage is unavailable")
+            else:
+                # Recommendation-only, dry-run, and execution-disabled paths do
+                # not need a cross-process reservation because they cannot submit.
+                active_entry_reservations = []
+        except Exception:
+            entry_positions = None
+            entry_open_orders = None
+            active_entry_reservations = None
+
+        all_planned_orders = [dict(row or {}) for row in list(planned_orders.get("orders") or [])]
+        same_cycle_orders = all_planned_orders[1:] if len(all_planned_orders) > 1 else []
+        entry_exposure = evaluate_entry_exposure(
+            symbol=selected_symbol,
+            side=planned_side,
+            planned_quantity=float(planned_order.get("quantity") or 0.0),
+            reference_price=float(latest_price),
+            portfolio_equity=float(broker_equity),
+            allowed_position_percent=float(max_position_equity_percent),
+            positions=entry_positions,
+            open_orders=entry_open_orders,
+            reservations=active_entry_reservations,
+            same_cycle_orders=same_cycle_orders,
+        )
+        if entry_positions is not None:
+            broker_positions = entry_positions
+        if entry_open_orders is not None:
+            broker_open_orders = entry_open_orders
+        existing_qty = float(((entry_positions or {}).get(selected_symbol) or {}).get("quantity") or 0.0)
         selected_quantum = dict(selected_candidate.get("quantum_score") or {})
         quantum_rejections = {str(item) for item in list(selected_quantum.get("rejection_reasons") or [])}
         stale_data_ok = "stale_data" not in quantum_rejections
@@ -1532,12 +1600,14 @@ def run_continuous_scan_cycle(
             "loss_streak_cooldown": not bool(pnl_policy.get("loss_streak_cooldown_active")),
             "existing_position": bool(abs(existing_qty) <= 1e-8 or supports_scaling),
             "open_entry_order": not _has_open_entry_order(broker_open_orders, selected_symbol, planned_side),
+            "symbol_concentration": bool(entry_exposure.get("approved")),
             "max_open_positions": bool(_position_count(broker_positions) < int(max_open_positions) or (abs(existing_qty) > 1e-8 and supports_scaling)),
             "stale_data": bool(stale_data_ok),
             "liquidity": bool(liquidity_ok),
             "reward_risk": bool(reward_risk_ok),
             "validation_order_limit": bool((not controlled_validation_mode) or validation_order_limit >= 1),
             "duplicate_protection": True,
+            "entry_reservation": True,
         }
 
         if PAPER_VALIDATION_DUPLICATE_RUN_PROTECTION:
@@ -1549,8 +1619,101 @@ def run_continuous_scan_cycle(
             execution_fingerprint = _execution_fingerprint(selected_symbol, float(planned_order.get("quantity") or 0.0), f"PAPER:{planned_side}")
             existing = None
 
-        if not risk.approve_trade(max(float(broker_equity), 1.0), trade_value, current_loss=0.0) or not all(risk_checks.values()):
-            rejected_status = "duplicate_rejected" if existing is not None and risk_checks.get("duplicate_protection") is False else "risk_rejected"
+        reservation_result: dict[str, Any] = {"acquired": False, "status": "NOT_REQUIRED"}
+        reservation_acquired = False
+        preliminary_risk_approved = bool(
+            risk.approve_trade(max(float(broker_equity), 1.0), trade_value, current_loss=0.0)
+            and all(risk_checks.values())
+        )
+        if preliminary_risk_approved and submission_requested:
+            reservation_acquirer = getattr(execution_repo, "acquire_entry_reservation", None)
+            if not callable(reservation_acquirer):
+                risk_checks["entry_reservation"] = False
+                reservation_result = {"acquired": False, "status": "UNAVAILABLE", "reason": "entry_reservation_unavailable"}
+            else:
+                try:
+                    reservation_result = dict(
+                        reservation_acquirer(
+                            {
+                                "run_id": cycle_run_id,
+                                "symbol": selected_symbol,
+                                "side": planned_side,
+                                "quantity": float(planned_order.get("quantity") or 0.0),
+                                "notional": trade_value,
+                                "reference_price": float(latest_price),
+                                "portfolio_equity": float(broker_equity),
+                                "allowed_position_percent": float(max_position_equity_percent),
+                            },
+                            ttl_seconds=180,
+                        )
+                        or {}
+                    )
+                except Exception as exc:
+                    reservation_result = {
+                        "acquired": False,
+                        "status": "UNAVAILABLE",
+                        "reason": "entry_reservation_unavailable",
+                        "error_type": type(exc).__name__,
+                    }
+                reservation_acquired = bool(reservation_result.get("acquired"))
+                risk_checks["entry_reservation"] = reservation_acquired
+
+            if reservation_acquired:
+                reservation_id = str(reservation_result.get("reservation_id") or "")
+                try:
+                    reserved_positions = broker.get_positions()
+                    reserved_open_orders = getattr(broker, "get_open_orders")()
+                    if not isinstance(reserved_positions, dict) or not isinstance(reserved_open_orders, (list, tuple)):
+                        raise RuntimeError("broker exposure refresh is unavailable")
+                    reservation_loader = getattr(execution_repo, "list_active_entry_reservations")
+                    other_reservations = list(
+                        reservation_loader(
+                            symbol=selected_symbol,
+                            exclude_reservation_id=reservation_id,
+                        )
+                        or []
+                    )
+                    entry_exposure = evaluate_entry_exposure(
+                        symbol=selected_symbol,
+                        side=planned_side,
+                        planned_quantity=float(planned_order.get("quantity") or 0.0),
+                        reference_price=float(latest_price),
+                        portfolio_equity=float(broker_equity),
+                        allowed_position_percent=float(max_position_equity_percent),
+                        positions=_as_dict(reserved_positions),
+                        open_orders=[dict(row or {}) for row in reserved_open_orders],
+                        reservations=other_reservations,
+                        same_cycle_orders=same_cycle_orders,
+                        exclude_reservation_id=reservation_id,
+                    )
+                    broker_positions = _as_dict(reserved_positions)
+                    broker_open_orders = [dict(row or {}) for row in reserved_open_orders]
+                except Exception:
+                    entry_exposure = {
+                        "approved": False,
+                        "reason": "exposure_data_unavailable",
+                        "checks": {"exposure_data_available": False},
+                    }
+                risk_checks["symbol_concentration"] = bool(entry_exposure.get("approved"))
+                if not risk_checks["symbol_concentration"]:
+                    releaser = getattr(execution_repo, "release_entry_reservation", None)
+                    if callable(releaser):
+                        try:
+                            releaser(reservation_id, outcome=str(entry_exposure.get("reason") or "exposure_refresh_rejected"))
+                        except Exception:
+                            pass
+                    reservation_acquired = False
+
+        if not preliminary_risk_approved or not all(risk_checks.values()):
+            reservation_conflict = str(reservation_result.get("reason") or "") == "active_symbol_reservation"
+            exposure_reason = str(entry_exposure.get("reason") or "")
+            rejected_status = (
+                "duplicate_rejected"
+                if (existing is not None and risk_checks.get("duplicate_protection") is False)
+                or reservation_conflict
+                or exposure_reason == "duplicate_entry_pending"
+                else "risk_rejected"
+            )
             _emit_notification(
                 notification_callback,
                 event_type="risk_limit_triggered",
@@ -1603,10 +1766,16 @@ def run_continuous_scan_cycle(
                     },
                     "risk_result": {
                         "approved": False,
-                        "reason": str(pnl_policy.get("reason") or rejected_status) if bool(pnl_policy.get("block_new_entries")) else rejected_status,
+                        "reason": (
+                            str(pnl_policy.get("reason") or rejected_status)
+                            if bool(pnl_policy.get("block_new_entries"))
+                            else str(reservation_result.get("reason") or exposure_reason or rejected_status)
+                        ),
                         "checks": risk_checks,
                         "pnl_policy": pnl_policy,
                         "duplicate_run": existing,
+                        "entry_exposure": entry_exposure,
+                        "entry_reservation": reservation_result,
                     },
                     "reconciliation": {},
                 },
@@ -1622,7 +1791,6 @@ def run_continuous_scan_cycle(
 
         broker_pre_positions = dict(broker_positions)
         broker_pre_cash = float(broker_cash)
-        submission_requested = (not bool(dry_run)) and bool(autonomous_execution_enabled)
 
         if not submission_requested:
             skip_reason = "dry_run_mode" if bool(dry_run) else "paper_execution_disabled"
@@ -1776,6 +1944,24 @@ def run_continuous_scan_cycle(
         final_status = str(lifecycle.get("final_status") or final_order.get("status") or "unknown").lower()
         rejected_statuses = {"rejected", "failed", "expired", "submission_blocked_by_config"}
         cancelled_statuses = {"canceled", "cancelled"}
+        if reservation_acquired:
+            reservation_finalizer = getattr(execution_repo, "finalize_entry_reservation", None)
+            if callable(reservation_finalizer):
+                try:
+                    reservation_result["finalization"] = reservation_finalizer(
+                        str(reservation_result.get("reservation_id") or ""),
+                        outcome=f"broker_{final_status}",
+                        status="FINALIZED" if accepted_by_broker else "FAILED",
+                    )
+                    reservation_acquired = False
+                except Exception as exc:
+                    # The ACTIVE reservation retains its TTL and therefore still
+                    # fails safe if persistence is temporarily unavailable.
+                    reservation_result["finalization"] = {
+                        "updated": False,
+                        "status": "ACTIVE_UNTIL_TTL",
+                        "error_type": type(exc).__name__,
+                    }
         if final_status == "filled":
             _emit_notification(
                 notification_callback,
@@ -2198,6 +2384,8 @@ def run_continuous_scan_cycle(
                     "checks": risk_checks,
                     "pnl_policy": pnl_policy,
                     "strategy_allocations": allocations,
+                    "entry_exposure": entry_exposure,
+                    "entry_reservation": reservation_result,
                 },
                 "reconciliation": reconciliation,
                 "execution_fingerprint": execution_fingerprint,

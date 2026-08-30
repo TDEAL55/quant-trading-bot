@@ -21,6 +21,7 @@ class _Broker:
         self.mode = mode
         self._positions = {}
         self._buying_power = 5000.0
+        self._open_orders = []
         self.submissions = []
 
     def get_positions(self):
@@ -28,6 +29,9 @@ class _Broker:
 
     def get_buying_power(self):
         return self._buying_power
+
+    def get_open_orders(self):
+        return list(self._open_orders)
 
     def submit_order(self, side, ticker, quantity, **kwargs):
         self.submissions.append((side, ticker, quantity))
@@ -45,6 +49,7 @@ class _Repo:
         self.closed = False
         self.saved = None
         self._existing = None
+        self._reservation = None
 
     def fetch_latest_submitting_run_by_execution_fingerprint(self, execution_fingerprint):
         return self._existing
@@ -52,6 +57,42 @@ class _Repo:
     def save_validation_run(self, payload):
         self.saved = payload
         return {"run_id": payload.run.get("run_id")}
+
+    def list_active_entry_reservations(self, symbol=None, exclude_reservation_id=None):
+        row = dict(self._reservation or {})
+        if not row or str(row.get("status") or "") != "ACTIVE":
+            return []
+        if symbol and str(row.get("symbol") or "") != str(symbol):
+            return []
+        if exclude_reservation_id and str(row.get("reservation_id") or "") == str(exclude_reservation_id):
+            return []
+        return [row]
+
+    def acquire_entry_reservation(self, payload, ttl_seconds=180):
+        del ttl_seconds
+        if self._reservation and self._reservation.get("status") == "ACTIVE":
+            return {
+                "acquired": False,
+                "status": "CONFLICT",
+                "reason": "active_symbol_reservation",
+                "conflict": dict(self._reservation),
+            }
+        self._reservation = {
+            **dict(payload),
+            "reservation_id": f"res-{payload['run_id']}",
+            "status": "ACTIVE",
+        }
+        return {"acquired": True, **dict(self._reservation)}
+
+    def release_entry_reservation(self, reservation_id, outcome="released_before_submission"):
+        if self._reservation and self._reservation.get("reservation_id") == reservation_id:
+            self._reservation.update({"status": "RELEASED", "outcome": outcome})
+        return {"reservation_id": reservation_id, "status": "RELEASED", "updated": True}
+
+    def finalize_entry_reservation(self, reservation_id, outcome, status="FINALIZED"):
+        if self._reservation and self._reservation.get("reservation_id") == reservation_id:
+            self._reservation.update({"status": status, "outcome": outcome})
+        return {"reservation_id": reservation_id, "status": status, "updated": True}
 
     def close(self):
         self.closed = True
@@ -383,13 +424,33 @@ def test_position_guard_exit_takes_precedence_over_new_entry_scan(monkeypatch):
         positions={"JPM": {"quantity": 2.0, "avg_price": 100.0}},
     )
 
+    class _GuardRepo(_Repo):
+        def fetch_latest_filled_entry(self, symbol, side):
+            if side != "BUY":
+                return None
+            return {
+                "symbol": symbol,
+                "side": side,
+                "filled_quantity": 2.0,
+                "average_fill_price": 100.0,
+                "filled_at": "2026-07-21T14:00:00+00:00",
+                "strategy_id": "trend_momentum_v1",
+                "strategy_version": "v1",
+                "order_payload": {
+                    "source": "continuous_scan_cycle",
+                    "strategy": {"strategy_id": "trend_momentum_v1"},
+                },
+            }
+
+    repo = _GuardRepo()
+
     result = run_continuous_scan_cycle(
         database_url="sqlite:///unused.db",
         config_loader=lambda: _GuardConfig(),
         now_provider=lambda: datetime(2026, 7, 22, 10, 5, tzinfo=timezone.utc),
         broker_factory=lambda **kwargs: broker,
         scan_runner=lambda universe: pytest.fail("scanner must not run before a required risk exit"),
-        execution_repo_factory=lambda **kwargs: _Repo(),
+        execution_repo_factory=lambda **kwargs: repo,
         positions_loader=_positions_loader,
         universe_loader=_universe_loader,
         persist=False,
@@ -445,6 +506,121 @@ def test_continuous_scan_cycle_enforces_duplicate_protection():
     assert result.confirmed_order_count == 0
     assert broker.submissions == []
     assert repo.saved is None
+
+
+def test_continuous_scan_cycle_blocks_pending_broker_entry_before_submission(monkeypatch):
+    monkeypatch.setattr("continuous_scan_cycle.PAPER_EXECUTION_ENABLED", True)
+    monkeypatch.setattr("continuous_scan_cycle.CONTROLLED_PAPER_VALIDATION", False)
+    broker = _Broker()
+    broker._open_orders = [
+        {
+            "symbol": "AAA",
+            "side": "buy",
+            "status": "accepted",
+            "requested_quantity": 2.0,
+            "filled_quantity": 0.0,
+        }
+    ]
+
+    result = run_continuous_scan_cycle(
+        database_url="sqlite:///unused.db",
+        config_loader=_config_loader,
+        now_provider=lambda: datetime(2026, 7, 22, 10, 10, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=lambda universe: _scan_payload(),
+        shortlist_runner=lambda *args, **kwargs: {
+            "selected": [{"rank": 1, "symbol": "AAA", "score": 82.0, "confidence": 76.0, "suggested_paper_notional": 500.0}],
+            "rejected": [],
+            "portfolio_warnings": [],
+            "selection_summary": {"selected_count": 1},
+        },
+        scan_persistor=lambda **kwargs: {"storage": "database", "run_id": kwargs["run_payload"]["run_id"]},
+        execution_repo_factory=lambda **kwargs: _Repo(),
+        positions_loader=_positions_loader,
+        universe_loader=_universe_loader,
+        persist=True,
+    )
+
+    assert result.execution_status == "duplicate_rejected"
+    assert result.execution["risk_result"]["reason"] == "duplicate_entry_pending"
+    assert result.execution["risk_result"]["entry_exposure"]["pending_entry_quantity"] == 2.0
+    assert broker.submissions == []
+
+
+def test_continuous_scan_cycle_atomic_reservation_conflict_blocks_overlap(monkeypatch):
+    monkeypatch.setattr("continuous_scan_cycle.PAPER_EXECUTION_ENABLED", True)
+    monkeypatch.setattr("continuous_scan_cycle.CONTROLLED_PAPER_VALIDATION", False)
+
+    class _RacingRepo(_Repo):
+        def list_active_entry_reservations(self, symbol=None, exclude_reservation_id=None):
+            return []
+
+        def acquire_entry_reservation(self, payload, ttl_seconds=180):
+            return {
+                "acquired": False,
+                "status": "CONFLICT",
+                "reason": "active_symbol_reservation",
+                "conflict": {"run_id": "simultaneous-cycle", "symbol": payload["symbol"]},
+            }
+
+    broker = _Broker()
+    result = run_continuous_scan_cycle(
+        database_url="sqlite:///unused.db",
+        config_loader=_config_loader,
+        now_provider=lambda: datetime(2026, 7, 22, 10, 10, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=lambda universe: _scan_payload(),
+        shortlist_runner=lambda *args, **kwargs: {
+            "selected": [{"rank": 1, "symbol": "AAA", "score": 82.0, "confidence": 76.0, "suggested_paper_notional": 500.0}],
+            "rejected": [],
+            "portfolio_warnings": [],
+            "selection_summary": {"selected_count": 1},
+        },
+        scan_persistor=lambda **kwargs: {"storage": "database", "run_id": kwargs["run_payload"]["run_id"]},
+        execution_repo_factory=lambda **kwargs: _RacingRepo(),
+        positions_loader=_positions_loader,
+        universe_loader=_universe_loader,
+        persist=True,
+    )
+
+    assert result.execution_status == "duplicate_rejected"
+    assert result.execution["risk_result"]["reason"] == "active_symbol_reservation"
+    assert result.execution["risk_result"]["checks"]["entry_reservation"] is False
+    assert broker.submissions == []
+
+
+def test_continuous_scan_cycle_fails_closed_when_open_order_snapshot_unavailable(monkeypatch):
+    monkeypatch.setattr("continuous_scan_cycle.PAPER_EXECUTION_ENABLED", True)
+    monkeypatch.setattr("continuous_scan_cycle.CONTROLLED_PAPER_VALIDATION", False)
+
+    class _UnavailableExposureBroker(_Broker):
+        def get_open_orders(self):
+            raise RuntimeError("temporary broker read failure")
+
+    broker = _UnavailableExposureBroker()
+    result = run_continuous_scan_cycle(
+        database_url="sqlite:///unused.db",
+        config_loader=_config_loader,
+        now_provider=lambda: datetime(2026, 7, 22, 10, 10, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=lambda universe: _scan_payload(),
+        shortlist_runner=lambda *args, **kwargs: {
+            "selected": [{"rank": 1, "symbol": "AAA", "score": 82.0, "confidence": 76.0, "suggested_paper_notional": 500.0}],
+            "rejected": [],
+            "portfolio_warnings": [],
+            "selection_summary": {"selected_count": 1},
+        },
+        scan_persistor=lambda **kwargs: {"storage": "database", "run_id": kwargs["run_payload"]["run_id"]},
+        execution_repo_factory=lambda **kwargs: _Repo(),
+        positions_loader=_positions_loader,
+        universe_loader=_universe_loader,
+        persist=True,
+    )
+
+    assert result.execution_status == "risk_rejected"
+    assert result.execution["risk_result"]["reason"] == "exposure_data_unavailable"
+    assert result.execution["risk_result"]["checks"]["symbol_concentration"] is False
+    assert broker.submissions == []
 
 
 def test_continuous_scan_cycle_blocks_stock_entry_at_daily_loss_stop(monkeypatch):
@@ -543,6 +719,51 @@ def test_continuous_scan_cycle_dry_run_never_submits_orders():
     assert result.execution_status == "completed"
     assert broker.submissions == []
     assert result.execution["paper_order"]["submission_status"] == "accepted"
+
+
+def test_execution_disabled_recommendation_does_not_require_reservation_storage(monkeypatch):
+    monkeypatch.setattr("continuous_scan_cycle.PAPER_EXECUTION_ENABLED", False)
+
+    class _RecommendationOnlyRepo:
+        def __init__(self):
+            self.db = type("_Db", (), {"enabled": True})()
+            self.saved = None
+
+        def fetch_latest_submitting_run_by_execution_fingerprint(self, execution_fingerprint):
+            return None
+
+        def save_validation_run(self, payload):
+            self.saved = payload
+            return {"run_id": payload.run.get("run_id")}
+
+        def close(self):
+            return None
+
+    broker = _Broker()
+    repo = _RecommendationOnlyRepo()
+    result = run_continuous_scan_cycle(
+        database_url="sqlite:///unused.db",
+        config_loader=_config_loader,
+        now_provider=lambda: datetime(2026, 7, 22, 10, 10, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=lambda universe: _scan_payload(),
+        shortlist_runner=lambda *args, **kwargs: {
+            "selected": [{"rank": 1, "symbol": "AAA", "score": 82.0, "confidence": 76.0, "suggested_paper_notional": 500.0}],
+            "rejected": [],
+            "portfolio_warnings": [],
+            "selection_summary": {"selected_count": 1},
+        },
+        scan_persistor=lambda **kwargs: {"storage": "database", "run_id": kwargs["run_payload"]["run_id"]},
+        execution_repo_factory=lambda **kwargs: repo,
+        positions_loader=_positions_loader,
+        universe_loader=_universe_loader,
+        persist=True,
+    )
+
+    assert result.execution_status == "completed"
+    assert result.execution["risk_result"]["entry_exposure"]["approved"] is True
+    assert result.execution["risk_result"]["entry_reservation"]["status"] == "NOT_REQUIRED"
+    assert broker.submissions == []
 
 
 def test_continuous_scan_cycle_uses_broker_positions_as_source_of_truth():

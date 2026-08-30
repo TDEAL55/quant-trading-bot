@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from monitoring_db import MonitoringDatabase
@@ -333,6 +333,223 @@ class MonitoringPaperExecutionRepository:
             (str(execution_fingerprint),),
         )
         return self._normalize_run(row)
+
+    def list_active_entry_reservations(
+        self,
+        symbol: str | None = None,
+        *,
+        exclude_reservation_id: str | None = None,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return live PAPER entry reservations after expiring stale rows."""
+        if not self.db.enabled:
+            raise RuntimeError("Database is not enabled for paper entry reservations")
+        self.db.ensure_schema()
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        now_iso = current.astimezone(timezone.utc).isoformat()
+        self.db.execute(
+            """
+            UPDATE paper_entry_reservations
+            SET status = 'EXPIRED', outcome = 'reservation_ttl_expired',
+                released_at = ?, updated_at = ?
+            WHERE status = 'ACTIVE' AND expires_at <= ?
+            """,
+            (now_iso, now_iso, now_iso),
+        )
+        clauses = ["status = 'ACTIVE'"]
+        params: list[Any] = []
+        normalized_symbol = str(symbol or "").strip().upper()
+        if normalized_symbol:
+            clauses.append("symbol = ?")
+            params.append(normalized_symbol)
+        if exclude_reservation_id:
+            clauses.append("reservation_id <> ?")
+            params.append(str(exclude_reservation_id))
+        return self.db.query_all(
+            f"SELECT * FROM paper_entry_reservations WHERE {' AND '.join(clauses)} ORDER BY created_at ASC",
+            tuple(params),
+        )
+
+    def acquire_entry_reservation(
+        self,
+        reservation: dict[str, Any],
+        *,
+        ttl_seconds: int = 180,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Atomically reserve one symbol across runner processes.
+
+        The partial unique index permits only one ACTIVE reservation per stock
+        symbol. Expiry prevents a crashed process from blocking that symbol
+        indefinitely.
+        """
+        if not self.db.enabled:
+            raise RuntimeError("Database is not enabled for paper entry reservations")
+        self.db.ensure_schema()
+        payload = dict(reservation or {})
+        symbol = str(payload.get("symbol") or "").strip().upper()
+        side = str(payload.get("side") or "").strip().upper()
+        quantity = float(payload.get("quantity") or 0.0)
+        notional = float(payload.get("notional") or 0.0)
+        reference_price = float(payload.get("reference_price") or 0.0)
+        portfolio_equity = float(payload.get("portfolio_equity") or 0.0)
+        allowed_percent = float(payload.get("allowed_position_percent") or 0.0)
+        run_id = str(payload.get("run_id") or "").strip()
+        if (
+            not symbol
+            or side not in {"BUY", "SELL"}
+            or quantity <= 0.0
+            or notional <= 0.0
+            or reference_price <= 0.0
+            or portfolio_equity <= 0.0
+            or not 0.0 < allowed_percent <= 25.0
+            or not run_id
+        ):
+            raise ValueError("valid run, symbol, side, quantity, exposure, equity, and allowed percent are required")
+
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        current = current.astimezone(timezone.utc)
+        now_iso = current.isoformat()
+        expires_at = (current + timedelta(seconds=max(1, min(int(ttl_seconds), 3600)))).isoformat()
+        reservation_id = str(payload.get("reservation_id") or uuid.uuid4())
+
+        conn = self.db.conn
+        acquired = False
+        with conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    self._adapt_query(
+                        """
+                        UPDATE paper_entry_reservations
+                        SET status = 'EXPIRED', outcome = 'reservation_ttl_expired',
+                            released_at = ?, updated_at = ?
+                        WHERE status = 'ACTIVE' AND expires_at <= ?
+                        """
+                    ),
+                    (now_iso, now_iso, now_iso),
+                )
+                cursor.execute(
+                    self._adapt_query(
+                        """
+                        INSERT INTO paper_entry_reservations (
+                            reservation_id, run_id, symbol, side, quantity, notional,
+                            reference_price, portfolio_equity, allowed_position_percent,
+                            status, outcome, created_at, expires_at, released_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', NULL, ?, ?, NULL, ?)
+                        ON CONFLICT DO NOTHING
+                        """
+                    ),
+                    (
+                        reservation_id,
+                        run_id,
+                        symbol,
+                        side,
+                        quantity,
+                        notional,
+                        reference_price,
+                        portfolio_equity,
+                        allowed_percent,
+                        now_iso,
+                        expires_at,
+                        now_iso,
+                    ),
+                )
+                acquired = int(cursor.rowcount or 0) == 1
+            finally:
+                cursor.close()
+
+        if acquired:
+            return {
+                "acquired": True,
+                "reservation_id": reservation_id,
+                "run_id": run_id,
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "notional": notional,
+                "reference_price": reference_price,
+                "portfolio_equity": portfolio_equity,
+                "allowed_position_percent": allowed_percent,
+                "status": "ACTIVE",
+                "created_at": now_iso,
+                "expires_at": expires_at,
+            }
+        conflict = self.db.query_one(
+            "SELECT * FROM paper_entry_reservations WHERE symbol = ? AND status = 'ACTIVE' ORDER BY created_at ASC LIMIT 1",
+            (symbol,),
+        )
+        return {
+            "acquired": False,
+            "reservation_id": reservation_id,
+            "symbol": symbol,
+            "side": side,
+            "status": "CONFLICT",
+            "reason": "active_symbol_reservation",
+            "conflict": dict(conflict or {}),
+        }
+
+    def finalize_entry_reservation(
+        self,
+        reservation_id: str,
+        *,
+        outcome: str,
+        status: str = "FINALIZED",
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if not self.db.enabled:
+            raise RuntimeError("Database is not enabled for paper entry reservations")
+        self.db.ensure_schema()
+        normalized_status = str(status or "FINALIZED").strip().upper()
+        if normalized_status not in {"FINALIZED", "RELEASED", "FAILED", "EXPIRED"}:
+            raise ValueError("reservation final status is invalid")
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        now_iso = current.astimezone(timezone.utc).isoformat()
+        conn = self.db.conn
+        updated = False
+        with conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    self._adapt_query(
+                        """
+                        UPDATE paper_entry_reservations
+                        SET status = ?, outcome = ?, released_at = ?, updated_at = ?
+                        WHERE reservation_id = ? AND status = 'ACTIVE'
+                        """
+                    ),
+                    (normalized_status, str(outcome or ""), now_iso, now_iso, str(reservation_id)),
+                )
+                updated = int(cursor.rowcount or 0) == 1
+            finally:
+                cursor.close()
+        return {
+            "reservation_id": str(reservation_id),
+            "status": normalized_status,
+            "outcome": str(outcome or ""),
+            "updated": updated,
+            "released_at": now_iso,
+        }
+
+    def release_entry_reservation(
+        self,
+        reservation_id: str,
+        *,
+        outcome: str = "released_before_submission",
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        return self.finalize_entry_reservation(
+            reservation_id,
+            outcome=outcome,
+            status="RELEASED",
+            now=now,
+        )
 
     def fetch_run_by_fingerprint(self, run_fingerprint: str) -> dict[str, Any] | None:
         if not self.db.enabled:

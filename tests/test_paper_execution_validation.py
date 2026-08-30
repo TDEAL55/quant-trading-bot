@@ -26,6 +26,9 @@ class _Broker:
     def get_buying_power(self):
         return self._buying_power
 
+    def get_open_orders(self):
+        return []
+
     def submit_order(self, side, ticker, quantity, **kwargs):
         self.submissions.append((side, ticker, quantity, dict(kwargs)))
         qty = float(quantity)
@@ -46,12 +49,44 @@ class _Repo:
     def __init__(self, database_url=None):
         self.database_url = database_url
         self.db = type("_Db", (), {"enabled": True})()
+        self._reservation = None
 
     def fetch_latest_submitting_run_by_execution_fingerprint(self, execution_fingerprint):
         return None
 
     def save_validation_run(self, payload):
         return {"run_id": payload.run.get("run_id")}
+
+    def list_active_entry_reservations(self, symbol=None, exclude_reservation_id=None):
+        row = dict(self._reservation or {})
+        if not row or row.get("status") != "ACTIVE":
+            return []
+        if symbol and row.get("symbol") != symbol:
+            return []
+        if exclude_reservation_id and row.get("reservation_id") == exclude_reservation_id:
+            return []
+        return [row]
+
+    def acquire_entry_reservation(self, payload, ttl_seconds=180):
+        del ttl_seconds
+        if self._reservation and self._reservation.get("status") == "ACTIVE":
+            return {"acquired": False, "reason": "active_symbol_reservation", "status": "CONFLICT"}
+        self._reservation = {
+            **dict(payload),
+            "reservation_id": f"reservation-{payload['run_id']}",
+            "status": "ACTIVE",
+        }
+        return {"acquired": True, **dict(self._reservation)}
+
+    def release_entry_reservation(self, reservation_id, outcome="released_before_submission"):
+        if self._reservation and self._reservation.get("reservation_id") == reservation_id:
+            self._reservation.update({"status": "RELEASED", "outcome": outcome})
+        return {"reservation_id": reservation_id, "status": "RELEASED", "updated": True}
+
+    def finalize_entry_reservation(self, reservation_id, outcome, status="FINALIZED"):
+        if self._reservation and self._reservation.get("reservation_id") == reservation_id:
+            self._reservation.update({"status": status, "outcome": outcome})
+        return {"reservation_id": reservation_id, "status": status, "updated": True}
 
     def close(self):
         return None

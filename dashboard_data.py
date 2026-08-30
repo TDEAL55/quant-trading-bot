@@ -22,6 +22,7 @@ from quantum_score_data import fetch_quantum_score_dashboard_payload
 from research_data import fetch_research_dashboard_payload
 from scanner_data import fetch_scan_rejection_reasons, fetch_scanner_sector_distribution, fetch_top_ranked_stocks
 from self_improving_data import fetch_self_improving_dashboard_payload
+from stock_pnl_reconstruction import is_bot_stock_order, reconstruct_stock_realized_pnl, realized_events_by_exit_order_id
 from strategy_lab_data import fetch_strategy_lab_dashboard_payload
 from walk_forward_data import fetch_walk_forward_dashboard_payload
 
@@ -73,6 +74,8 @@ def _broker_order_to_dashboard_event(order: dict[str, Any], closed_trade: dict[s
         "stop_reason": str(order.get("rejection_reason") or ""),
         "realized_profit_loss": float(trade.get("net_pnl")) if trade.get("net_pnl") is not None else None,
         "realized_return_percentage": float(trade.get("percentage_return")) if trade.get("percentage_return") is not None else None,
+        "realized_pl_exact": bool(trade.get("is_exact")) if trade.get("is_exact") is not None else None,
+        "realized_pl_source": str(trade.get("source") or ""),
         "closed_trade": bool(trade),
         "source": "alpaca_paper_broker",
     }
@@ -82,7 +85,11 @@ def _summarize_bot_closed_orders(orders: list[dict[str, Any]]) -> dict[str, Any]
     return summarize_closed_trade_records(build_closed_trade_records(orders))
 
 
-def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dict[str, Any]:
+def _fetch_paper_account_snapshot(
+    paper_broker_factory=AlpacaPaperBroker,
+    *,
+    strategy_by_order_id: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     broker = paper_broker_factory(mode="PAPER")
     account = broker.get_account()
     positions_by_symbol = broker.get_positions()
@@ -90,6 +97,12 @@ def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dic
     broker_orders = list(getattr(broker, "get_order_history", lambda limit=50: [])(limit=500) or [])
     closed_records = build_closed_trade_records(broker_orders)
     closed_summary = summarize_closed_trade_records(closed_records)
+    stock_pnl_reconstruction = reconstruct_stock_realized_pnl(
+        broker_orders,
+        bot_orders_only=True,
+        history_limit=500,
+        strategy_by_order_id=strategy_by_order_id,
+    )
     try:
         market_clock = dict(getattr(broker, "get_market_clock", lambda: {})() or {})
     except Exception:
@@ -111,15 +124,40 @@ def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dic
         str(record.get("trade_id") or "").removeprefix("alpaca-").removesuffix("-closed"): record
         for record in closed_records
     }
+    reconstructed_stock_by_order_id = realized_events_by_exit_order_id(stock_pnl_reconstruction)
+    stock_reconstruction_exact = bool(stock_pnl_reconstruction.get("is_exact"))
+
+    def _closed_trade_for_order(order: dict[str, Any]) -> dict[str, Any] | None:
+        order_id = str(order.get("order_id") or order.get("client_order_id") or "")
+        client_order_id = str(order.get("client_order_id") or "")
+        reconstructed = reconstructed_stock_by_order_id.get(order_id) or reconstructed_stock_by_order_id.get(client_order_id)
+        if is_bot_stock_order(order):
+            # Never display an incomplete reconstructed subtotal as locked-in,
+            # exact P/L. The diagnostic payload still explains what is missing.
+            if not stock_reconstruction_exact or reconstructed is None:
+                return None
+            return {
+                "net_pnl": reconstructed.get("realized_pnl"),
+                "percentage_return": reconstructed.get("percentage_return"),
+                "is_exact": True,
+                "source": stock_pnl_reconstruction.get("source"),
+            }
+        return closed_by_order_id.get(order_id)
+
     recent_orders = [
         _broker_order_to_dashboard_event(
             order,
-            closed_by_order_id.get(str(order.get("order_id") or order.get("client_order_id") or "")),
+            _closed_trade_for_order(order),
         )
         for order in broker_orders[:120]
     ]
     equity = float(account.get("equity") or account.get("portfolio_value") or 0.0)
     last_equity = float(account.get("last_equity") or equity)
+    exact_stock_closed_count = (
+        int(stock_pnl_reconstruction.get("closed_trade_count") or 0)
+        if stock_reconstruction_exact
+        else 0
+    )
     return {
         "snapshot_timestamp": datetime.now(timezone.utc).isoformat(),
         "account_status": account.get("status", "unknown"),
@@ -131,9 +169,17 @@ def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dic
         "buying_power": account.get("buying_power", 0.0),
         "open_positions": len(positions),
         "unrealized_paper_pl": sum(float(item.get("unrealized_pl") or 0.0) for item in positions),
-        "realized_paper_pl": closed_summary["realized_paper_pl"] if closed_summary["closed_trade_count"] else None,
-        "closed_trade_count": closed_summary["closed_trade_count"],
-        "closed_trade_source": closed_summary["source"],
+        "realized_paper_pl": (
+            float(stock_pnl_reconstruction.get("realized_stock_pnl") or 0.0)
+            if exact_stock_closed_count
+            else None
+        ),
+        "closed_trade_count": exact_stock_closed_count,
+        "closed_trade_source": (
+            stock_pnl_reconstruction.get("source")
+            if stock_reconstruction_exact
+            else "broker_stock_reconstruction_incomplete_use_durable_ledger"
+        ),
         "pending_orders": len(open_orders),
         "positions": positions,
         "short_positions": sum(1 for item in positions if float(item.get("quantity") or 0.0) < 0),
@@ -141,6 +187,7 @@ def _fetch_paper_account_snapshot(paper_broker_factory=AlpacaPaperBroker) -> dic
         "recent_orders": recent_orders,
         "market_clock": market_clock,
         "market_open": market_clock.get("is_open") if "is_open" in market_clock else None,
+        "stock_pnl_reconstruction": stock_pnl_reconstruction,
         "source": "alpaca_paper_read_only",
     }
 
@@ -337,6 +384,75 @@ def _attach_recorded_closed_trade_pl(
         account["closed_trade_source"] = "strategy_closed_trades"
         account["realized_paper_pl"] = float(closed.get("net_pnl") or 0.0)
     return account
+
+
+def _fetch_stock_order_strategy_metadata(db: MonitoringDatabase) -> dict[str, dict[str, Any]]:
+    """Read strategy attribution for broker orders without changing persistence."""
+    try:
+        rows = db.query_all(
+            """
+            SELECT
+                o.broker_order_id,
+                o.client_order_id,
+                r.strategy_id,
+                r.strategy_version
+            FROM paper_orders o
+            JOIN paper_validation_runs r ON r.run_id = o.run_id
+            WHERE COALESCE(o.broker_order_id, o.client_order_id, '') <> ''
+            ORDER BY COALESCE(o.filled_at, o.broker_updated_at, o.updated_at, o.created_at) DESC
+            LIMIT 5000
+            """
+        ) or []
+    except Exception:
+        return {}
+    metadata: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        item = {
+            "strategy_id": str((row or {}).get("strategy_id") or "").strip(),
+            "strategy_version": str((row or {}).get("strategy_version") or "").strip(),
+        }
+        for key in ("broker_order_id", "client_order_id"):
+            order_id = str((row or {}).get(key) or "").strip()
+            if order_id:
+                metadata[order_id] = item
+    return metadata
+
+
+def _apply_exact_stock_pnl_reconstruction(
+    paper_tuning: dict[str, Any],
+    reconstruction: dict[str, Any],
+) -> dict[str, Any]:
+    """Prefer a proven broker-fill stock total in memory; never mutate the DB."""
+    tuning = dict(paper_tuning or {})
+    diagnostic = dict(reconstruction or {})
+    realized_events = list(diagnostic.get("realized_events") or [])
+    credible = bool(
+        diagnostic.get("is_exact")
+        and diagnostic.get("confidence") == "exact"
+        and int(diagnostic.get("closed_trade_count") or 0) > 0
+        and int(diagnostic.get("valid_stock_fill_count") or 0) > 0
+        and len(realized_events) == int(diagnostic.get("closed_trade_count") or 0)
+    )
+    tuning["stock_pnl_reconstruction_used"] = credible
+    tuning["stock_pnl_reconstruction_confidence"] = str(diagnostic.get("confidence") or "unavailable")
+    if not credible:
+        return tuning
+
+    by_asset = {
+        key: dict(value or {})
+        for key, value in dict(tuning.get("closed_trades_by_asset") or {}).items()
+    }
+    by_asset.setdefault("crypto", {"closed_trades": 0, "net_pnl": 0.0})
+    by_asset.setdefault("options", {"closed_trades": 0, "net_pnl": 0.0})
+    by_asset["stocks"] = {
+        "closed_trades": int(diagnostic.get("closed_trade_count") or 0),
+        "net_pnl": float(diagnostic.get("realized_stock_pnl") or 0.0),
+        "source": str(diagnostic.get("source") or "alpaca_actual_filled_stock_orders"),
+        "confidence": "exact",
+        "read_only_reconstruction": True,
+    }
+    tuning["closed_trades_by_asset"] = by_asset
+    return tuning
 
 
 def fetch_dashboard_payload(
@@ -542,6 +658,7 @@ def fetch_dashboard_payload(
         "paper_tuning": {},
         "crypto": {},
         "options": {},
+        "stock_pnl_reconstruction": {},
         "research": research_payload,
     }
     if not db.enabled:
@@ -562,9 +679,13 @@ def fetch_dashboard_payload(
         and str(os.getenv("TRADING_MODE", "PAPER")).strip().upper() == "PAPER"
     ):
         try:
-            broker_snapshot = _fetch_paper_account_snapshot(paper_broker_factory)
+            broker_snapshot = _fetch_paper_account_snapshot(
+                paper_broker_factory,
+                strategy_by_order_id=_fetch_stock_order_strategy_metadata(db),
+            )
             payload["latest_account"] = broker_snapshot
             payload["recent_orders"] = list(broker_snapshot.get("recent_orders") or [])
+            payload["stock_pnl_reconstruction"] = dict(broker_snapshot.get("stock_pnl_reconstruction") or {})
         except Exception as exc:
             payload["broker_sync_error"] = type(exc).__name__
     payload["recent_runs"] = db.fetch_recent_runs(limit=80)
@@ -578,6 +699,10 @@ def fetch_dashboard_payload(
     payload["scanner_rejections"] = fetch_scan_rejection_reasons(database_url, limit=50, database_factory=MonitoringDatabase)
     payload["scanner_sector_distribution"] = fetch_scanner_sector_distribution(database_url, database_factory=MonitoringDatabase)
     payload["paper_tuning"] = _fetch_paper_tuning_snapshot(db)
+    payload["paper_tuning"] = _apply_exact_stock_pnl_reconstruction(
+        payload["paper_tuning"],
+        payload["stock_pnl_reconstruction"],
+    )
     payload["latest_account"] = _attach_recorded_closed_trade_pl(
         payload["latest_account"],
         payload["paper_tuning"],
@@ -640,5 +765,6 @@ def fetch_dashboard_payload(
         "paper_tuning": payload["paper_tuning"],
         "crypto": payload["crypto"],
         "options": payload["options"],
+        "stock_pnl_reconstruction": payload["stock_pnl_reconstruction"],
         "research": payload["research"],
     }

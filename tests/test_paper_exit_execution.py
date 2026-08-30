@@ -1,5 +1,5 @@
 from paper_broker import SimulatedPaperBroker
-from paper_exit_execution import execute_guard_exit
+from paper_exit_execution import execute_guard_exit, load_stock_entry_contexts
 
 
 class _Repo:
@@ -261,3 +261,43 @@ def test_guard_exit_uses_broker_weighted_average_after_scale_ins():
     assert repo.closed_trade["entry_price"] == 105.0
     assert repo.closed_trade["realized_gross_pnl"] == -20.0
     assert repo.closed_trade["net_pnl"] == -20.0
+
+
+def test_entry_context_loader_confirms_only_bot_attributed_v2_entries():
+    class _AttributionRepo:
+        def fetch_latest_filled_entry(self, symbol, side):
+            expected_side = "SELL" if symbol == "BEAR" else "BUY"
+            if side != expected_side:
+                return None
+            strategy_id = {
+                "TREND": "stock_trend_ensemble_v2",
+                "BEAR": "stock_bearish_trend_v2",
+                "MANUAL": "stock_trend_ensemble_v2",
+            }[symbol]
+            return {
+                "strategy_id": strategy_id,
+                "strategy_version": "2.0.0",
+                "filled_quantity": 2,
+                "average_fill_price": 100,
+                "filled_at": "2026-08-03T14:00:00+00:00",
+                "order_payload": {
+                    "source": "manual_import" if symbol == "MANUAL" else "continuous_scan_cycle",
+                    "strategy": {"strategy_id": strategy_id, "stop": 94},
+                },
+            }
+
+    contexts = load_stock_entry_contexts(
+        {
+            "TREND": {"quantity": 2},
+            "BEAR": {"quantity": -2},
+            "MANUAL": {"quantity": 2},
+        },
+        _AttributionRepo(),
+    )
+
+    assert contexts["TREND"]["bot_entry_confirmed"] is True
+    assert contexts["TREND"]["entry_side"] == "BUY"
+    assert contexts["BEAR"]["bot_entry_confirmed"] is True
+    assert contexts["BEAR"]["entry_side"] == "SELL"
+    assert contexts["MANUAL"]["bot_entry_attributed"] is False
+    assert contexts["MANUAL"]["bot_entry_confirmed"] is False

@@ -8,6 +8,7 @@ from order_lifecycle import track_order_lifecycle
 from paper_execution_repository import PaperValidationRunPayload
 from paper_reconciliation import reconcile_paper_positions
 from sprint_10_2_execution_validation import _execution_fingerprint
+from stock_exit_policy import SUPPORTED_STOCK_EXIT_STRATEGIES
 
 
 def _utc_iso() -> str:
@@ -34,6 +35,19 @@ def _holding_hours(entry_timestamp: Any, exit_timestamp: str) -> float:
         return 0.0
 
 
+def _timestamp_at_or_after(candidate: Any, reference: Any) -> bool:
+    try:
+        candidate_dt = datetime.fromisoformat(str(candidate or "").replace("Z", "+00:00"))
+        reference_dt = datetime.fromisoformat(str(reference or "").replace("Z", "+00:00"))
+        if candidate_dt.tzinfo is None:
+            candidate_dt = candidate_dt.replace(tzinfo=timezone.utc)
+        if reference_dt.tzinfo is None:
+            reference_dt = reference_dt.replace(tzinfo=timezone.utc)
+        return candidate_dt >= reference_dt
+    except (TypeError, ValueError):
+        return False
+
+
 def _position_weights(positions: dict[str, dict[str, Any]], equity: float) -> dict[str, dict[str, float]]:
     base = max(float(equity), 1.0)
     return {
@@ -49,6 +63,99 @@ def _position_weights(positions: dict[str, dict[str, Any]], equity: float) -> di
         for symbol, payload in dict(positions or {}).items()
         if abs(_as_float((payload or {}).get("quantity"), 0.0)) > 1e-8
     }
+
+
+def load_stock_entry_contexts(
+    broker_positions: dict[str, dict[str, Any]] | None,
+    execution_repo: Any,
+) -> dict[str, dict[str, Any]]:
+    """Load narrowly verified PAPER entry attribution for stock exit policies.
+
+    Missing or ambiguous attribution is explicit. That makes manual holdings use
+    review-only behavior instead of inheriting an automated v2 exit profile.
+    """
+    contexts: dict[str, dict[str, Any]] = {}
+    entry_lookup = getattr(execution_repo, "fetch_latest_filled_entry", None)
+    legacy_lookup = getattr(execution_repo, "fetch_latest_filled_buy", None)
+    for raw_symbol, raw_position in dict(broker_positions or {}).items():
+        symbol = str(raw_symbol or "").strip().upper()
+        position = dict(raw_position or {})
+        signed_quantity = _as_float(position.get("quantity"), 0.0)
+        if not symbol or abs(signed_quantity) <= 1e-8:
+            continue
+        asset_class = str(position.get("asset_class") or "").strip().lower()
+        if asset_class in {"crypto", "us_option", "option"} or "/" in symbol:
+            continue
+
+        entry_side = "SELL" if signed_quantity < 0 else "BUY"
+        opposite_side = "BUY" if entry_side == "SELL" else "SELL"
+        entry_order: dict[str, Any] = {}
+        latest_opposite_order: dict[str, Any] = {}
+        try:
+            if callable(entry_lookup):
+                entry_order = dict(entry_lookup(symbol, entry_side) or {})
+                latest_opposite_order = dict(entry_lookup(symbol, opposite_side) or {})
+            elif entry_side == "BUY" and callable(legacy_lookup):
+                entry_order = dict(legacy_lookup(symbol) or {})
+        except Exception:
+            entry_order = {}
+
+        order_payload = dict(entry_order.get("order_payload") or {})
+        strategy = dict(order_payload.get("strategy") or {})
+        strategy_id = str(entry_order.get("strategy_id") or strategy.get("strategy_id") or "").strip()
+        source = str(order_payload.get("source") or "").strip()
+        filled_quantity = _as_float(entry_order.get("filled_quantity"), 0.0)
+        # Older repository test doubles may omit filled_quantity; a positive
+        # average fill still proves a fill for attribution purposes.
+        fill_evidence = filled_quantity > 0 or _as_float(entry_order.get("average_fill_price"), 0.0) > 0
+        entry_timestamp = (
+            entry_order.get("filled_at")
+            or entry_order.get("submitted_at")
+            or entry_order.get("proposed_at")
+        )
+        opposite_timestamp = (
+            latest_opposite_order.get("filled_at")
+            or latest_opposite_order.get("submitted_at")
+            or latest_opposite_order.get("proposed_at")
+        )
+        opposite_after_entry = bool(
+            entry_timestamp
+            and opposite_timestamp
+            and _timestamp_at_or_after(opposite_timestamp, entry_timestamp)
+        )
+        bot_entry_attributed = bool(
+            entry_order
+            and source == "continuous_scan_cycle"
+            and fill_evidence
+            and not opposite_after_entry
+        )
+        expected_side = "SHORT" if strategy_id == "stock_bearish_trend_v2" else "LONG"
+        actual_side = "SHORT" if signed_quantity < 0 else "LONG"
+        bot_entry_confirmed = bool(
+            bot_entry_attributed
+            and strategy_id in SUPPORTED_STOCK_EXIT_STRATEGIES
+            and expected_side == actual_side
+        )
+        contexts[symbol] = {
+            "attribution_checked": True,
+            "bot_entry_attributed": bot_entry_attributed,
+            "bot_entry_confirmed": bot_entry_confirmed,
+            "attribution_reason": (
+                "confirmed_v2_bot_entry"
+                if bot_entry_confirmed
+                else "confirmed_legacy_bot_entry"
+                if bot_entry_attributed
+                else "no_confirmed_bot_entry"
+            ),
+            "strategy_id": strategy_id,
+            "strategy_version": str(entry_order.get("strategy_version") or strategy.get("strategy_version") or ""),
+            "strategy": strategy,
+            "entry_timestamp": entry_timestamp,
+            "entry_price": _as_float(entry_order.get("average_fill_price"), 0.0),
+            "entry_side": entry_side,
+            "entry_source": source,
+        }
+    return contexts
 
 
 def execute_guard_exit(
@@ -71,6 +178,7 @@ def execute_guard_exit(
 ) -> dict[str, Any]:
     symbol = str(exit_candidate.get("symbol") or "").strip().upper()
     reason = str(exit_candidate.get("exit_reason") or "position_guard_exit").strip()
+    exit_profile = dict(exit_candidate.get("exit_profile") or {})
     position = dict((broker_positions or {}).get(symbol) or {})
     signed_position_quantity = _as_float(position.get("quantity"), 0.0)
     position_side = "SHORT" if signed_position_quantity < 0 else "LONG"
@@ -127,6 +235,7 @@ def execute_guard_exit(
                 "notional": round(quantity * reference_price, 6),
                 "submission_status": "not_submitted",
                 "exit_reason": reason,
+                "exit_profile": exit_profile,
             },
             "risk_result": {
                 "approved": True,
@@ -254,10 +363,15 @@ def execute_guard_exit(
                     "submitted_order_count": 1 if accepted_by_broker else 0,
                     "filled_order_count": 1 if final_status == "filled" else 0,
                     "failed_order_count": 1 if final_status in rejected_statuses else 0,
-                    "configuration": {"source": "paper_position_guard", "exit_reason": reason},
+                    "configuration": {
+                        "source": "paper_position_guard",
+                        "exit_reason": reason,
+                        "exit_profile": exit_profile,
+                    },
                     "risk_snapshot": {
                         "checks": {"position_exists": True, "current_price": True, "duplicate_protection": True},
                         "position_review": exit_candidate,
+                        "exit_profile": exit_profile,
                     },
                     "performance": {},
                     "warnings": list(reconciliation.get("warnings") or []),
@@ -298,6 +412,7 @@ def execute_guard_exit(
                         "order_payload": {
                             "source": "paper_position_guard",
                             "exit_reason": reason,
+                            "exit_profile": exit_profile,
                             "status_transitions": lifecycle.get("status_transitions") or [],
                             "execution_latency_seconds": lifecycle.get("execution_latency_seconds"),
                             "dry_run": False,
@@ -386,7 +501,11 @@ def execute_guard_exit(
                     "max_favorable_excursion": max(float(exit_candidate.get("return_percent") or 0.0) / 100.0, 0.0),
                     "exit_reason": reason,
                     "market_regime": str(entry_strategy.get("market_regime") or "unknown"),
-                    "close_type": "risk_guard_exit",
+                    "close_type": (
+                        "strategy_policy_exit"
+                        if bool(exit_profile.get("strategy_profile_applied", False))
+                        else "risk_guard_exit"
+                    ),
                 }
             )
 
@@ -402,6 +521,7 @@ def execute_guard_exit(
             "notional": round(quantity * reference_price, 6),
             "submission_status": final_status,
             "exit_reason": reason,
+            "exit_profile": exit_profile,
         },
         "risk_result": {
             "approved": True,

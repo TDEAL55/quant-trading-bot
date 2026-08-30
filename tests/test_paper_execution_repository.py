@@ -172,3 +172,77 @@ def test_paper_execution_repository_approval_and_run(tmp_path):
     assert duplicate["run_id"] == "run-2"
     assert len(repo.fetch_orders_for_run("run-1")) == 1
     repo.close()
+
+
+def test_entry_reservation_is_atomic_across_repository_instances_and_releasable(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'entry-reservations.db'}"
+    first = MonitoringPaperExecutionRepository(database_url=database_url)
+    second = MonitoringPaperExecutionRepository(database_url=database_url)
+    now = datetime(2026, 8, 29, 14, 0, tzinfo=timezone.utc)
+    payload = {
+        "run_id": "cycle-one",
+        "symbol": "AAA",
+        "side": "BUY",
+        "quantity": 5.0,
+        "notional": 500.0,
+        "reference_price": 100.0,
+        "portfolio_equity": 10_000.0,
+        "allowed_position_percent": 10.0,
+    }
+
+    acquired = first.acquire_entry_reservation(payload, ttl_seconds=180, now=now)
+    conflict = second.acquire_entry_reservation(
+        {**payload, "run_id": "cycle-two", "quantity": 4.0, "notional": 400.0},
+        ttl_seconds=180,
+        now=now,
+    )
+
+    assert acquired["acquired"] is True
+    assert conflict["acquired"] is False
+    assert conflict["reason"] == "active_symbol_reservation"
+    assert conflict["conflict"]["run_id"] == "cycle-one"
+
+    released = first.release_entry_reservation(
+        acquired["reservation_id"],
+        outcome="broker_rejected",
+        now=now,
+    )
+    reacquired = second.acquire_entry_reservation(
+        {**payload, "run_id": "cycle-two"},
+        ttl_seconds=180,
+        now=now,
+    )
+    assert released["updated"] is True
+    assert reacquired["acquired"] is True
+    first.close()
+    second.close()
+
+
+def test_expired_entry_reservation_cannot_block_symbol_forever(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'entry-reservation-expiry.db'}"
+    first = MonitoringPaperExecutionRepository(database_url=database_url)
+    second = MonitoringPaperExecutionRepository(database_url=database_url)
+    start = datetime(2026, 8, 29, 14, 0, tzinfo=timezone.utc)
+    payload = {
+        "run_id": "crashed-cycle",
+        "symbol": "AAA",
+        "side": "BUY",
+        "quantity": 5.0,
+        "notional": 500.0,
+        "reference_price": 100.0,
+        "portfolio_equity": 10_000.0,
+        "allowed_position_percent": 10.0,
+    }
+    first.acquire_entry_reservation(payload, ttl_seconds=1, now=start)
+
+    replacement = second.acquire_entry_reservation(
+        {**payload, "run_id": "replacement-cycle"},
+        ttl_seconds=180,
+        now=start + timedelta(seconds=2),
+    )
+
+    assert replacement["acquired"] is True
+    active = second.list_active_entry_reservations(symbol="AAA", now=start + timedelta(seconds=2))
+    assert [row["run_id"] for row in active] == ["replacement-cycle"]
+    first.close()
+    second.close()

@@ -78,3 +78,91 @@ def test_stock_guard_ignores_crypto_positions():
 
     assert result["reviews"] == []
     assert result["exit_candidates"] == []
+
+
+def _entry_context(strategy_id, **overrides):
+    context = {
+        "attribution_checked": True,
+        "bot_entry_attributed": True,
+        "bot_entry_confirmed": True,
+        "strategy_id": strategy_id,
+        "entry_timestamp": "2026-08-03T14:00:00+00:00",
+        "strategy": {"strategy_id": strategy_id},
+    }
+    context.update(overrides)
+    return context
+
+
+def test_guard_applies_confirmed_mean_reversion_mean_target():
+    result = review_paper_positions(
+        positions={"MEAN": {"quantity": 2, "avg_price": 100, "current_price": 102}},
+        open_orders=[],
+        settings=PositionGuardSettings(),
+        entry_contexts={
+            "MEAN": _entry_context("stock_mean_reversion_v2", mean_target_price=102),
+        },
+        current_timestamp="2026-08-03T20:00:00+00:00",
+    )
+
+    review = result["reviews"][0]
+    assert review["recommendation"] == "CLOSE_TAKE_PROFIT"
+    assert review["exit_reason"] == "mean_reversion_target_reached"
+    assert review["exit_profile"]["strategy_profile_applied"] is True
+    assert review["exit_profile"]["mean_target_price"] == 102
+
+
+def test_guard_gives_confirmed_trend_more_room_but_keeps_legacy_default():
+    result = review_paper_positions(
+        positions={
+            "TREND": {"quantity": 2, "avg_price": 100, "current_price": 95},
+            "LEGACY": {"quantity": 2, "avg_price": 100, "current_price": 95},
+        },
+        open_orders=[],
+        settings=PositionGuardSettings(stop_loss_percent=4, take_profit_percent=8, max_exits_per_cycle=2),
+        entry_contexts={
+            "TREND": _entry_context("stock_trend_ensemble_v2"),
+            "LEGACY": {
+                **_entry_context("trend_momentum_v1"),
+                "bot_entry_confirmed": False,
+            },
+        },
+    )
+
+    reviews = {row["symbol"]: row for row in result["reviews"]}
+    assert reviews["TREND"]["recommendation"] == "HOLD"
+    assert reviews["TREND"]["stop_loss_percent"] == 6
+    assert reviews["TREND"]["exit_profile"]["trailing_state_status"] == "unavailable"
+    assert reviews["LEGACY"]["recommendation"] == "CLOSE_STOP_LOSS"
+    assert result["exit_candidates"][0]["symbol"] == "LEGACY"
+
+
+def test_guard_blocks_automatic_exit_for_unattributed_manual_position():
+    result = review_paper_positions(
+        positions={"MANUAL": {"quantity": 2, "avg_price": 100, "current_price": 80}},
+        open_orders=[],
+        settings=PositionGuardSettings(),
+        entry_contexts={"MANUAL": {"attribution_checked": True}},
+    )
+
+    review = result["reviews"][0]
+    assert review["recommendation"] == "REVIEW_REQUIRED"
+    assert review["exit_reason"] == "unattributed_position_manual_review_required"
+    assert "automatic_exit_blocked_unattributed_position" in review["warnings"]
+    assert result["exit_candidates"] == []
+
+
+def test_guard_mean_reversion_time_stop_is_session_aware():
+    result = review_paper_positions(
+        positions={"MEAN": {"quantity": 2, "avg_price": 100, "current_price": 101}},
+        open_orders=[],
+        settings=PositionGuardSettings(),
+        entry_contexts={
+            "MEAN": _entry_context("stock_mean_reversion_v2", mean_target_price=104),
+        },
+        current_timestamp="2026-08-10T20:00:00+00:00",
+    )
+
+    review = result["reviews"][0]
+    assert review["recommendation"] == "CLOSE_TIME_STOP"
+    assert review["exit_reason"] == "mean_reversion_time_stop_reached"
+    assert review["exit_profile"]["holding_sessions"] == 5
