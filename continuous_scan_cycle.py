@@ -58,6 +58,7 @@ from paper_order_planner import OrderPlannerSettings, plan_paper_orders
 from paper_position_guard import PositionGuardSettings, review_paper_positions
 from paper_reconciliation import reconcile_paper_positions
 from portfolio_allocator import AllocationPolicy
+from portfolio_entry_policy import evaluate_portfolio_entry_policy, settings_from_environment as portfolio_entry_settings
 from portfolio_intelligence import run_portfolio_intelligence
 from pnl_risk_policy import (
     evaluate_account_pnl_policy,
@@ -73,7 +74,9 @@ from sector_enrichment import enrich_sector_records
 from sector_manager import SectorPolicy
 from self_improving_repository import SelfImprovingRepository
 from sprint_10_2_execution_validation import _execution_fingerprint
+from stock_execution_cost_model import estimate_stock_round_trip_costs, settings_from_environment as cost_settings_from_environment
 from stock_universe import AlpacaAssetUniverseError, get_universe_cache_stats, load_stock_universe
+from strategy_execution_policy import evaluate_strategy_execution_policy, settings_from_environment as strategy_execution_settings
 from strategy_profitability import allocate_equal_risk, build_strategy_leaderboard, paused_strategies_from_drawdown
 from strategies import evaluate_all_strategies
 
@@ -683,6 +686,19 @@ def run_continuous_scan_cycle(
         broker_buying_power = float(loaded_cash)
         broker_equity = float(loaded_equity)
 
+    portfolio_entry_policy = evaluate_portfolio_entry_policy(
+        account={**dict(account or {}), "cash": broker_cash, "equity": broker_equity},
+        positions=broker_positions,
+        settings=portfolio_entry_settings(),
+    )
+    _emit_telemetry(
+        telemetry_callback,
+        "portfolio_entry_policy_evaluated",
+        run_id=cycle_run_id,
+        dry_run=bool(dry_run),
+        **portfolio_entry_policy,
+    )
+
     position_guard_payload: dict[str, Any] = {"reviews": [], "exit_candidates": [], "summary": {"enabled": False}}
     if bool(getattr(config, "position_guard_enabled", False)):
         execution_repo = execution_repo_factory(database_url=database_url or getattr(config, "database_url", None))
@@ -1243,22 +1259,34 @@ def run_continuous_scan_cycle(
         leaderboard = fetch_leaderboard() if persist and callable(fetch_leaderboard) else []
         paused = set(paused_strategies_from_drawdown(leaderboard, max_drawdown_threshold=float(os.getenv("STRATEGY_MAX_DRAWDOWN", "0.20"))))
 
+        execution_policy_settings = strategy_execution_settings()
+        for row in strategy_signals:
+            row["execution_policy"] = evaluate_strategy_execution_policy(
+                str(row.get("strategy_id") or ""),
+                leaderboard,
+                settings=execution_policy_settings,
+            )
+
         active_strategy_ids = [
             str(item.get("strategy_id") or "")
             for item in strategy_signals
             if str(item.get("strategy_id") or "") not in paused
             and str(item.get("signal") or "").upper() == requested_entry_side
+            and bool((item.get("execution_policy") or {}).get("execution_allowed"))
         ]
         allocations = allocate_equal_risk(active_strategy_ids)
         for row in strategy_signals:
             sid = str(row.get("strategy_id") or "")
             row["requested_risk_allocation"] = float(allocations.get(sid, row.get("requested_risk_allocation") or 0.0))
             row["paused"] = sid in paused
+            row["shadow"] = not bool((row.get("execution_policy") or {}).get("execution_allowed"))
 
         tradable_signals = [
             row
             for row in strategy_signals
-            if str(row.get("signal") or "").upper() == requested_entry_side and not bool(row.get("paused"))
+            if str(row.get("signal") or "").upper() == requested_entry_side
+            and not bool(row.get("paused"))
+            and bool((row.get("execution_policy") or {}).get("execution_allowed"))
         ]
         if not tradable_signals:
             if dry_run:
@@ -1327,6 +1355,11 @@ def run_continuous_scan_cycle(
             strategy_signal=selected_strategy,
             strategy_leaderboard=leaderboard,
             trading_mode=str(getattr(config, "trading_mode", "PAPER")),
+        )
+        selected_strategy_policy = dict(selected_strategy.get("execution_policy") or {})
+        max_position_equity_percent = min(
+            float(max_position_equity_percent),
+            float(selected_strategy_policy.get("max_position_percent") or max_position_equity_percent),
         )
         max_open_positions = _effective_max_open_positions(config)
         per_strategy_allocation = float(selected_strategy.get("requested_risk_allocation") or 0.25)
@@ -1598,6 +1631,8 @@ def run_continuous_scan_cycle(
             ),
             "daily_loss": not bool(pnl_policy.get("daily_loss_stop_active")),
             "loss_streak_cooldown": not bool(pnl_policy.get("loss_streak_cooldown_active")),
+            "portfolio_entry_policy": bool(portfolio_entry_policy.get("new_entries_allowed")),
+            "strategy_execution_policy": bool(selected_strategy_policy.get("execution_allowed")),
             "existing_position": bool(abs(existing_qty) <= 1e-8 or supports_scaling),
             "open_entry_order": not _has_open_entry_order(broker_open_orders, selected_symbol, planned_side),
             "symbol_concentration": bool(entry_exposure.get("approved")),
@@ -1769,10 +1804,16 @@ def run_continuous_scan_cycle(
                         "reason": (
                             str(pnl_policy.get("reason") or rejected_status)
                             if bool(pnl_policy.get("block_new_entries"))
+                            else str((portfolio_entry_policy.get("reasons") or ["portfolio_exit_only"])[0])
+                            if not bool(portfolio_entry_policy.get("new_entries_allowed"))
+                            else str(selected_strategy_policy.get("reason") or "strategy_shadow")
+                            if not bool(selected_strategy_policy.get("execution_allowed"))
                             else str(reservation_result.get("reason") or exposure_reason or rejected_status)
                         ),
                         "checks": risk_checks,
                         "pnl_policy": pnl_policy,
+                        "portfolio_entry_policy": portfolio_entry_policy,
+                        "strategy_execution_policy": selected_strategy_policy,
                         "duplicate_run": existing,
                         "entry_exposure": entry_exposure,
                         "entry_reservation": reservation_result,
@@ -2240,13 +2281,6 @@ def run_continuous_scan_cycle(
                     entry_price = float((broker_pre_positions.get(selected_symbol) or {}).get("avg_price") or fill_price)
                     qty = min(pre_qty, counted_filled_qty)
                     gross = (fill_price - entry_price) * qty
-                    # The Alpaca PAPER fill is the realized execution price.
-                    # Modeled costs belong in research analytics, not headline
-                    # fill-to-fill realized P/L.
-                    est_slippage = 0.0
-                    est_fees = 0.0
-                    net = gross - est_slippage - est_fees
-                    pct = (net / (entry_price * qty)) if entry_price > 0 and qty > 0 else 0.0
                     entry_lookup = getattr(execution_repo, "fetch_latest_filled_entry", None)
                     entry_order = (
                         dict(entry_lookup(selected_symbol, "BUY") or {})
@@ -2272,6 +2306,26 @@ def run_continuous_scan_cycle(
                         or selected_strategy.get("market_regime")
                         or "unknown"
                     )
+                    entry_timestamp = str(entry_order.get("filled_at") or entry_order.get("submitted_at") or started_at)
+                    exit_timestamp = _utc_iso()
+                    try:
+                        entry_dt = datetime.fromisoformat(entry_timestamp.replace("Z", "+00:00"))
+                        exit_dt = datetime.fromisoformat(exit_timestamp.replace("Z", "+00:00"))
+                        holding_hours = max((exit_dt - entry_dt).total_seconds() / 3600.0, 0.0)
+                    except (TypeError, ValueError):
+                        holding_hours = float(os.getenv("DEFAULT_HOLDING_DURATION_HOURS", "0"))
+                    modeled_costs = estimate_stock_round_trip_costs(
+                        entry_notional=entry_price * qty,
+                        exit_notional=fill_price * qty,
+                        direction="LONG",
+                        holding_hours=holding_hours,
+                        settings=cost_settings_from_environment(),
+                    )
+                    est_slippage = float(modeled_costs["estimated_slippage"])
+                    est_fees = float(modeled_costs["estimated_fees"])
+                    # Preserve exact broker-fill P/L in the user's headline.
+                    net = gross
+                    pct = (net / (entry_price * qty)) if entry_price > 0 and qty > 0 else 0.0
                     save_closed_trade = getattr(execution_repo, "save_closed_trade", None)
                     if callable(save_closed_trade):
                         save_closed_trade(
@@ -2279,8 +2333,8 @@ def run_continuous_scan_cycle(
                                 "strategy_id": closing_strategy_id,
                                 "strategy_version": closing_strategy_version,
                                 "symbol": selected_symbol,
-                                "entry_timestamp": started_at,
-                                "exit_timestamp": _utc_iso(),
+                                "entry_timestamp": entry_timestamp,
+                                "exit_timestamp": exit_timestamp,
                                 "entry_price": entry_price,
                                 "exit_price": fill_price,
                                 "quantity": qty,
@@ -2289,7 +2343,7 @@ def run_continuous_scan_cycle(
                                 "estimated_slippage": round(est_slippage, 6),
                                 "net_pnl": round(net, 6),
                                 "percentage_return": round(pct, 6),
-                                "holding_duration_hours": float(os.getenv("DEFAULT_HOLDING_DURATION_HOURS", "0")),
+                                "holding_duration_hours": holding_hours,
                                 "max_adverse_excursion": 0.0,
                                 "max_favorable_excursion": 0.0,
                                 "exit_reason": str(final_order.get("rejection_reason") or "filled_exit"),

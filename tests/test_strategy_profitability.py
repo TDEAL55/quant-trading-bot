@@ -52,3 +52,13 @@ def test_drawdown_is_a_fraction_even_when_first_trade_loses():
         ]
     )
     assert board[0]["maximum_drawdown"] == 0.10
+
+
+def test_leaderboard_subtracts_estimated_costs_only_for_strategy_evaluation():
+    trade = _trade("stock_trend_ensemble_v2", "2.0.0", 100.0, 0.01)
+    trade.update({"realized_gross_pnl": 100.0, "estimated_slippage": 10.0, "estimated_fees": 2.0, "entry_price": 100.0, "quantity": 100.0})
+    row = build_strategy_leaderboard([trade])[0]
+    assert row["actual_fill_net_profit"] == 100.0
+    assert row["estimated_execution_costs"] == 12.0
+    assert row["net_profit"] == 88.0
+    assert row["evaluation_basis"] == "estimated_live_after_costs"

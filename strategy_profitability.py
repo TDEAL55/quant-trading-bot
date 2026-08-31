@@ -38,6 +38,14 @@ def _max_drawdown(equity_curve: list[float]) -> float:
     return max_dd
 
 
+def _evaluation_pnl(trade: dict[str, Any]) -> float:
+    """Use conservative PAPER-to-live estimates for strategy promotion only."""
+    gross_value = trade.get("realized_gross_pnl")
+    gross = _as_float(gross_value, _as_float(trade.get("net_pnl"), 0.0))
+    costs = _as_float(trade.get("estimated_fees"), 0.0) + _as_float(trade.get("estimated_slippage"), 0.0)
+    return gross - max(costs, 0.0)
+
+
 def build_strategy_leaderboard(closed_trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for trade in closed_trades:
@@ -54,12 +62,28 @@ def build_strategy_leaderboard(closed_trades: list[dict[str, Any]]) -> list[dict
             trades,
             key=lambda item: str(item.get("exit_timestamp") or item.get("entry_timestamp") or ""),
         )
-        pnl = [_as_float(item.get("net_pnl"), 0.0) for item in trades]
+        pnl = [_evaluation_pnl(item) for item in trades]
+        actual_fill_pnl = [
+            _as_float(item.get("realized_gross_pnl"), _as_float(item.get("net_pnl"), 0.0))
+            for item in trades
+        ]
+        estimated_costs = [
+            max(_as_float(item.get("estimated_fees"), 0.0), 0.0)
+            + max(_as_float(item.get("estimated_slippage"), 0.0), 0.0)
+            for item in trades
+        ]
         winners = [value for value in pnl if value > 0]
         losers = [value for value in pnl if value < 0]
         gross_profit = sum(winners)
         gross_loss = abs(sum(losers))
-        returns = [_as_float(item.get("percentage_return"), 0.0) for item in trades]
+        returns = []
+        for item, evaluation_pnl in zip(trades, pnl):
+            entry_notional = abs(_as_float(item.get("entry_price"), 0.0) * _as_float(item.get("quantity"), 0.0))
+            returns.append(
+                evaluation_pnl / entry_notional
+                if entry_notional > 0
+                else _as_float(item.get("percentage_return"), 0.0)
+            )
         avg_hold_hours = sum(_as_float(item.get("holding_duration_hours"), 0.0) for item in trades) / max(len(trades), 1)
 
         expectancy = sum(pnl) / max(len(pnl), 1)
@@ -84,6 +108,9 @@ def build_strategy_leaderboard(closed_trades: list[dict[str, Any]]) -> list[dict
                 "strategy_version": strategy_version,
                 "completed_trade_count": sample_count,
                 "net_profit": round(sum(pnl), 6),
+                "actual_fill_net_profit": round(sum(actual_fill_pnl), 6),
+                "estimated_execution_costs": round(sum(estimated_costs), 6),
+                "evaluation_basis": "estimated_live_after_costs",
                 "profit_factor": round(_safe_div(gross_profit, gross_loss), 6),
                 "win_rate": round(_safe_div(len(winners), sample_count), 6),
                 "average_winner": round(sum(winners) / len(winners), 6) if winners else 0.0,

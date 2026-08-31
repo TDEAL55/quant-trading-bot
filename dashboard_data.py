@@ -10,6 +10,7 @@ from typing import Any
 from alpaca_paper_broker import AlpacaPaperBroker
 from monitoring_db import MonitoringDatabase
 from paper_trade_ledger import build_closed_trade_records, summarize_closed_trade_records
+from portfolio_entry_policy import evaluate_portfolio_entry_policy, settings_from_environment as portfolio_entry_settings
 from dashboard_models import build_dashboard_dataset
 from evaluation_data import fetch_evaluation_dashboard_payload
 from daily_run_repository import DailyRunRepository
@@ -158,6 +159,11 @@ def _fetch_paper_account_snapshot(
         if stock_reconstruction_exact
         else 0
     )
+    portfolio_entry_policy = evaluate_portfolio_entry_policy(
+        account=account,
+        positions=positions_by_symbol,
+        settings=portfolio_entry_settings(),
+    )
     return {
         "snapshot_timestamp": datetime.now(timezone.utc).isoformat(),
         "account_status": account.get("status", "unknown"),
@@ -188,6 +194,7 @@ def _fetch_paper_account_snapshot(
         "market_clock": market_clock,
         "market_open": market_clock.get("is_open") if "is_open" in market_clock else None,
         "stock_pnl_reconstruction": stock_pnl_reconstruction,
+        "portfolio_entry_policy": portfolio_entry_policy,
         "source": "alpaca_paper_read_only",
     }
 

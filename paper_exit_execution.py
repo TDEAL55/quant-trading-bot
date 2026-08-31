@@ -8,6 +8,7 @@ from order_lifecycle import track_order_lifecycle
 from paper_execution_repository import PaperValidationRunPayload
 from paper_reconciliation import reconcile_paper_positions
 from sprint_10_2_execution_validation import _execution_fingerprint
+from stock_execution_cost_model import estimate_stock_round_trip_costs, settings_from_environment as cost_settings_from_environment
 from stock_exit_policy import SUPPORTED_STOCK_EXIT_STRATEGIES
 
 
@@ -473,12 +474,19 @@ def execute_guard_exit(
                 if position_side == "SHORT"
                 else (fill_price - entry_price) * closed_quantity
             )
-            # PAPER fill prices already include the broker simulator's execution
-            # result. Do not subtract a second modeled slippage charge from the
-            # user's fill-to-fill realized P/L.
-            estimated_slippage = 0.0
-            estimated_fees = 0.0
-            net_pnl = gross_pnl - estimated_slippage - estimated_fees
+            holding_hours = _holding_hours(entry_timestamp, exit_timestamp)
+            modeled_costs = estimate_stock_round_trip_costs(
+                entry_notional=entry_price * closed_quantity,
+                exit_notional=fill_price * closed_quantity,
+                direction=position_side,
+                holding_hours=holding_hours,
+                settings=cost_settings_from_environment(),
+            )
+            estimated_slippage = float(modeled_costs["estimated_slippage"])
+            estimated_fees = float(modeled_costs["estimated_fees"])
+            # Keep fill-to-fill realized P/L exact. Strategy promotion separately
+            # subtracts these conservative PAPER-to-live estimates.
+            net_pnl = gross_pnl
             percentage_return = net_pnl / (entry_price * closed_quantity) if entry_price > 0 and closed_quantity > 0 else 0.0
             execution_repo.save_closed_trade(
                 {
@@ -496,7 +504,7 @@ def execute_guard_exit(
                     "estimated_slippage": round(estimated_slippage, 6),
                     "net_pnl": round(net_pnl, 6),
                     "percentage_return": round(percentage_return, 6),
-                    "holding_duration_hours": round(_holding_hours(entry_timestamp, exit_timestamp), 6),
+                    "holding_duration_hours": round(holding_hours, 6),
                     "max_adverse_excursion": min(float(exit_candidate.get("return_percent") or 0.0) / 100.0, 0.0),
                     "max_favorable_excursion": max(float(exit_candidate.get("return_percent") or 0.0) / 100.0, 0.0),
                     "exit_reason": reason,

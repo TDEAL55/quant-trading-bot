@@ -76,7 +76,8 @@ def test_guard_exit_fills_reconciles_and_records_closed_trade():
     assert repo.closed_trade["symbol"] == "JPM"
     assert repo.closed_trade["exit_reason"] == "stop_loss_threshold_reached"
     assert repo.closed_trade["net_pnl"] == repo.closed_trade["realized_gross_pnl"]
-    assert repo.closed_trade["estimated_slippage"] == 0.0
+    assert repo.closed_trade["estimated_slippage"] > 0.0
+    assert repo.closed_trade["estimated_fees"] > 0.0
 
 
 def test_guard_exit_duplicate_is_rejected_before_broker_submission():

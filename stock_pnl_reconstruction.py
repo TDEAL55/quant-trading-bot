@@ -6,6 +6,10 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from stock_execution_cost_model import estimate_stock_round_trip_costs, settings_from_environment as cost_settings_from_environment
+from strategy_execution_policy import evaluate_strategy_execution_policy, settings_from_environment as strategy_policy_from_environment
+from strategy_profitability import build_strategy_leaderboard
+
 
 _STOCK_ASSET_CLASSES = {"equity", "stock", "us_equity"}
 _CRYPTO_ASSET_CLASSES = {"crypto"}
@@ -327,10 +331,16 @@ def reconstruct_stock_realized_pnl(
             )
             event_strategy = event["strategy_breakdown"].setdefault(
                 entry_strategy_id,
-                {"realized_pnl": Decimal("0"), "quantity": Decimal("0"), "matched_lot_count": 0},
+                {
+                    "realized_pnl": Decimal("0"),
+                    "quantity": Decimal("0"),
+                    "entry_notional": Decimal("0"),
+                    "matched_lot_count": 0,
+                },
             )
             event_strategy["realized_pnl"] += pnl
             event_strategy["quantity"] += matched_quantity
+            event_strategy["entry_notional"] += entry_notional
             event_strategy["matched_lot_count"] += 1
 
             symbol_summary = per_symbol[symbol]
@@ -382,6 +392,7 @@ def reconstruct_stock_realized_pnl(
         )
 
     realized_events: list[dict[str, Any]] = []
+    execution_cost_settings = cost_settings_from_environment()
     for event in event_by_order.values():
         entry_notional = event.pop("matched_entry_notional")
         pnl = event["realized_pnl"]
@@ -390,16 +401,57 @@ def reconstruct_stock_realized_pnl(
         event["percentage_return"] = _float(pnl / entry_notional, 8) if entry_notional > 0 else 0.0
         event["unmatched_quantity"] = _float(event["unmatched_quantity"], 10)
         event["is_exact"] = event["unmatched_quantity"] <= 0
+        exit_timestamp = _parse_timestamp(event.get("exit_timestamp"))
+        weighted_holding_hours = Decimal("0")
+        holding_quantity = Decimal("0")
+        matched_directions = {str(item.get("direction") or "long") for item in event.get("matched_lots") or []}
+        for matched_lot in event.get("matched_lots") or []:
+            lot_quantity = _decimal(matched_lot.get("quantity"))
+            entry_timestamp = _parse_timestamp(matched_lot.get("entry_timestamp"))
+            if exit_timestamp is not None and entry_timestamp is not None and lot_quantity > 0:
+                hours = Decimal(str(max((exit_timestamp - entry_timestamp).total_seconds() / 3600.0, 0.0)))
+                weighted_holding_hours += hours * lot_quantity
+                holding_quantity += lot_quantity
+        holding_hours = weighted_holding_hours / holding_quantity if holding_quantity > 0 else Decimal("0")
+        direction = "short" if matched_directions == {"short"} else "long"
+        costs = estimate_stock_round_trip_costs(
+            entry_notional=float(entry_notional),
+            exit_notional=float(_decimal(event.get("average_exit_price")) * _decimal(event.get("quantity_closed"))),
+            direction=direction,
+            holding_hours=float(holding_hours),
+            settings=execution_cost_settings,
+        )
+        event["entry_notional"] = _float(entry_notional)
+        event["holding_duration_hours"] = _float(holding_hours)
+        event["estimated_slippage"] = float(costs["estimated_slippage"])
+        event["estimated_regulatory_fees"] = float(costs["estimated_regulatory_fees"])
+        event["estimated_borrow_cost"] = float(costs["estimated_borrow_cost"])
+        event["estimated_execution_costs"] = float(costs["estimated_total_cost"])
+        event["estimated_live_net_pnl"] = round(float(pnl) - float(costs["estimated_total_cost"]), 6)
+        event["estimated_live_percentage_return"] = (
+            round(event["estimated_live_net_pnl"] / float(entry_notional), 8)
+            if entry_notional > 0
+            else 0.0
+        )
         strategy_breakdown = event.pop("strategy_breakdown")
-        event["strategy_breakdown"] = [
-            {
+        event["strategy_breakdown"] = []
+        for strategy_id, values in sorted(strategy_breakdown.items()):
+            strategy_entry_notional = values["entry_notional"]
+            cost_share = (
+                Decimal(str(event["estimated_execution_costs"])) * strategy_entry_notional / entry_notional
+                if entry_notional > 0
+                else Decimal("0")
+            )
+            strategy_realized_pnl = values["realized_pnl"]
+            event["strategy_breakdown"].append({
                 "strategy_id": strategy_id,
-                "realized_pnl": _float(values["realized_pnl"]),
+                "realized_pnl": _float(strategy_realized_pnl),
                 "quantity": _float(values["quantity"], 10),
+                "entry_notional": _float(strategy_entry_notional),
+                "estimated_execution_costs": _float(cost_share),
+                "estimated_live_net_pnl": _float(strategy_realized_pnl - cost_share),
                 "matched_lot_count": int(values["matched_lot_count"]),
-            }
-            for strategy_id, values in sorted(strategy_breakdown.items())
-        ]
+            })
         event["entry_strategy_id"] = (
             event["strategy_breakdown"][0]["strategy_id"]
             if len(event["strategy_breakdown"]) == 1
@@ -452,6 +504,8 @@ def reconstruct_stock_realized_pnl(
         )
 
     realized_pnl = sum((_decimal(event["realized_pnl"]) for event in realized_events), Decimal("0"))
+    estimated_execution_costs = sum((_decimal(event.get("estimated_execution_costs")) for event in realized_events), Decimal("0"))
+    estimated_live_net_pnl = sum((_decimal(event.get("estimated_live_net_pnl")) for event in realized_events), Decimal("0"))
     long_pnl = sum((_decimal(row["long_realized_pnl"]) for row in symbol_rows), Decimal("0"))
     short_pnl = sum((_decimal(row["short_realized_pnl"]) for row in symbol_rows), Decimal("0"))
     winning_events = sum(1 for event in realized_events if event["realized_pnl"] > 0)
@@ -494,6 +548,44 @@ def reconstruct_stock_realized_pnl(
         event["is_exact"] = bool(is_exact and event.get("unmatched_quantity", 0.0) <= 0)
         event["confidence"] = "exact" if event["is_exact"] else confidence
 
+    strategy_trade_rows: list[dict[str, Any]] = []
+    for event in realized_events:
+        for breakdown in list(event.get("strategy_breakdown") or []):
+            strategy_trade_rows.append(
+                {
+                    "strategy_id": breakdown.get("strategy_id"),
+                    "strategy_version": "unknown",
+                    "entry_timestamp": (event.get("matched_lots") or [{}])[0].get("entry_timestamp"),
+                    "exit_timestamp": event.get("exit_timestamp"),
+                    "entry_price": (
+                        float(breakdown.get("entry_notional") or 0.0) / float(breakdown.get("quantity") or 1.0)
+                        if float(breakdown.get("quantity") or 0.0) > 0
+                        else 0.0
+                    ),
+                    "exit_price": event.get("average_exit_price"),
+                    "quantity": breakdown.get("quantity"),
+                    "realized_gross_pnl": breakdown.get("realized_pnl"),
+                    "estimated_fees": 0.0,
+                    "estimated_slippage": breakdown.get("estimated_execution_costs"),
+                    "net_pnl": breakdown.get("realized_pnl"),
+                    "percentage_return": (
+                        float(breakdown.get("realized_pnl") or 0.0) / float(breakdown.get("entry_notional") or 1.0)
+                        if float(breakdown.get("entry_notional") or 0.0) > 0
+                        else 0.0
+                    ),
+                    "holding_duration_hours": event.get("holding_duration_hours"),
+                    "market_regime": "unknown",
+                }
+            )
+    strategy_scoreboard = build_strategy_leaderboard(strategy_trade_rows)
+    strategy_policy_settings = strategy_policy_from_environment()
+    for row in strategy_scoreboard:
+        row["execution_policy"] = evaluate_strategy_execution_policy(
+            str(row.get("strategy_id") or ""),
+            strategy_scoreboard,
+            settings=strategy_policy_settings,
+        )
+
     timestamps = [fill["timestamp"] for fill in valid_fills]
     return {
         "source": "alpaca_actual_filled_stock_orders",
@@ -508,6 +600,14 @@ def reconstruct_stock_realized_pnl(
         "confidence_reasons": confidence_reasons,
         "realized_stock_pnl": _float(realized_pnl),
         "net_pnl": _float(realized_pnl),
+        "estimated_execution_costs": _float(estimated_execution_costs),
+        "estimated_live_net_pnl": _float(estimated_live_net_pnl),
+        "execution_cost_assumptions": dict(estimate_stock_round_trip_costs(
+            entry_notional=0.0,
+            exit_notional=0.0,
+            direction="long",
+            settings=execution_cost_settings,
+        ).get("assumptions") or {}),
         "long_realized_pnl": _float(long_pnl),
         "short_realized_pnl": _float(short_pnl),
         "closed_trade_count": len(realized_events),
@@ -538,6 +638,7 @@ def reconstruct_stock_realized_pnl(
         "realized_events": realized_events,
         "per_symbol": symbol_rows,
         "per_strategy": strategy_rows,
+        "strategy_scoreboard": strategy_scoreboard,
         "open_inventory": open_inventory,
         "unmatched_close_events": unmatched_close_events,
         "notes": [

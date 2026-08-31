@@ -3675,6 +3675,7 @@ def render_options_page(payload, view):
 def render_command_center_page(payload, view):
     summary = build_compact_dashboard_summary(payload, view)
     status = summary["status"]
+    entry_policy = dict((payload.get("latest_account") or {}).get("portfolio_entry_policy") or {})
     stock_market = "Open" if bool(view.get("market_is_open")) else "Closed"
     trading_enabled = status.get("kill_switch") != "ON" and status.get("autonomous_paper_trading") == "ENABLED"
     engine_items = [("EQ", "Stocks only", "Enabled" if trading_enabled else "Paused", stock_market, trading_enabled)]
@@ -3692,6 +3693,14 @@ def render_command_center_page(payload, view):
         f"<div class='dq-engine-grid'>{engine_html}</div>",
         unsafe_allow_html=True,
     )
+    if entry_policy.get("exit_only"):
+        reasons = ", ".join(str(item).replace("_", " ") for item in entry_policy.get("reasons") or [])
+        st.warning(
+            f"EXIT-ONLY MODE: new stock entries are paused while the portfolio normalizes. "
+            f"Gross exposure {float(entry_policy.get('gross_exposure_percent') or 0.0):.1f}% · "
+            f"{int(entry_policy.get('open_stock_positions') or 0)} positions · {reasons}. "
+            "Existing exit rules remain active; no automatic liquidation is enabled."
+        )
 
     st.markdown(
         "<div class='dq-section-intro dq-profit-heading'><div><span class='dq-section-index'>02</span>"
@@ -3816,7 +3825,12 @@ def render_mobile_command_center(payload, view):
     market_open = bool(view.get("market_is_open"))
     total_pl = _as_float(view.get("bot_net_pl"), 0.0)
     total_class = "positive" if total_pl > 0 else "negative" if total_pl < 0 else ""
-    stock_enabled = status.get("kill_switch") != "ON" and status.get("autonomous_paper_trading") == "ENABLED"
+    entry_policy = dict((payload.get("latest_account") or {}).get("portfolio_entry_policy") or {})
+    stock_enabled = (
+        status.get("kill_switch") != "ON"
+        and status.get("autonomous_paper_trading") == "ENABLED"
+        and not bool(entry_policy.get("exit_only"))
+    )
 
     st.markdown(
         "<div class='dq-mobile-topbar'>"
@@ -3852,6 +3866,11 @@ def render_mobile_command_center(payload, view):
         for name, enabled, market in engines
     )
     st.markdown(f"<div class='dq-mobile-engine-row'>{engine_html}</div>", unsafe_allow_html=True)
+    if entry_policy.get("exit_only"):
+        st.warning(
+            f"EXIT-ONLY · {float(entry_policy.get('gross_exposure_percent') or 0.0):.1f}% gross exposure · "
+            f"{int(entry_policy.get('open_stock_positions') or 0)} positions. New buys are paused; exits stay active."
+        )
 
     selected_view = st.radio(
         "Mobile navigation",
@@ -3942,6 +3961,14 @@ def render_account_page(payload, view):
     order_count_by_day = payload.get("order_count_by_day") or []
     orders_today = int((order_count_by_day[-1] if order_count_by_day else {}).get("submitted_count") or 0)
     bot_net_pl = _as_float(view.get("bot_net_pl"), 0.0)
+    entry_policy = dict((payload.get("latest_account") or {}).get("portfolio_entry_policy") or {})
+
+    if entry_policy.get("exit_only"):
+        st.warning(
+            f"Portfolio is EXIT-ONLY: {float(entry_policy.get('gross_exposure_percent') or 0.0):.1f}% gross exposure, "
+            f"{int(entry_policy.get('open_stock_positions') or 0)} stock positions, "
+            f"{format_currency(entry_policy.get('cash'))} cash. New entries stay blocked while exits reduce exposure."
+        )
 
     acc_cols = st.columns(4)
     _metric_card(acc_cols[0], "Portfolio Value", format_currency(view["portfolio_value"]), "neutral")
@@ -4106,11 +4133,15 @@ def render_orders_page(payload):
 def render_performance_page(payload):
     view = build_dashboard_view_model(payload)
     bot_net_pl = _as_float(view.get("bot_net_pl"), 0.0)
+    reconstruction = dict(payload.get("stock_pnl_reconstruction") or {})
+    estimated_live_net = _as_float(reconstruction.get("estimated_live_net_pnl"), bot_net_pl)
+    estimated_costs = _as_float(reconstruction.get("estimated_execution_costs"), 0.0)
 
     st.markdown("### BOT PERFORMANCE")
-    performance_card = st.columns(2)
+    performance_card = st.columns(3)
     realized_values = [
         ("Realized Stock P/L", bot_net_pl),
+        ("Estimated After Live Costs", estimated_live_net),
         ("Completed Stock Trades", int(view.get("stock_closed_trade_count") or 0)),
     ]
     for column, (label, value) in zip(performance_card, realized_values):
@@ -4121,6 +4152,34 @@ def render_performance_page(payload):
         "Each completed sell adds its gain or loss. Buys and open positions do not affect this number."
     )
     st.info("This is the bot's locked-in result. Current gains or losses on positions it still owns are intentionally excluded.")
+    st.caption(
+        f"The estimated-live figure subtracts {format_currency(estimated_costs)} of modeled slippage, sell fees, and short borrow. "
+        "It is a conservative research estimate; the realized headline remains the exact PAPER fill-to-fill result."
+    )
+
+    strategy_rows = []
+    for row in list(reconstruction.get("strategy_scoreboard") or []):
+        execution_policy = dict((row or {}).get("execution_policy") or {})
+        strategy_rows.append(
+            {
+                "Strategy": _safe_text((row or {}).get("strategy_id"), "Unknown"),
+                "Mode": _safe_text(execution_policy.get("state"), "PROBATION"),
+                "Closed": int((row or {}).get("completed_trade_count") or 0),
+                "Win rate": format_percent((row or {}).get("win_rate"), "0.00%"),
+                "Actual fill P/L": format_currency((row or {}).get("actual_fill_net_profit")),
+                "Estimated costs": format_currency((row or {}).get("estimated_execution_costs")),
+                "Estimated live P/L": format_currency((row or {}).get("net_profit")),
+                "Profit factor": round(_as_float((row or {}).get("profit_factor"), 0.0), 2),
+                "Expectancy": format_currency((row or {}).get("expectancy")),
+                "Max drawdown": format_percent((row or {}).get("maximum_drawdown"), "0.00%"),
+            }
+        )
+    st.markdown("#### Strategy Scoreboard")
+    if strategy_rows:
+        st.dataframe(strategy_rows)
+        st.caption("SHADOW strategies keep generating evidence but cannot submit orders. PROBATION strategies remain capped at 10%; only a positive READY sample can unlock confidence sizing above 10%.")
+    else:
+        st.info("No completed stock trades are available for the strategy scoreboard yet.")
 
 
 def render_daily_run_page():

@@ -53,6 +53,12 @@ def test_fifo_scale_ins_and_partial_exits_use_actual_fills_and_entry_strategy():
     assert result["matched_lot_count"] == 3
     assert result["open_inventory"] == []
     assert result["strategy_attribution_complete"] is True
+    assert result["estimated_execution_costs"] > 0.0
+    assert result["estimated_live_net_pnl"] < result["realized_stock_pnl"]
+    assert {row["strategy_id"] for row in result["strategy_scoreboard"]} == {
+        "mean_reversion_v2",
+        "trend_momentum_v2",
+    }
     assert {row["strategy_id"]: row["realized_pnl"] for row in result["per_strategy"]} == {
         "mean_reversion_v2": 5.0,
         "trend_momentum_v2": 200.0,

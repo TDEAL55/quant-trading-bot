@@ -678,6 +678,70 @@ def test_continuous_scan_cycle_blocks_stock_entry_at_daily_loss_stop(monkeypatch
     assert broker.submissions == []
 
 
+def test_continuous_scan_cycle_pauses_entries_when_portfolio_is_overextended(monkeypatch):
+    monkeypatch.setattr("continuous_scan_cycle.PAPER_EXECUTION_ENABLED", True)
+    monkeypatch.setattr("continuous_scan_cycle.CONTROLLED_PAPER_VALIDATION", False)
+
+    class _OverextendedBroker(_Broker):
+        def __init__(self):
+            super().__init__()
+            self._positions = {
+                "JPM": {"quantity": 800.0, "avg_price": 100.0, "current_price": 100.0, "market_value": 80_000.0},
+                "MCO": {"quantity": 600.0, "avg_price": 100.0, "current_price": 100.0, "market_value": 60_000.0},
+            }
+
+        def get_account(self):
+            return {
+                "status": "ACTIVE",
+                "equity": 100_000.0,
+                "last_equity": 100_000.0,
+                "day_pl": 0.0,
+                "cash": 50_000.0,
+                "buying_power": 50_000.0,
+            }
+
+    broker = _OverextendedBroker()
+    repo = _Repo()
+
+    def _shortlist_runner(scan_payload, positions, cash, portfolio_value):
+        return {
+            "selected": [
+                {
+                    "rank": 1,
+                    "symbol": "AAA",
+                    "score": 82.0,
+                    "confidence": 76.0,
+                    "suggested_paper_notional": 2000.0,
+                    "suggested_max_allocation_percent": 10.0,
+                }
+            ],
+            "rejected": [],
+            "portfolio_warnings": [],
+            "selection_summary": {"selected_count": 1},
+        }
+
+    result = run_continuous_scan_cycle(
+        database_url="sqlite:///unused.db",
+        config_loader=_config_loader,
+        now_provider=lambda: datetime(2026, 7, 22, 10, 10, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=lambda universe: _scan_payload(),
+        shortlist_runner=_shortlist_runner,
+        scan_persistor=lambda **kwargs: {"storage": "database", "run_id": kwargs["run_payload"]["run_id"]},
+        execution_repo_factory=lambda **kwargs: repo,
+        positions_loader=lambda: (list(broker.get_positions().values()), 50_000.0, 100_000.0),
+        universe_loader=_universe_loader,
+        persist=True,
+    )
+
+    assert result.execution_status == "risk_rejected"
+    assert result.execution["risk_result"]["reason"] == "gross_exposure_above_limit"
+    assert result.execution["risk_result"]["checks"]["portfolio_entry_policy"] is False
+    assert result.execution["risk_result"]["portfolio_entry_policy"]["status"] == "EXIT_ONLY"
+    assert result.execution["risk_result"]["portfolio_entry_policy"]["automatic_liquidation_enabled"] is False
+    assert broker.submissions == []
+
+
 def test_continuous_scan_cycle_dry_run_never_submits_orders():
     broker = _Broker()
     repo = _Repo()
