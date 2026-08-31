@@ -3910,7 +3910,7 @@ def render_mobile_command_center(payload, view):
 
     st.markdown(
         "<div class='dq-mobile-install'>On iPhone: Share → Add to Home Screen.</div>"
-        "<div class='dq-mobile-back'><a href='?mobile=0' target='_self'>Open full desktop dashboard</a></div>",
+        "<div class='dq-mobile-back'><a href='/' target='_self'>Open full desktop dashboard</a></div>",
         unsafe_allow_html=True,
     )
 

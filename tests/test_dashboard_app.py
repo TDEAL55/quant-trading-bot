@@ -121,6 +121,13 @@ def test_mobile_dashboard_query_flag_is_explicit_and_tolerates_list_values(monke
     assert dashboard_app.mobile_dashboard_requested({}) is True
 
 
+def test_mobile_desktop_link_leaves_the_forced_mobile_route():
+    module_text = (REPO_ROOT / "dashboard_app.py").read_text(encoding="utf-8")
+
+    assert "<a href='/' target='_self'>Open full desktop dashboard</a>" in module_text
+    assert "href='?mobile=0'" not in module_text
+
+
 def test_market_clock_open_and_closed_states():
     tz = ZoneInfo("America/New_York")
     open_dt = datetime(2026, 7, 13, 10, 0, 0, tzinfo=tz)
