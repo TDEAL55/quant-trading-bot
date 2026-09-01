@@ -68,7 +68,7 @@ def test_risk_adjusted_position_size_honors_one_percent_risk_and_ten_percent_cap
     assert risk_adjusted_position_percent(stop_loss_percent=25, settings=settings) == 4
 
 
-def test_confidence_sizing_can_exceed_ten_percent_in_paper_only(monkeypatch):
+def test_confidence_sizing_cannot_exceed_ten_percent_in_paper(monkeypatch):
     monkeypatch.setenv("PAPER_CONFIDENCE_SIZING_ENABLED", "true")
     monkeypatch.setenv("PAPER_CONFIDENCE_MAX_POSITION_PERCENT", "20")
     settings = PnLRiskSettings(maximum_position_percent=10, maximum_risk_per_trade_percent=1)
@@ -84,7 +84,7 @@ def test_confidence_sizing_can_exceed_ten_percent_in_paper_only(monkeypatch):
         settings=settings,
         strategy_signal=signal,
         trading_mode="PAPER",
-    ) == 15.0
+    ) == 10.0
     assert confidence_adjusted_position_percent(
         stop_loss_percent=4,
         settings=settings,
@@ -93,7 +93,7 @@ def test_confidence_sizing_can_exceed_ten_percent_in_paper_only(monkeypatch):
     ) == 10.0
 
 
-def test_twenty_percent_confidence_tier_requires_validated_strategy(monkeypatch):
+def test_validated_strategy_still_cannot_bypass_ten_percent_cap(monkeypatch):
     monkeypatch.setenv("PAPER_CONFIDENCE_SIZING_ENABLED", "true")
     settings = PnLRiskSettings(maximum_position_percent=10, maximum_risk_per_trade_percent=1)
     signal = {
@@ -115,14 +115,14 @@ def test_twenty_percent_confidence_tier_requires_validated_strategy(monkeypatch)
         strategy_signal=signal,
         strategy_leaderboard=[],
         trading_mode="PAPER",
-    ) == 15.0
+    ) == 10.0
     assert confidence_adjusted_position_percent(
         stop_loss_percent=4,
         settings=settings,
         strategy_signal=signal,
         strategy_leaderboard=leaderboard,
         trading_mode="PAPER",
-    ) == 20.0
+    ) == 10.0
 
 
 def test_settings_reject_position_limits_above_ten_percent():

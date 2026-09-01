@@ -24,6 +24,11 @@ def test_strategy_plugins_emit_expected_fields_and_ids():
                 "market_regime_alignment": 64.0,
             },
             "risk_reward": {"reward_risk_ratio": 1.8},
+            "factor_values": {
+                "trend_strength": {"close": 101.0, "ema20": 100.0, "ema50": 95.0},
+                "momentum_quality": {"rsi14": 55.0},
+                "volatility_quality": {"atr_pct": 2.0, "realized_volatility_pct": 18.0},
+            },
             "warnings": [],
             "rejection_reasons": [],
         },
@@ -31,9 +36,9 @@ def test_strategy_plugins_emit_expected_fields_and_ids():
     rows = evaluate_all_strategies(payload)
 
     ids = {row["strategy_id"] for row in rows}
-    assert ids == {"stock_trend_ensemble_v2", "stock_mean_reversion_v2", "stock_bearish_trend_v2"}
+    assert ids == {"stock_trend_pullback_v3"}
     for row in rows:
-        assert row["strategy_version"] == "2.0.0"
+        assert row["strategy_version"] == "3.0.0"
         assert row["symbol"] == "JPM"
         assert "entry_reason" in row
         assert "proposed_entry" in row
@@ -46,7 +51,7 @@ def test_strategy_plugins_emit_expected_fields_and_ids():
         assert "data_quality_status" in row
 
 
-def test_bearish_strategy_emits_sell_only_for_explicit_paper_short(monkeypatch):
+def test_bearish_entry_sleeve_is_retired_even_when_short_is_enabled(monkeypatch):
     monkeypatch.setenv("TRADING_MODE", "PAPER")
     monkeypatch.setenv("PAPER_ALLOW_SHORT_SELLING", "true")
     payload = {
@@ -67,10 +72,7 @@ def test_bearish_strategy_emits_sell_only_for_explicit_paper_short(monkeypatch):
     }
 
     rows = evaluate_all_strategies(payload)
-    short_signal = next(row for row in rows if row["strategy_id"] == "stock_bearish_trend_v2")
-
-    assert short_signal["signal"] == "SELL"
-    assert short_signal["stop"] > payload["latest_price"]
+    assert all(row["signal"] != "SELL" for row in rows)
 
 
 def test_strategy_plugins_fail_closed_without_quantum_factor_payload():

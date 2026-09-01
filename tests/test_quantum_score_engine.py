@@ -114,6 +114,7 @@ def test_strategy_specific_scores_remain_separate():
     quantum = calculate_quantum_score("AAA", frame, frame)
     strategy_scores = compute_strategy_specific_scores(quantum)
     assert set(strategy_scores.keys()) == {
+        "stock_trend_pullback_v3",
         "stock_trend_ensemble_v2",
         "stock_mean_reversion_v2",
         "stock_bearish_trend_v2",

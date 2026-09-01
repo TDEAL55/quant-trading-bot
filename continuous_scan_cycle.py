@@ -65,6 +65,7 @@ from pnl_risk_policy import (
     load_recent_closed_trades,
     confidence_adjusted_position_percent,
     risk_adjusted_position_percent,
+    volatility_adjusted_position_percent,
     settings_from_environment,
 )
 from risk_manager import RiskManager
@@ -727,6 +728,26 @@ def run_continuous_scan_cycle(
             )
 
             exit_candidates = list(position_guard_payload.get("exit_candidates") or [])
+            pending_symbols = {
+                str(row.get("symbol") or "").strip().upper()
+                for row in list(position_guard_payload.get("reviews") or [])
+                if str(row.get("recommendation") or "").strip().upper() == "EXIT_PENDING"
+            }
+            concentration_trims = [
+                dict(row or {})
+                for row in list(portfolio_entry_policy.get("profitable_trim_candidates") or [])
+                if str((row or {}).get("symbol") or "").strip().upper() not in pending_symbols
+            ]
+            exit_candidates.extend(concentration_trims)
+            exit_candidates.sort(
+                key=lambda row: (
+                    int(row.get("priority") if row.get("priority") is not None else 99),
+                    -float(row.get("allocation_percent") or 0.0),
+                    str(row.get("symbol") or ""),
+                )
+            )
+            position_guard_payload["exit_candidates"] = exit_candidates
+            position_guard_payload.setdefault("summary", {})["profitable_concentration_trims"] = len(concentration_trims)
             if exit_candidates:
                 selected_exit = dict(exit_candidates[0])
                 exit_execution = execute_guard_exit(
@@ -1360,6 +1381,11 @@ def run_continuous_scan_cycle(
         max_position_equity_percent = min(
             float(max_position_equity_percent),
             float(selected_strategy_policy.get("max_position_percent") or max_position_equity_percent),
+            10.0,
+        )
+        max_position_equity_percent = volatility_adjusted_position_percent(
+            base_position_percent=max_position_equity_percent,
+            strategy_signal=selected_strategy,
         )
         max_open_positions = _effective_max_open_positions(config)
         per_strategy_allocation = float(selected_strategy.get("requested_risk_allocation") or 0.25)

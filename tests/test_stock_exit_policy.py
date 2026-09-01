@@ -188,3 +188,27 @@ def test_strategy_exit_policy_is_disabled_outside_paper():
 
     assert decision["recommendation"] == "REVIEW_REQUIRED"
     assert decision["exit_reason"] == "paper_exit_policy_disabled_outside_paper"
+
+
+def test_trend_pullback_uses_time_stop_only_when_not_profitable():
+    base = dict(
+        strategy_id="stock_trend_pullback_v3",
+        position_side="LONG",
+        entry_price=100.0,
+        current_price=99.0,
+        entry_context={
+            "bot_entry_confirmed": True,
+            "bot_entry_attributed": True,
+            "entry_timestamp": "2026-07-01T15:00:00+00:00",
+        },
+        current_timestamp="2026-08-05T15:00:00+00:00",
+        peak_return_percent=2.0,
+        legacy_stop_loss_percent=4.0,
+        legacy_take_profit_percent=8.0,
+        trading_mode="PAPER",
+    )
+    losing = evaluate_stock_exit(return_percent=-1.0, **base)
+    winning = evaluate_stock_exit(return_percent=1.0, **{**base, "current_price": 101.0})
+    assert losing["recommendation"] == "CLOSE_TIME_STOP"
+    assert losing["exit_reason"] == "trend_pullback_time_stop_reached"
+    assert winning["recommendation"] == "HOLD"

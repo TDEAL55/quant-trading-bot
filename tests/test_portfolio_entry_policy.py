@@ -47,3 +47,43 @@ def test_too_many_small_positions_is_exit_only():
     result = evaluate_portfolio_entry_policy({"equity": 100_000, "cash": 50_000}, positions)
     assert result["exit_only"] is True
     assert "open_stock_positions_above_limit" in result["reasons"]
+
+
+def test_profitable_oversized_position_creates_partial_trim_to_ten_percent():
+    result = evaluate_portfolio_entry_policy(
+        {"equity": 100_000, "cash": 10_000},
+        {
+            "JPM": {
+                "quantity": 400,
+                "avg_price": 190,
+                "current_price": 200,
+                "market_value": 80_000,
+                "unrealized_pl": 4_000,
+                "asset_class": "us_equity",
+            }
+        },
+    )
+    trim = result["profitable_trim_candidates"][0]
+    assert trim["symbol"] == "JPM"
+    assert trim["close_side"] == "SELL"
+    assert trim["quantity"] == 350.0
+    assert trim["target_percent"] == 10.0
+    assert result["automatic_liquidation_enabled"] is True
+
+
+def test_losing_oversized_position_does_not_create_profit_trim():
+    result = evaluate_portfolio_entry_policy(
+        {"equity": 100_000, "cash": 10_000},
+        {
+            "JPM": {
+                "quantity": 400,
+                "avg_price": 210,
+                "current_price": 200,
+                "market_value": 80_000,
+                "unrealized_pl": -4_000,
+                "asset_class": "us_equity",
+            }
+        },
+    )
+    assert result["profitable_trim_candidates"] == []
+    assert result["automatic_liquidation_enabled"] is False

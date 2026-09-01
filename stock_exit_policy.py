@@ -7,11 +7,13 @@ from typing import Any
 
 
 TREND_STRATEGY_ID = "stock_trend_ensemble_v2"
+TREND_PULLBACK_STRATEGY_ID = "stock_trend_pullback_v3"
 MEAN_REVERSION_STRATEGY_ID = "stock_mean_reversion_v2"
 BEARISH_STRATEGY_ID = "stock_bearish_trend_v2"
 SUPPORTED_STOCK_EXIT_STRATEGIES = frozenset(
     {
         TREND_STRATEGY_ID,
+        TREND_PULLBACK_STRATEGY_ID,
         MEAN_REVERSION_STRATEGY_ID,
         BEARISH_STRATEGY_ID,
     }
@@ -31,6 +33,17 @@ class StockExitProfile:
 
 
 STRATEGY_EXIT_PROFILES: dict[str, StockExitProfile] = {
+    TREND_PULLBACK_STRATEGY_ID: StockExitProfile(
+        profile_id="trend_pullback_atr_v3",
+        strategy_id=TREND_PULLBACK_STRATEGY_ID,
+        expected_side="LONG",
+        # Recorded ATR-derived entry stops/targets override these fallbacks.
+        stop_loss_percent=5.0,
+        take_profit_percent=15.0,
+        trailing_activation_percent=6.0,
+        trailing_distance_percent=3.0,
+        maximum_holding_sessions=20,
+    ),
     TREND_STRATEGY_ID: StockExitProfile(
         profile_id="trend_relative_strength_v2",
         strategy_id=TREND_STRATEGY_ID,
@@ -264,7 +277,7 @@ def evaluate_stock_exit(
             recommendation="CLOSE_STOP_LOSS",
             exit_reason=(
                 "trend_hard_stop_reached"
-                if profile.strategy_id == TREND_STRATEGY_ID
+                if profile.strategy_id in {TREND_STRATEGY_ID, TREND_PULLBACK_STRATEGY_ID}
                 else "mean_reversion_stop_reached"
                 if profile.strategy_id == MEAN_REVERSION_STRATEGY_ID
                 else "bearish_short_stop_reached"
@@ -275,7 +288,7 @@ def evaluate_stock_exit(
         )
         return decision
 
-    if profile_applied and profile.strategy_id == TREND_STRATEGY_ID and bool(context.get("trend_failure", False)):
+    if profile_applied and profile.strategy_id in {TREND_STRATEGY_ID, TREND_PULLBACK_STRATEGY_ID} and bool(context.get("trend_failure", False)):
         decision.update(recommendation="CLOSE_STRATEGY_EXIT", exit_reason="trend_failure_detected", priority=1)
         return decision
 
@@ -310,6 +323,20 @@ def evaluate_stock_exit(
         )
         return decision
 
+    if (
+        profile_applied
+        and profile.strategy_id == TREND_PULLBACK_STRATEGY_ID
+        and profile.maximum_holding_sessions is not None
+        and holding_sessions >= profile.maximum_holding_sessions
+        and current_return <= 0.0
+    ):
+        decision.update(
+            recommendation="CLOSE_TIME_STOP",
+            exit_reason="trend_pullback_time_stop_reached",
+            priority=2,
+        )
+        return decision
+
     if profile_applied and profile.strategy_id == MEAN_REVERSION_STRATEGY_ID:
         mean_target = _mean_target_price(context)
         decision["mean_target_price"] = round(mean_target, 8) if mean_target > 0 else None
@@ -333,7 +360,7 @@ def evaluate_stock_exit(
             recommendation="CLOSE_TAKE_PROFIT",
             exit_reason=(
                 "trend_profit_cap_reached"
-                if profile.strategy_id == TREND_STRATEGY_ID
+                if profile.strategy_id in {TREND_STRATEGY_ID, TREND_PULLBACK_STRATEGY_ID}
                 else "mean_reversion_profit_target_reached"
                 if profile.strategy_id == MEAN_REVERSION_STRATEGY_ID
                 else "bearish_profit_target_reached"

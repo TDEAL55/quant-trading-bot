@@ -33,6 +33,8 @@ class PortfolioEntryPolicySettings:
     maximum_open_stock_positions: int = 15
     minimum_cash: float = 0.0
     normalization_position_percent: float = 10.0
+    profitable_normalization_enabled: bool = True
+    minimum_unrealized_profit: float = 0.0
 
     def validate(self) -> None:
         if self.maximum_gross_exposure_percent <= 0:
@@ -50,6 +52,10 @@ def settings_from_environment(environ: Mapping[str, str] | None = None) -> Portf
         maximum_open_stock_positions=_as_int(env.get("PAPER_MAX_OPEN_STOCK_POSITIONS"), 15),
         minimum_cash=_as_float(env.get("PAPER_MINIMUM_ENTRY_CASH"), 0.0),
         normalization_position_percent=_as_float(env.get("PAPER_NORMALIZATION_POSITION_PERCENT"), 10.0),
+        profitable_normalization_enabled=str(
+            env.get("PAPER_PROFITABLE_NORMALIZATION_ENABLED", "true")
+        ).strip().lower() in {"1", "true", "yes", "on"},
+        minimum_unrealized_profit=_as_float(env.get("PAPER_NORMALIZATION_MINIMUM_UNREALIZED_PROFIT"), 0.0),
     )
     settings.validate()
     return settings
@@ -61,10 +67,11 @@ def evaluate_portfolio_entry_policy(
     *,
     settings: PortfolioEntryPolicySettings | None = None,
 ) -> dict[str, Any]:
-    """Block only new entries when the PAPER portfolio is overextended.
+    """Gate entries and identify narrowly safe PAPER normalization trims.
 
-    This function never creates an order and never asks callers to liquidate.
-    Existing exit policies remain independent and can continue reducing risk.
+    The function is pure and never creates an order. It only marks the excess
+    above the concentration ceiling as trim-eligible when that position is
+    currently profitable; the runner remains responsible for execution.
     """
     policy = settings or PortfolioEntryPolicySettings()
     policy.validate()
@@ -82,6 +89,7 @@ def evaluate_portfolio_entry_policy(
         if not symbol or abs(quantity) <= 1e-8 or not _is_stock(symbol, payload):
             continue
         price = _as_float(payload.get("current_price") or payload.get("market_price") or payload.get("avg_price"), 0.0)
+        average_price = _as_float(payload.get("avg_price") or payload.get("average_entry_price"), 0.0)
         signed_market_value = _as_float(payload.get("market_value"), quantity * price)
         if signed_market_value == 0.0 and price > 0:
             signed_market_value = quantity * price
@@ -92,6 +100,18 @@ def evaluate_portfolio_entry_policy(
                 "symbol": symbol,
                 "quantity": quantity,
                 "market_value": signed_market_value,
+                "current_price": price,
+                "average_price": average_price,
+                "unrealized_profit": _as_float(
+                    payload.get("unrealized_pl"),
+                    (
+                        (price - average_price) * quantity
+                        if quantity > 0
+                        else (average_price - price) * abs(quantity)
+                    )
+                    if price > 0 and average_price > 0
+                    else 0.0,
+                ),
             }
         )
 
@@ -108,24 +128,61 @@ def evaluate_portfolio_entry_policy(
         reasons.append("open_stock_positions_above_limit")
 
     normalization_rows: list[dict[str, Any]] = []
+    profitable_trim_candidates: list[dict[str, Any]] = []
     if equity > 0:
         target_notional = equity * policy.normalization_position_percent / 100.0
         for row in stock_rows:
             exposure = abs(_as_float(row.get("market_value"), 0.0))
             allocation_percent = exposure / equity * 100.0
+            direction = "SHORT" if _as_float(row.get("quantity"), 0.0) < 0 else "LONG"
             if allocation_percent <= policy.normalization_position_percent + 1e-9:
                 continue
             normalization_rows.append(
                 {
                     "symbol": row["symbol"],
-                    "direction": "SHORT" if _as_float(row.get("quantity"), 0.0) < 0 else "LONG",
+                    "direction": direction,
                     "allocation_percent": round(allocation_percent, 6),
                     "target_percent": policy.normalization_position_percent,
                     "excess_notional": round(max(exposure - target_notional, 0.0), 2),
                     "action": "review_for_gradual_reduction_no_automatic_order",
                 }
             )
+            current_price = _as_float(row.get("current_price"), 0.0)
+            unrealized_profit = _as_float(row.get("unrealized_profit"), 0.0)
+            trim_quantity = max(exposure - target_notional, 0.0) / current_price if current_price > 0 else 0.0
+            if (
+                policy.profitable_normalization_enabled
+                and unrealized_profit > policy.minimum_unrealized_profit
+                and trim_quantity > 1e-8
+            ):
+                profitable_trim_candidates.append(
+                    {
+                        "symbol": row["symbol"],
+                        "quantity": round(trim_quantity, 8),
+                        "position_side": direction,
+                        "close_side": "BUY" if direction == "SHORT" else "SELL",
+                        "current_market_price": round(current_price, 8),
+                        "return_percent": round(
+                            unrealized_profit / max(exposure - unrealized_profit, 1e-9) * 100.0,
+                            6,
+                        ),
+                        "unrealized_profit": round(unrealized_profit, 2),
+                        "allocation_percent": round(allocation_percent, 6),
+                        "target_percent": policy.normalization_position_percent,
+                        "recommendation": "CLOSE_PORTFOLIO_TRIM",
+                        "exit_reason": "profitable_position_above_concentration_limit",
+                        "priority": 3,
+                        "exit_profile": {
+                            "profile_id": "profitable_concentration_trim_v1",
+                            "strategy_profile_applied": False,
+                            "target_position_percent": policy.normalization_position_percent,
+                        },
+                    }
+                )
     normalization_rows.sort(key=lambda row: (-float(row["allocation_percent"]), str(row["symbol"])))
+    profitable_trim_candidates.sort(
+        key=lambda row: (-float(row["allocation_percent"]), -float(row["unrealized_profit"]), str(row["symbol"]))
+    )
 
     exit_only = bool(reasons)
     return {
@@ -146,5 +203,7 @@ def evaluate_portfolio_entry_policy(
             "normalization_position_percent": policy.normalization_position_percent,
         },
         "normalization_candidates": normalization_rows,
-        "automatic_liquidation_enabled": False,
+        "profitable_trim_candidates": profitable_trim_candidates,
+        "automatic_liquidation_enabled": bool(profitable_trim_candidates),
+        "automatic_liquidation_scope": "profitable_partial_trim_to_concentration_limit",
     }

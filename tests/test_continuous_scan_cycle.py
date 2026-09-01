@@ -463,6 +463,52 @@ def test_position_guard_exit_takes_precedence_over_new_entry_scan(monkeypatch):
     assert broker.get_positions() == {}
 
 
+def test_profitable_oversized_position_is_partially_trimmed_before_new_scan(monkeypatch):
+    monkeypatch.setattr("continuous_scan_cycle.PAPER_EXECUTION_ENABLED", True)
+
+    class _TrimConfig(_Config):
+        position_guard_enabled = True
+        position_guard_auto_exit_enabled = True
+        position_guard_stop_loss_percent = 4.0
+        position_guard_take_profit_percent = 8.0
+        position_guard_max_exits_per_cycle = 1
+
+    class _TrimBroker(SimulatedPaperBroker):
+        def get_positions(self):
+            positions = super().get_positions()
+            for payload in positions.values():
+                payload["current_price"] = 200.0
+                payload["market_value"] = float(payload["quantity"]) * 200.0
+                payload["unrealized_pl"] = (200.0 - float(payload["avg_price"])) * float(payload["quantity"])
+                payload["asset_class"] = "us_equity"
+            return positions
+
+    broker = _TrimBroker(
+        mode="PAPER",
+        buying_power=10_000.0,
+        positions={"JPM": {"quantity": 400.0, "avg_price": 190.0}},
+    )
+
+    result = run_continuous_scan_cycle(
+        database_url="sqlite:///unused.db",
+        config_loader=lambda: _TrimConfig(),
+        now_provider=lambda: datetime(2026, 8, 31, 15, 0, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=lambda universe: pytest.fail("scanner must not run before a profitable concentration trim"),
+        execution_repo_factory=lambda **kwargs: _Repo(),
+        positions_loader=_positions_loader,
+        universe_loader=_universe_loader,
+        persist=False,
+    )
+
+    assert result.execution_status == "completed"
+    assert result.execution["paper_order"]["symbol"] == "JPM"
+    assert result.execution["paper_order"]["side"] == "SELL"
+    assert result.execution["paper_order"]["exit_reason"] == "profitable_position_above_concentration_limit"
+    assert 0 < result.execution["paper_order"]["quantity"] < 400
+    assert 0 < broker.get_positions()["JPM"]["quantity"] < 400
+
+
 def test_continuous_scan_cycle_enforces_duplicate_protection():
     broker = _Broker()
     repo = _Repo()

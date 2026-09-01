@@ -522,6 +522,12 @@ def _market_regime_alignment(
         score += 6.0
     if sid == "stock_trend_ensemble_v2" and regime in {"bear", "high_volatility_risk_off"}:
         score -= 8.0
+    if sid == "stock_trend_pullback_v3" and regime == "bull":
+        score += 8.0
+    if sid == "stock_trend_pullback_v3" and regime == "weak_bull":
+        score += 3.0
+    if sid == "stock_trend_pullback_v3" and regime in {"bear", "high_volatility_risk_off"}:
+        score -= 12.0
 
     return (
         _clamp(score),
@@ -663,7 +669,16 @@ def compute_strategy_specific_scores(quantum_payload: dict[str, Any]) -> dict[st
     data_quality_status = str(quantum_payload.get("data_quality_status") or "warn")
     factor_values = dict(quantum_payload.get("factor_values") or {})
     momentum_values = dict(factor_values.get("momentum_quality") or {})
+    trend_values = dict(factor_values.get("trend_strength") or {})
     rsi14 = _safe_float(momentum_values.get("rsi14"), None)
+    latest_close = _safe_float(trend_values.get("close"), None)
+    ema20 = _safe_float(trend_values.get("ema20"), None)
+    ema50 = _safe_float(trend_values.get("ema50"), None)
+    pullback_distance_pct = (
+        ((float(latest_close) / float(ema20)) - 1.0) * 100.0
+        if latest_close not in {None, 0.0} and ema20 not in {None, 0.0}
+        else None
+    )
 
     def _component(name: str) -> float:
         return float(component_scores.get(name) or 0.0)
@@ -678,7 +693,7 @@ def compute_strategy_specific_scores(quantum_payload: dict[str, Any]) -> dict[st
         eligible = len(rejections) == 0
         return {
             "strategy_id": strategy_id,
-            "strategy_version": "2.0.0",
+            "strategy_version": "3.0.0" if strategy_id == "stock_trend_pullback_v3" else "2.0.0",
             "strategy_score": round(_clamp(raw), 4),
             "required_factors": sorted(confirmations.keys()),
             "rejection_reasons": sorted(set(rejections)),
@@ -704,6 +719,44 @@ def compute_strategy_specific_scores(quantum_payload: dict[str, Any]) -> dict[st
         + (_component("volume_confirmation") * 0.10)
         + (_component("market_regime_alignment") * 0.10)
         + (_component("risk_reward_quality") * 0.08)
+    )
+
+    # One cohesive long-stock thesis: strong relative trend, then enter only
+    # during a controlled pullback rather than chasing an extended move.
+    pullback_confirmations = {
+        "market_regime": regime in {"bull", "weak_bull"},
+        "established_uptrend": bool(
+            latest_close is not None
+            and ema20 is not None
+            and ema50 is not None
+            and float(latest_close) > float(ema50)
+            and float(ema20) > float(ema50)
+            and _component("trend_strength") >= 60.0
+        ),
+        "relative_strength": _component("relative_strength") >= 55.0,
+        "controlled_pullback": bool(
+            pullback_distance_pct is not None
+            and -2.0 <= float(pullback_distance_pct) <= 4.0
+            and rsi14 is not None
+            and 42.0 <= float(rsi14) <= 64.0
+        ),
+        "liquidity": _component("liquidity_quality") >= 60.0,
+        "volatility": _component("volatility_quality") >= 45.0,
+        "reward_risk": rr_ratio >= 1.2,
+    }
+    pullback_quality = (
+        75.0
+        if pullback_confirmations["controlled_pullback"]
+        else _clamp(50.0 - abs(float(pullback_distance_pct or 0.0)) * 5.0)
+    )
+    pullback_raw = (
+        (_component("trend_strength") * 0.24)
+        + (_component("relative_strength") * 0.24)
+        + (_component("momentum_quality") * 0.12)
+        + (pullback_quality * 0.16)
+        + (_component("market_regime_alignment") * 0.10)
+        + (_component("liquidity_quality") * 0.07)
+        + (_component("risk_reward_quality") * 0.07)
     )
 
     oversold_score = _clamp(((40.0 - float(rsi14)) / 15.0) * 100.0) if rsi14 is not None else 0.0
@@ -739,6 +792,13 @@ def compute_strategy_specific_scores(quantum_payload: dict[str, Any]) -> dict[st
     )
 
     return {
+        "stock_trend_pullback_v3": _build(
+            "stock_trend_pullback_v3",
+            pullback_raw,
+            [(passed, f"{name}_check_failed") for name, passed in pullback_confirmations.items()],
+            direction="LONG",
+            confirmations=pullback_confirmations,
+        ),
         "stock_trend_ensemble_v2": _build(
             "stock_trend_ensemble_v2",
             trend_raw,

@@ -112,6 +112,30 @@ def risk_adjusted_position_percent(
     return round(min(float(settings.maximum_position_percent), risk_limited), 6)
 
 
+def volatility_adjusted_position_percent(
+    *,
+    base_position_percent: float,
+    strategy_signal: dict[str, Any] | None,
+    target_annualized_volatility_percent: float = 20.0,
+    minimum_scale: float = 0.25,
+) -> float:
+    """Reduce, but never increase, position size as observed volatility rises."""
+    signal = dict(strategy_signal or {})
+    factors = dict((signal.get("supporting_factors") or {}).get("factor_values") or {})
+    volatility = dict(factors.get("volatility_quality") or {})
+    realized = _as_float(volatility.get("realized_volatility_pct"), 0.0)
+    atr_pct = _as_float(volatility.get("atr_pct"), 0.0)
+    scale = 1.0
+    if realized > 0:
+        scale = min(scale, float(target_annualized_volatility_percent) / realized)
+    if atr_pct > 0:
+        # Four percent daily ATR is already a high-volatility stock for this
+        # medium-horizon strategy; taper exposure before that point.
+        scale = min(scale, 2.5 / atr_pct)
+    scale = max(min(float(scale), 1.0), float(minimum_scale))
+    return round(max(float(base_position_percent), 0.0) * scale, 6)
+
+
 def confidence_adjusted_position_percent(
     *,
     stop_loss_percent: float,
@@ -122,9 +146,8 @@ def confidence_adjusted_position_percent(
 ) -> float:
     """Allow bounded PAPER conviction sizing without bypassing risk-per-trade.
 
-    Ten percent remains the ordinary cap. A fully confirmed, unusually strong
-    signal may reach 15%; 20% additionally requires a ready, profitable live
-    paper sample for that exact strategy. LIVE mode never receives this boost.
+    Ten percent is the absolute cap in every mode. Confidence can reduce risk
+    through the risk budget but cannot override portfolio concentration.
     """
     settings.validate()
     base_cap = float(settings.maximum_position_percent)
@@ -132,34 +155,7 @@ def confidence_adjusted_position_percent(
     if mode != "PAPER" or str(os.getenv("PAPER_CONFIDENCE_SIZING_ENABLED", "true")).strip().lower() not in {"1", "true", "yes", "on"}:
         return risk_adjusted_position_percent(stop_loss_percent=stop_loss_percent, settings=settings)
 
-    signal = dict(strategy_signal or {})
-    confirmations = dict((signal.get("supporting_factors") or {}).get("confirmations") or {})
-    full_confirmation = bool(len(confirmations) >= 3 and all(bool(value) for value in confirmations.values()))
-    confidence = _as_float(signal.get("confidence"), 0.0)
-    strategy_score = _as_float(signal.get("strategy_score"), 0.0)
-    requested_cap = base_cap
-    absolute_cap = min(
-        max(_as_float(os.getenv("PAPER_CONFIDENCE_MAX_POSITION_PERCENT", "20"), 20.0), base_cap),
-        25.0,
-    )
-
-    if full_confirmation and confidence >= 85.0 and strategy_score >= 80.0:
-        requested_cap = min(max(base_cap, 15.0), absolute_cap)
-
-        strategy_id = str(signal.get("strategy_id") or "")
-        validated = next(
-            (
-                dict(row or {})
-                for row in list(strategy_leaderboard or [])
-                if str((row or {}).get("strategy_id") or "") == strategy_id
-                and str((row or {}).get("sample_status") or "").upper() == "READY"
-                and _as_float((row or {}).get("expectancy"), 0.0) > 0.0
-                and _as_float((row or {}).get("profit_factor"), 0.0) >= 1.2
-            ),
-            None,
-        )
-        if validated and confidence >= 92.0 and strategy_score >= 88.0:
-            requested_cap = min(max(requested_cap, 20.0), absolute_cap)
+    requested_cap = min(base_cap, 10.0)
 
     stop = abs(_as_float(stop_loss_percent, 0.0))
     risk_limited = (
@@ -167,7 +163,7 @@ def confidence_adjusted_position_percent(
         if stop > 0
         else requested_cap
     )
-    return round(min(requested_cap, risk_limited), 6)
+    return round(min(requested_cap, risk_limited, 10.0), 6)
 
 
 def evaluate_account_pnl_policy(

@@ -52,6 +52,7 @@ def _paper_short_enabled() -> bool:
 def _payloads(candidate: dict[str, Any]) -> dict[str, dict[str, Any]]:
     existing = dict(candidate.get("strategy_specific_scores") or {})
     supported_ids = {
+        "stock_trend_pullback_v3",
         "stock_trend_ensemble_v2",
         "stock_mean_reversion_v2",
         "stock_bearish_trend_v2",
@@ -135,38 +136,39 @@ def _build_signal(
 
 
 def evaluate_all_strategies(candidate: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return mutually regime-gated stock strategy sleeves.
+    """Return the single cohesive stock entry strategy.
 
-    Volume breakout is confirmation inside the trend sleeve. Mean reversion is
-    only eligible in a range/weak-bull regime, and the bearish sleeve is only
-    eligible in a bear regime. This prevents contradictory entries.
+    Legacy v2 strategies remain supported by the exit policy for existing
+    positions, but they no longer create new entries. This prevents strategy
+    soup and keeps all new stock risk tied to one trend/pullback thesis.
     """
     symbol = str(candidate.get("symbol") or "").upper()
     price = _safe_float(candidate.get("latest_price"), 0.0)
     if not symbol or price <= 0:
         return []
 
+    available_payloads = _payloads(candidate)
+    strategy_id = (
+        "stock_trend_pullback_v3"
+        if "stock_trend_pullback_v3" in available_payloads
+        else "stock_trend_ensemble_v2"
+    )
+    is_v3 = strategy_id == "stock_trend_pullback_v3"
     signals = [
         _build_signal(
             candidate,
-            "stock_trend_ensemble_v2",
-            entry_reason="trend, relative strength, momentum, and volume confirmation agree",
-            exit_rule="exit on trend breakdown, risk stop, or profit target",
+            strategy_id,
+            entry_reason=(
+                "market regime, relative strength, established trend, and controlled pullback agree"
+                if is_v3
+                else "legacy trend signal retained only for in-flight compatibility"
+            ),
+            exit_rule=(
+                "exit on ATR risk stop, trailing stop, trend breakdown, profit target, or time stop"
+                if is_v3
+                else "exit on trend breakdown, risk stop, or profit target"
+            ),
             requested_signal="BUY",
-        ),
-        _build_signal(
-            candidate,
-            "stock_mean_reversion_v2",
-            entry_reason="liquid oversold stock in a sideways or weak-bull market",
-            exit_rule="exit at mean reversion, risk stop, profit target, or five-session time stop",
-            requested_signal="BUY",
-        ),
-        _build_signal(
-            candidate,
-            "stock_bearish_trend_v2",
-            entry_reason="bear regime with trend, momentum, and relative-strength weakness",
-            exit_rule="cover on bearish trend reversal, risk stop, or profit target",
-            requested_signal="SELL",
         ),
     ]
     return [signal.to_dict() for signal in signals]

@@ -21,17 +21,23 @@ def _as_int(value: Any, default: int = 0) -> int:
 
 @dataclass(frozen=True)
 class StrategyExecutionPolicySettings:
-    minimum_ready_sample: int = 30
+    minimum_ready_sample: int = 50
+    minimum_out_of_sample_trades: int = 20
     minimum_expectancy: float = 0.0
     minimum_profit_factor: float = 1.2
+    maximum_drawdown_percent: float = 15.0
     probation_max_position_percent: float = 10.0
     shadow_strategy_ids: tuple[str, ...] = ("trend_momentum_v1",)
 
     def validate(self) -> None:
         if self.minimum_ready_sample < 1:
             raise ValueError("minimum_ready_sample must be positive")
+        if self.minimum_out_of_sample_trades < 1:
+            raise ValueError("minimum_out_of_sample_trades must be positive")
         if self.minimum_profit_factor < 0:
             raise ValueError("minimum_profit_factor cannot be negative")
+        if self.maximum_drawdown_percent <= 0:
+            raise ValueError("maximum_drawdown_percent must be positive")
         if not 0 < self.probation_max_position_percent <= 100:
             raise ValueError("probation_max_position_percent must be in (0, 100]")
 
@@ -48,9 +54,11 @@ def settings_from_environment(environ: Mapping[str, str] | None = None) -> Strat
         )
     )
     settings = StrategyExecutionPolicySettings(
-        minimum_ready_sample=_as_int(env.get("PAPER_STRATEGY_MINIMUM_READY_SAMPLE"), 30),
+        minimum_ready_sample=_as_int(env.get("PAPER_STRATEGY_MINIMUM_READY_SAMPLE"), 50),
+        minimum_out_of_sample_trades=_as_int(env.get("PAPER_STRATEGY_MINIMUM_OOS_TRADES"), 20),
         minimum_expectancy=_as_float(env.get("PAPER_STRATEGY_MINIMUM_EXPECTANCY"), 0.0),
         minimum_profit_factor=_as_float(env.get("PAPER_STRATEGY_MINIMUM_PROFIT_FACTOR"), 1.2),
+        maximum_drawdown_percent=_as_float(env.get("PAPER_STRATEGY_MAX_DRAWDOWN_PERCENT"), 15.0),
         probation_max_position_percent=_as_float(env.get("PAPER_PROBATION_MAX_POSITION_PERCENT"), 10.0),
         shadow_strategy_ids=shadow,
     )
@@ -85,6 +93,17 @@ def evaluate_strategy_execution_policy(
     completed = _as_int(evidence.get("completed_trade_count"), 0)
     expectancy = _as_float(evidence.get("expectancy"), 0.0)
     profit_factor = _as_float(evidence.get("profit_factor"), 0.0)
+    out_of_sample_trades = _as_int(
+        evidence.get("out_of_sample_trade_count") or evidence.get("oos_trade_count"),
+        0,
+    )
+    out_of_sample_expectancy = _as_float(
+        evidence.get("out_of_sample_expectancy") or evidence.get("oos_expectancy"),
+        0.0,
+    )
+    drawdown_percent = abs(
+        _as_float(evidence.get("maximum_drawdown_percent") or evidence.get("max_drawdown_percent"), 100.0)
+    )
     ready = bool(
         completed >= policy.minimum_ready_sample
         and str(evidence.get("sample_status") or "").strip().upper() == "READY"
@@ -105,6 +124,19 @@ def evaluate_strategy_execution_policy(
             "execution_allowed": False,
             "reason": "nonpositive_or_weak_ready_sample",
             "max_position_percent": 0.0,
+            "evidence": evidence,
+        }
+    if (
+        out_of_sample_trades < policy.minimum_out_of_sample_trades
+        or out_of_sample_expectancy <= policy.minimum_expectancy
+        or drawdown_percent > policy.maximum_drawdown_percent
+    ):
+        return {
+            "strategy_id": normalized_id,
+            "state": "PROBATION",
+            "execution_allowed": True,
+            "reason": "awaiting_positive_out_of_sample_validation",
+            "max_position_percent": policy.probation_max_position_percent,
             "evidence": evidence,
         }
     return {
