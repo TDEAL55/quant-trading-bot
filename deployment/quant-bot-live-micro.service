@@ -1,0 +1,27 @@
+[Unit]
+Description=Quant Bot Controlled Micro LIVE Stock Runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=45
+KillSignal=SIGTERM
+User=quantbot
+Group=quantbot
+WorkingDirectory=/home/quantbot/quant-trading-bot
+EnvironmentFile=/etc/quant-bot/quant-bot-live.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/quantbot/quant-trading-bot/.venv/bin/python /home/quantbot/quant-trading-bot/controlled_live_runner.py
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/quant-bot
+
+[Install]
+WantedBy=multi-user.target
