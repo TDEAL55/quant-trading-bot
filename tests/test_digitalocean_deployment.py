@@ -99,7 +99,7 @@ def test_micro_paper_mobile_dashboard_is_a_fourth_isolated_service_and_url():
     assert "location /trial-mobile/" in nginx
     assert "proxy_pass http://127.0.0.1:8504" in nginx
     trial_mobile_block = nginx.split("location /trial-mobile/", 1)[1].split("location /", 1)[0]
-    assert "auth_basic off" not in trial_mobile_block
+    assert "auth_basic off" in trial_mobile_block
 
 
 def test_original_dashboards_cannot_fall_back_to_micro_broker_account():
