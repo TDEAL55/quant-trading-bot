@@ -37,6 +37,17 @@ def test_continuous_service_targets_continuous_runner():
     assert "User=quantbot" in text
 
 
+def test_hardened_micro_services_write_logs_only_to_state_directory():
+    for service_name, log_name in (
+        ("quant-bot-paper-micro.service", "paper-micro.log"),
+        ("quant-bot-live-micro.service", "live-micro.log"),
+    ):
+        text = (REPO_ROOT / "deployment" / service_name).read_text(encoding="utf-8")
+        assert f"Environment=BOT_LOG_FILE=/var/lib/quant-bot/{log_name}" in text
+        assert "ReadWritePaths=/var/lib/quant-bot" in text
+        assert "ProtectSystem=strict" in text
+
+
 def test_dashboard_service_targets_streamlit_dashboard():
     text = (REPO_ROOT / "deployment" / "quant-bot-dashboard.service").read_text(encoding="utf-8")
     assert "ExecStart=" in text

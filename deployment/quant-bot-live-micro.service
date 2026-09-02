@@ -14,6 +14,7 @@ Group=quantbot
 WorkingDirectory=/home/quantbot/quant-trading-bot
 EnvironmentFile=/etc/quant-bot/quant-bot-live.env
 Environment=PYTHONUNBUFFERED=1
+Environment=BOT_LOG_FILE=/var/lib/quant-bot/live-micro.log
 ExecStart=/home/quantbot/quant-trading-bot/.venv/bin/python /home/quantbot/quant-trading-bot/controlled_live_runner.py
 StandardOutput=journal
 StandardError=journal

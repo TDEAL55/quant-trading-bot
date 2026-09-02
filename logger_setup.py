@@ -1,9 +1,10 @@
 import logging
+import os
 import sys
 from pathlib import Path
 
 
-LOG_FILE = Path(__file__).resolve().parent / "bot.log"
+LOG_FILE = Path(os.getenv("BOT_LOG_FILE", str(Path(__file__).resolve().parent / "bot.log")))
 
 
 def setup_logger(name="trading_bot", log_file=None):

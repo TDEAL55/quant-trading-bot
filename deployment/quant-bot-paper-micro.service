@@ -15,6 +15,7 @@ WorkingDirectory=/home/quantbot/quant-trading-bot
 EnvironmentFile=/etc/quant-bot/quant-bot.env
 EnvironmentFile=/etc/quant-bot/paper-micro.env
 Environment=PYTHONUNBUFFERED=1
+Environment=BOT_LOG_FILE=/var/lib/quant-bot/paper-micro.log
 ExecStart=/home/quantbot/quant-trading-bot/.venv/bin/python /home/quantbot/quant-trading-bot/controlled_micro_paper_runner.py
 StandardOutput=journal
 StandardError=journal
