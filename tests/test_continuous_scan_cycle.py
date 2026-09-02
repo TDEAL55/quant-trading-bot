@@ -509,6 +509,108 @@ def test_profitable_oversized_position_is_partially_trimmed_before_new_scan(monk
     assert 0 < broker.get_positions()["JPM"]["quantity"] < 400
 
 
+def test_blocked_higher_priority_exit_does_not_starve_profitable_jpm_trim(monkeypatch):
+    monkeypatch.setattr("continuous_scan_cycle.PAPER_EXECUTION_ENABLED", True)
+    monkeypatch.setattr(
+        "continuous_scan_cycle.review_paper_positions",
+        lambda **kwargs: {
+            "reviews": [],
+            "exit_candidates": [
+                {
+                    "symbol": "AAA",
+                    "quantity": 10.0,
+                    "position_side": "LONG",
+                    "close_side": "SELL",
+                    "current_market_price": 90.0,
+                    "return_percent": -10.0,
+                    "recommendation": "CLOSE_STOP_LOSS",
+                    "exit_reason": "stop_loss_threshold_reached",
+                    "priority": 1,
+                }
+            ],
+            "summary": {"enabled": True, "selected_exits": 1},
+        },
+    )
+
+    class _TrimConfig(_Config):
+        position_guard_enabled = True
+        position_guard_auto_exit_enabled = True
+        position_guard_stop_loss_percent = 4.0
+        position_guard_take_profit_percent = 8.0
+        position_guard_max_exits_per_cycle = 1
+
+    class _TrimBroker(SimulatedPaperBroker):
+        def get_positions(self):
+            positions = super().get_positions()
+            prices = {"AAA": 90.0, "JPM": 200.0}
+            for symbol, payload in positions.items():
+                current_price = prices[symbol]
+                payload["current_price"] = current_price
+                payload["market_value"] = float(payload["quantity"]) * current_price
+                payload["unrealized_pl"] = (
+                    current_price - float(payload["avg_price"])
+                ) * float(payload["quantity"])
+                payload["asset_class"] = "us_equity"
+            return positions
+
+    class _DuplicateFirstExitRepo(_Repo):
+        def __init__(self, database_url=None):
+            super().__init__(database_url=database_url)
+            self.exit_lookups = 0
+
+        def fetch_latest_submitting_run_by_execution_fingerprint(self, execution_fingerprint):
+            self.exit_lookups += 1
+            if self.exit_lookups == 1:
+                return {"run_id": "prior-aaa-exit", "status": "completed", "submitted_order_count": 1}
+            return None
+
+    broker = _TrimBroker(
+        mode="PAPER",
+        buying_power=10_000.0,
+        positions={
+            "AAA": {"quantity": 10.0, "avg_price": 100.0},
+            "JPM": {"quantity": 400.0, "avg_price": 190.0},
+        },
+    )
+    repo = _DuplicateFirstExitRepo()
+
+    result = run_continuous_scan_cycle(
+        database_url="sqlite:///unused.db",
+        config_loader=lambda: _TrimConfig(),
+        now_provider=lambda: datetime(2026, 9, 1, 15, 0, tzinfo=timezone.utc),
+        broker_factory=lambda **kwargs: broker,
+        scan_runner=lambda universe: pytest.fail("scanner must not run before a profitable concentration trim"),
+        execution_repo_factory=lambda **kwargs: repo,
+        positions_loader=_positions_loader,
+        universe_loader=_universe_loader,
+        persist=False,
+    )
+
+    assert result.execution_status == "completed", result.execution
+    assert result.execution["selected"]["symbol"] == "JPM"
+    assert result.execution["paper_order"]["exit_reason"] == "profitable_position_above_concentration_limit"
+    assert result.execution["exit_attempts"] == [
+        {
+            "symbol": "AAA",
+            "exit_reason": "stop_loss_threshold_reached",
+            "status": "duplicate_rejected",
+            "orders_submission_requested": 0,
+            "orders_submitted": 0,
+        },
+        {
+            "symbol": "JPM",
+            "exit_reason": "profitable_position_above_concentration_limit",
+            "status": "completed",
+            "orders_submission_requested": 1,
+            "orders_submitted": 1,
+        },
+    ]
+    remaining_positions = broker.get_positions()
+    assert remaining_positions["AAA"]["quantity"] == 10.0
+    assert 0 < remaining_positions["JPM"]["quantity"] < 400.0
+    assert repo.exit_lookups == 2
+
+
 def test_continuous_scan_cycle_enforces_duplicate_protection():
     broker = _Broker()
     repo = _Repo()

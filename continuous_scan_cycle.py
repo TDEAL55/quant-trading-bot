@@ -749,24 +749,50 @@ def run_continuous_scan_cycle(
             position_guard_payload["exit_candidates"] = exit_candidates
             position_guard_payload.setdefault("summary", {})["profitable_concentration_trims"] = len(concentration_trims)
             if exit_candidates:
+                exit_attempts: list[dict[str, Any]] = []
                 selected_exit = dict(exit_candidates[0])
-                exit_execution = execute_guard_exit(
-                    selected_exit,
-                    broker=broker,
-                    broker_positions=broker_positions,
-                    broker_cash=broker_cash,
-                    broker_buying_power=broker_buying_power,
-                    broker_equity=broker_equity,
-                    execution_repo=execution_repo,
-                    cycle_run_id=cycle_run_id,
-                    started_at=started_at,
-                    dry_run=bool(dry_run),
-                    paper_execution_enabled=bool(PAPER_EXECUTION_ENABLED)
-                    and bool(getattr(config, "position_guard_auto_exit_enabled", False)),
-                    allow_fractional=bool(PAPER_VALIDATION_ALLOW_FRACTIONAL),
-                    reconciliation_tolerance=float(PAPER_VALIDATION_RECONCILIATION_TOLERANCE),
-                    persist=bool(persist),
+                exit_execution: dict[str, Any] = {}
+                for candidate in exit_candidates:
+                    selected_exit = dict(candidate)
+                    exit_execution = execute_guard_exit(
+                        selected_exit,
+                        broker=broker,
+                        broker_positions=broker_positions,
+                        broker_cash=broker_cash,
+                        broker_buying_power=broker_buying_power,
+                        broker_equity=broker_equity,
+                        execution_repo=execution_repo,
+                        cycle_run_id=cycle_run_id,
+                        started_at=started_at,
+                        dry_run=bool(dry_run),
+                        paper_execution_enabled=bool(PAPER_EXECUTION_ENABLED)
+                        and bool(getattr(config, "position_guard_auto_exit_enabled", False)),
+                        allow_fractional=bool(PAPER_VALIDATION_ALLOW_FRACTIONAL),
+                        reconciliation_tolerance=float(PAPER_VALIDATION_RECONCILIATION_TOLERANCE),
+                        persist=bool(persist),
+                    )
+                    attempt_status = str(exit_execution.get("status") or "failed")
+                    attempt_counters = dict(exit_execution.get("execution_counters") or {})
+                    exit_attempts.append(
+                        {
+                            "symbol": selected_exit.get("symbol"),
+                            "exit_reason": selected_exit.get("exit_reason"),
+                            "status": attempt_status,
+                            "orders_submission_requested": int(attempt_counters.get("orders_submission_requested") or 0),
+                            "orders_submitted": int(attempt_counters.get("orders_submitted") or 0),
+                        }
+                    )
+                    no_order_submitted = int(attempt_counters.get("orders_submitted") or 0) == 0
+                    safe_to_try_next = attempt_status in {"duplicate_rejected", "risk_rejected", "failed"} and no_order_submitted
+                    if not safe_to_try_next:
+                        break
+
+                position_guard_payload.setdefault("summary", {})["exit_candidates_attempted"] = len(exit_attempts)
+                position_guard_payload.setdefault("summary", {})["blocked_candidates_skipped"] = max(
+                    len(exit_attempts) - 1,
+                    0,
                 )
+                exit_execution["exit_attempts"] = exit_attempts
         finally:
             execution_repo.close()
 
