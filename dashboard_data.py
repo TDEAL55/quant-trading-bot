@@ -681,13 +681,19 @@ def fetch_dashboard_payload(
     database_orders = db.fetch_recent_order_events(limit=120)
     payload["latest_account"] = database_account
     payload["recent_orders"] = database_orders
+    paper_micro_dashboard_mode = _enabled(os.getenv("PAPER_MICRO_DASHBOARD_MODE", "false"))
     if (
         _enabled(os.getenv("DASHBOARD_BROKER_ACCOUNT_FALLBACK_ENABLED", "true"))
         and str(os.getenv("TRADING_MODE", "PAPER")).strip().upper() == "PAPER"
     ):
         try:
+            selected_broker_factory = paper_broker_factory
+            if paper_micro_dashboard_mode and paper_broker_factory is AlpacaPaperBroker:
+                from alpaca_micro_paper_broker import AlpacaMicroPaperBroker
+
+                selected_broker_factory = lambda mode="PAPER": AlpacaMicroPaperBroker(read_only=True)
             broker_snapshot = _fetch_paper_account_snapshot(
-                paper_broker_factory,
+                selected_broker_factory,
                 strategy_by_order_id=_fetch_stock_order_strategy_metadata(db),
             )
             payload["latest_account"] = broker_snapshot
@@ -710,6 +716,51 @@ def fetch_dashboard_payload(
         payload["paper_tuning"],
         payload["stock_pnl_reconstruction"],
     )
+    if paper_micro_dashboard_mode:
+        reconstruction = dict(payload.get("stock_pnl_reconstruction") or {})
+        exact = bool(reconstruction.get("is_exact"))
+        closed_count = int(reconstruction.get("closed_trade_count") or 0) if exact else 0
+        realized_pl = float(reconstruction.get("realized_stock_pnl") or 0.0) if exact else 0.0
+        stock_summary = {
+            "closed_trades": closed_count,
+            "net_pnl": realized_pl,
+            "source": "micro_paper_broker_history",
+            "confidence": "exact" if exact else "awaiting_complete_broker_fills",
+        }
+        payload["paper_tuning"] = {
+            "closed_trades": dict(stock_summary),
+            "closed_trades_by_asset": {
+                "stocks": dict(stock_summary),
+                "crypto": {"closed_trades": 0, "net_pnl": 0.0},
+                "options": {"closed_trades": 0, "net_pnl": 0.0},
+            },
+            "paper_micro_dashboard_mode": True,
+        }
+        payload["latest_account"]["realized_paper_pl"] = realized_pl
+        payload["latest_account"]["closed_trade_count"] = closed_count
+        payload["latest_account"]["closed_trade_source"] = "micro_paper_broker_history"
+        starting_equity = float(os.getenv("PAPER_MICRO_STARTING_EQUITY", "300"))
+        payload["starting_account"] = {
+            "portfolio_value": starting_equity,
+            "equity": starting_equity,
+            "source": "paper_micro_trial_baseline",
+        }
+        payload["portfolio_history"] = []
+        account_timestamp = str(payload["latest_account"].get("snapshot_timestamp") or "")
+        payload["latest_run"] = {
+            "run_timestamp": account_timestamp,
+            "trading_mode": "PAPER",
+            "stop_reason": "Controlled $300 paper live-mirror trial",
+        }
+        payload["latest_success"] = dict(payload["latest_run"])
+        payload["latest_signal"] = {}
+        payload["recent_runs"] = []
+        payload["signal_history"] = []
+        payload["order_count_by_day"] = []
+        payload["latest_scanner_run"] = {}
+        payload["top_scanner_results"] = []
+        payload["scanner_rejections"] = []
+        payload["scanner_sector_distribution"] = []
     payload["latest_account"] = _attach_recorded_closed_trade_pl(
         payload["latest_account"],
         payload["paper_tuning"],
@@ -749,7 +800,13 @@ def fetch_dashboard_payload(
         "recent_error_count_24h": int((recent_error_count_row or {}).get("error_count") or 0),
         "observed_runner_restarts_24h": int(observed_restarts),
         "observed_runner_run_id_transitions": int(observed_restarts),
-        "continuous_service_active": bool(service_probe("quant-bot-continuous.service")),
+        "continuous_service_active": bool(
+            service_probe(
+                "quant-bot-paper-micro.service"
+                if paper_micro_dashboard_mode
+                else "quant-bot-continuous.service"
+            )
+        ),
     }
 
     dataset = build_dashboard_dataset(payload)

@@ -130,6 +130,30 @@ class AlpacaLiveBroker(AlpacaPaperBroker):
                     normalized.append(child)
         return normalized
 
+    def get_order_history(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return parent orders plus bracket legs so exit P/L can be reconstructed."""
+        safe_limit = max(1, min(int(limit or 50), 500))
+        if GetOrdersRequest is not None and QueryOrderStatus is not None:
+            rows = self._trading_client.get_orders(
+                filter=GetOrdersRequest(status=QueryOrderStatus.ALL, limit=safe_limit, nested=True)
+            )
+        else:
+            rows = self._trading_client.get_orders()
+        normalized: list[dict[str, Any]] = []
+        for row in rows or []:
+            parent = normalize_alpaca_order(row)
+            if parent:
+                normalized.append(parent)
+            for leg in list(getattr(row, "legs", None) or []):
+                child = normalize_alpaca_order(leg)
+                if child:
+                    normalized.append(child)
+        return sorted(
+            normalized,
+            key=lambda order: str(order.get("updated_at") or order.get("submitted_at") or ""),
+            reverse=True,
+        )[:safe_limit]
+
     def submit_bracket_entry(
         self,
         *,

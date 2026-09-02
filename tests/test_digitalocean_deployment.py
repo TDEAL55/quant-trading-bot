@@ -74,6 +74,19 @@ def test_public_mobile_dashboard_has_separate_read_only_service():
     assert "continuous_paper_runner.py" not in text
 
 
+def test_micro_paper_dashboard_is_a_separate_service_and_url():
+    service = (REPO_ROOT / "deployment" / "quant-bot-paper-micro-dashboard.service").read_text(encoding="utf-8")
+    nginx = (REPO_ROOT / "deployment" / "nginx-quant-bot-dashboard.conf").read_text(encoding="utf-8")
+    assert "EnvironmentFile=-/etc/quant-bot/paper-micro.env" in service
+    assert "Environment=PAPER_MICRO_DASHBOARD_MODE=true" in service
+    assert "--server.port 8503" in service
+    assert "--server.baseUrlPath trial" in service
+    assert "location /trial/" in nginx
+    assert "proxy_pass http://127.0.0.1:8503" in nginx
+    trial_block = nginx.split("location /trial/", 1)[1].split("location /", 1)[0]
+    assert "auth_basic off" not in trial_block
+
+
 def test_dashboard_path_is_read_only_for_trading_actions():
     module_text = (REPO_ROOT / "dashboard_app.py").read_text(encoding="utf-8")
     assert dashboard_app.has_write_capability(module_text) is False

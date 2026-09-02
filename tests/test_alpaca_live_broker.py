@@ -90,3 +90,10 @@ def test_open_orders_flattens_protective_bracket_legs():
     broker = AlpacaLiveBroker(trading_client=NestedOrderClient(), environ=env(), read_only=True)
     orders = broker.get_open_orders()
     assert len([order for order in orders if order["side"] == "sell"]) == 2
+
+
+def test_order_history_flattens_bracket_legs_for_realized_pnl():
+    broker = AlpacaLiveBroker(trading_client=NestedOrderClient(), environ=env(), read_only=True)
+    orders = broker.get_order_history(limit=50)
+    assert len(orders) == 3
+    assert len([order for order in orders if order["side"] == "sell"]) == 2

@@ -57,7 +57,8 @@ from walk_forward_data import fetch_walk_forward_dashboard_payload
 MAX_DAILY_ORDERS = 3
 MAX_DAILY_SUBMITTED_NOTIONAL = 30.0
 DASHBOARD_VERSION = "v4.0"
-UI_BUILD_LABEL = "PAPER TRADING DESK"
+UI_BUILD_LABEL = os.getenv("DASHBOARD_UI_BUILD_LABEL", "PAPER TRADING DESK")
+MOBILE_MODE_LABEL = os.getenv("DASHBOARD_MOBILE_SUBTITLE", "STOCKS · PAPER MODE")
 EASTERN_TZ = ZoneInfo("America/New_York")
 CENTRAL_TZ = ZoneInfo("America/Chicago")
 MARKET_OPEN_ET = time(9, 30)
@@ -3835,7 +3836,7 @@ def render_mobile_command_center(payload, view):
     st.markdown(
         "<div class='dq-mobile-topbar'>"
         "<div class='dq-mobile-brand'><span class='dq-brand-mark'>DQ</span>"
-        "<div><div class='dq-mobile-title'>Deal Quant</div><div class='dq-mobile-subtitle'>STOCKS · PAPER MODE</div></div></div>"
+        f"<div><div class='dq-mobile-title'>Deal Quant</div><div class='dq-mobile-subtitle'>{_safe_text(MOBILE_MODE_LABEL)}</div></div></div>"
         f"<div class='dq-mobile-live {'' if service_active else 'off'}'><i></i>{'BOT ON' if service_active else 'BOT OFF'}</div>"
         "</div>",
         unsafe_allow_html=True,
