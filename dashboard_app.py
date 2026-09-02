@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import html
 from datetime import datetime, timedelta, time, timezone
 from pathlib import Path
 from typing import Any
