@@ -59,6 +59,15 @@ def test_read_only_check_needs_no_arm_flags_and_cannot_submit():
     assert not broker.order_submission_enabled
 
 
+def test_newly_funded_account_does_not_count_deposit_as_daily_profit():
+    client = Client()
+    account = client.get_account()
+    account.last_equity = "0"
+    client.get_account = lambda: account
+    broker = AlpacaLiveBroker(trading_client=client, environ=env(), read_only=True)
+    assert broker.get_account()["day_pl"] == 0.0
+
+
 def test_bracket_order_is_whole_share_gtc(monkeypatch):
     monkeypatch.setattr(module, "MarketOrderRequest", lambda **kwargs: kwargs)
     monkeypatch.setattr(module, "TakeProfitRequest", lambda **kwargs: kwargs)

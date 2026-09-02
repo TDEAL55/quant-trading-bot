@@ -82,6 +82,7 @@ class AlpacaLiveBroker(AlpacaPaperBroker):
         account = self._fetch_account()
         equity = _to_float(getattr(account, "equity", 0.0), 0.0)
         last_equity = _to_float(getattr(account, "last_equity", equity), equity)
+        day_pl = equity - last_equity if last_equity > 0 else 0.0
         return {
             "status": _normalize_account_status(getattr(account, "status", "unknown")),
             "account_number": str(getattr(account, "account_number", "") or ""),
@@ -94,7 +95,7 @@ class AlpacaLiveBroker(AlpacaPaperBroker):
             "cash": _to_float(getattr(account, "cash", 0.0), 0.0),
             "equity": equity,
             "last_equity": last_equity,
-            "day_pl": equity - last_equity,
+            "day_pl": day_pl,
             "portfolio_value": _to_float(getattr(account, "portfolio_value", equity), equity),
             "multiplier": _to_float(getattr(account, "multiplier", 1.0), 1.0),
             "trading_blocked": bool(getattr(account, "trading_blocked", False)),
