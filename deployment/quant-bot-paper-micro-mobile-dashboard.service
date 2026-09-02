@@ -1,0 +1,30 @@
+[Unit]
+Description=Quant Bot Separate $300 PAPER Trial Mobile Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=5
+User=quantbot
+Group=quantbot
+WorkingDirectory=/home/quantbot/quant-trading-bot
+EnvironmentFile=-/etc/quant-bot/quant-bot.env
+EnvironmentFile=-/etc/quant-bot/paper-micro.env
+Environment=PYTHONUNBUFFERED=1
+Environment=BOT_LOG_FILE=/var/lib/quant-bot/paper-micro-mobile-dashboard.log
+Environment=DASHBOARD_APP_AUTH_ENABLED=false
+Environment=DASHBOARD_EXTERNAL_AUTH_ENABLED=true
+Environment=DASHBOARD_FORCE_MOBILE=true
+Environment=DASHBOARD_BROKER_ACCOUNT_FALLBACK_ENABLED=true
+Environment=PAPER_MICRO_DASHBOARD_MODE=true
+Environment="DASHBOARD_UI_BUILD_LABEL=$300 PAPER TRIAL"
+Environment="DASHBOARD_MOBILE_SUBTITLE=STOCKS · $300 PAPER TRIAL"
+Environment=DASHBOARD_MOBILE_DESKTOP_URL=/trial/
+ExecStart=/home/quantbot/quant-trading-bot/.venv/bin/streamlit run /home/quantbot/quant-trading-bot/dashboard_app.py --server.address 127.0.0.1 --server.port 8504 --server.baseUrlPath trial-mobile --server.headless true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

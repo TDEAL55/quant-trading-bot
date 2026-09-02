@@ -59,7 +59,7 @@ def test_dashboard_service_targets_streamlit_dashboard():
     assert "Restart=on-failure" in text
     assert "Environment=DASHBOARD_APP_AUTH_ENABLED=false" in text
     assert "Environment=DASHBOARD_EXTERNAL_AUTH_ENABLED=true" in text
-    assert "Environment=DASHBOARD_BROKER_ACCOUNT_FALLBACK_ENABLED=true" in text
+    assert "Environment=DASHBOARD_BROKER_ACCOUNT_FALLBACK_ENABLED=false" in text
 
 
 def test_public_mobile_dashboard_has_separate_read_only_service():
@@ -85,6 +85,28 @@ def test_micro_paper_dashboard_is_a_separate_service_and_url():
     assert "proxy_pass http://127.0.0.1:8503" in nginx
     trial_block = nginx.split("location /trial/", 1)[1].split("location /", 1)[0]
     assert "auth_basic off" not in trial_block
+
+
+def test_micro_paper_mobile_dashboard_is_a_fourth_isolated_service_and_url():
+    service = (REPO_ROOT / "deployment" / "quant-bot-paper-micro-mobile-dashboard.service").read_text(encoding="utf-8")
+    nginx = (REPO_ROOT / "deployment" / "nginx-quant-bot-dashboard.conf").read_text(encoding="utf-8")
+    assert "EnvironmentFile=-/etc/quant-bot/paper-micro.env" in service
+    assert "Environment=PAPER_MICRO_DASHBOARD_MODE=true" in service
+    assert "Environment=DASHBOARD_FORCE_MOBILE=true" in service
+    assert "Environment=DASHBOARD_MOBILE_DESKTOP_URL=/trial/" in service
+    assert "--server.port 8504" in service
+    assert "--server.baseUrlPath trial-mobile" in service
+    assert "location /trial-mobile/" in nginx
+    assert "proxy_pass http://127.0.0.1:8504" in nginx
+    trial_mobile_block = nginx.split("location /trial-mobile/", 1)[1].split("location /", 1)[0]
+    assert "auth_basic off" not in trial_mobile_block
+
+
+def test_original_dashboards_cannot_fall_back_to_micro_broker_account():
+    for service_name in ("quant-bot-dashboard.service", "quant-bot-mobile-dashboard.service"):
+        service = (REPO_ROOT / "deployment" / service_name).read_text(encoding="utf-8")
+        assert "Environment=DASHBOARD_BROKER_ACCOUNT_FALLBACK_ENABLED=false" in service
+        assert "PAPER_MICRO_DASHBOARD_MODE=true" not in service
 
 
 def test_dashboard_path_is_read_only_for_trading_actions():

@@ -59,6 +59,7 @@ MAX_DAILY_SUBMITTED_NOTIONAL = 30.0
 DASHBOARD_VERSION = "v4.0"
 UI_BUILD_LABEL = os.getenv("DASHBOARD_UI_BUILD_LABEL", "PAPER TRADING DESK")
 MOBILE_MODE_LABEL = os.getenv("DASHBOARD_MOBILE_SUBTITLE", "STOCKS · PAPER MODE")
+MOBILE_DESKTOP_URL = os.getenv("DASHBOARD_MOBILE_DESKTOP_URL", "/")
 EASTERN_TZ = ZoneInfo("America/New_York")
 CENTRAL_TZ = ZoneInfo("America/Chicago")
 MARKET_OPEN_ET = time(9, 30)
@@ -3911,7 +3912,7 @@ def render_mobile_command_center(payload, view):
 
     st.markdown(
         "<div class='dq-mobile-install'>On iPhone: Share → Add to Home Screen.</div>"
-        "<div class='dq-mobile-back'><a href='/' target='_self'>Open full desktop dashboard</a></div>",
+        f"<div class='dq-mobile-back'><a href='{html.escape(MOBILE_DESKTOP_URL, quote=True)}' target='_self'>Open full desktop dashboard</a></div>",
         unsafe_allow_html=True,
     )
 

@@ -124,7 +124,8 @@ def test_mobile_dashboard_query_flag_is_explicit_and_tolerates_list_values(monke
 def test_mobile_desktop_link_leaves_the_forced_mobile_route():
     module_text = (REPO_ROOT / "dashboard_app.py").read_text(encoding="utf-8")
 
-    assert "<a href='/' target='_self'>Open full desktop dashboard</a>" in module_text
+    assert 'MOBILE_DESKTOP_URL = os.getenv("DASHBOARD_MOBILE_DESKTOP_URL", "/")' in module_text
+    assert "html.escape(MOBILE_DESKTOP_URL, quote=True)" in module_text
     assert "href='?mobile=0'" not in module_text
 
 
