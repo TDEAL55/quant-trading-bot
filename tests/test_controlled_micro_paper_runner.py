@@ -44,13 +44,9 @@ def test_read_only_paper_account_check_requires_no_arm_flags(monkeypatch):
     assert "account_number" not in result["account"]
 
 
-def test_paper_policy_matches_micro_live_limits():
+def test_paper_policy_disables_entry_limits_without_weakening_other_filters():
     settings = runner.paper_micro_settings(env())
-    assert settings.maximum_position_notional == 30
-    assert settings.maximum_position_percent == 10
-    assert settings.maximum_open_positions == 3
-    assert settings.maximum_new_orders_per_day == 1
-    assert settings.minimum_cash_reserve_percent == 70
+    assert settings.entry_limits_enabled is False
     assert settings.allowed_symbols == ("F",)
 
 

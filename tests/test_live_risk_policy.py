@@ -34,6 +34,33 @@ def test_healthy_micro_account_is_approved_and_caps_entry_at_30():
     assert live_entry_notional(_account(), {}, settings) == 30.0
 
 
+def test_disabled_entry_limits_use_available_cash_and_ignore_entry_counts():
+    settings = LiveRiskSettings(
+        enabled=True,
+        order_submission_enabled=True,
+        kill_switch=False,
+        confirmation="ENABLE_LIVE_MICRO_TRADING",
+        private_dashboard_confirmed=True,
+        entry_limits_enabled=False,
+        allowed_symbols=("F",),
+    )
+    positions = {
+        "F": {"market_value": 100},
+        "SOFI": {"market_value": 100},
+        "NU": {"market_value": 100},
+    }
+    result = evaluate_live_readiness(
+        _account(),
+        positions,
+        [],
+        settings=settings,
+        market_is_open=True,
+        orders_submitted_today=50,
+    )
+    assert result["approved"]
+    assert live_entry_notional(_account(), positions, settings) == 300.0
+
+
 @pytest.mark.parametrize("account,reason", [
     (_account(day_pl=-3), "daily_loss_stop_active"),
     (_account(equity=501, cash=501), "account_equity_above_micro_launch_limit"),

@@ -34,6 +34,7 @@ class LiveRiskSettings:
     kill_switch: bool = True
     confirmation: str = ""
     private_dashboard_confirmed: bool = False
+    entry_limits_enabled: bool = True
     maximum_account_equity: float = 500.0
     maximum_position_percent: float = 10.0
     maximum_position_notional: float = 30.0
@@ -155,12 +156,13 @@ def evaluate_live_readiness(
         reasons.append("margin_or_negative_cash_not_allowed")
     if day_pl <= -daily_loss_limit:
         reasons.append("daily_loss_stop_active")
-    if len(stock_positions) >= settings.maximum_open_positions:
-        reasons.append("maximum_open_positions_reached")
-    if gross_percent >= settings.maximum_gross_exposure_percent:
-        reasons.append("maximum_gross_exposure_reached")
-    if int(orders_submitted_today) >= settings.maximum_new_orders_per_day:
-        reasons.append("daily_new_order_limit_reached")
+    if settings.entry_limits_enabled:
+        if len(stock_positions) >= settings.maximum_open_positions:
+            reasons.append("maximum_open_positions_reached")
+        if gross_percent >= settings.maximum_gross_exposure_percent:
+            reasons.append("maximum_gross_exposure_reached")
+        if int(orders_submitted_today) >= settings.maximum_new_orders_per_day:
+            reasons.append("daily_new_order_limit_reached")
     if open_orders:
         reasons.append("open_orders_require_reconciliation")
     if not market_is_open:
@@ -185,6 +187,8 @@ def evaluate_live_readiness(
 def live_entry_notional(account: Mapping[str, Any], positions: Mapping[str, Mapping[str, Any]], settings: LiveRiskSettings) -> float:
     equity = _as_float(account.get("equity"), 0.0)
     cash = _as_float(account.get("cash"), 0.0)
+    if not settings.entry_limits_enabled:
+        return round(max(cash, 0.0), 2)
     gross_exposure = sum(abs(_as_float(row.get("market_value"), 0.0)) for row in dict(positions or {}).values())
     position_cap = min(
         equity * settings.maximum_position_percent / 100.0,
