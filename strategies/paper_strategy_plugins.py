@@ -136,38 +136,32 @@ def _build_signal(
 
 
 def evaluate_all_strategies(candidate: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return the single cohesive stock entry strategy.
-
-    Legacy v2 strategies remain supported by the exit policy for existing
-    positions, but they no longer create new entries. This prevents strategy
-    soup and keeps all new stock risk tied to one trend/pullback thesis.
-    """
+    """Evaluate the coordinated long-stock sleeves used by the regime router."""
     symbol = str(candidate.get("symbol") or "").upper()
     price = _safe_float(candidate.get("latest_price"), 0.0)
     if not symbol or price <= 0:
         return []
 
-    available_payloads = _payloads(candidate)
-    strategy_id = (
-        "stock_trend_pullback_v3"
-        if "stock_trend_pullback_v3" in available_payloads
-        else "stock_trend_ensemble_v2"
-    )
-    is_v3 = strategy_id == "stock_trend_pullback_v3"
     signals = [
         _build_signal(
             candidate,
-            strategy_id,
-            entry_reason=(
-                "market regime, relative strength, established trend, and controlled pullback agree"
-                if is_v3
-                else "legacy trend signal retained only for in-flight compatibility"
-            ),
-            exit_rule=(
-                "exit on ATR risk stop, trailing stop, trend breakdown, profit target, or time stop"
-                if is_v3
-                else "exit on trend breakdown, risk stop, or profit target"
-            ),
+            "stock_trend_pullback_v3",
+            entry_reason="market regime, relative strength, established trend, and controlled pullback agree",
+            exit_rule="exit on ATR risk stop, trailing stop, trend breakdown, profit target, or time stop",
+            requested_signal="BUY",
+        ),
+        _build_signal(
+            candidate,
+            "stock_trend_ensemble_v2",
+            entry_reason="trend, relative strength, momentum, and volume confirm continuation",
+            exit_rule="exit on trend breakdown, risk stop, or profit target",
+            requested_signal="BUY",
+        ),
+        _build_signal(
+            candidate,
+            "stock_mean_reversion_v2",
+            entry_reason="liquid oversold stock has favorable risk/reward in a sideways or weak-bull regime",
+            exit_rule="exit on failed rebound, risk stop, normalization, or profit target",
             requested_signal="BUY",
         ),
     ]

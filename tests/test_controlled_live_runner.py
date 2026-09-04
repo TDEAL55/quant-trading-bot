@@ -46,6 +46,11 @@ def signal(_candidate):
         "strategy_score":80, "confidence":80, "data_quality_status":"ok", "market_regime":"bull"}]
 
 
+def mean_reversion_signal(_candidate):
+    return [{"strategy_id":"stock_mean_reversion_v2", "strategy_version":"2", "signal":"BUY",
+        "strategy_score":82, "confidence":76, "data_quality_status":"ok", "market_regime":"sideways"}]
+
+
 def test_disabled_cycle_never_touches_broker():
     result = run_controlled_live_cycle(environ={"TRADING_MODE":"PAPER"})
     assert result["status"] == "blocked"
@@ -101,3 +106,34 @@ def test_full_universe_replaces_short_allowlist_for_scanning(tmp_path, monkeypat
     )
     assert result["status"] == "submitted"
     assert observed["symbols"] == ["AAL", "F"]
+
+
+def test_sideways_market_routes_only_to_mean_reversion(tmp_path, monkeypatch):
+    monkeypatch.setattr(module, "evaluate_all_strategies", mean_reversion_signal)
+    result = run_controlled_live_cycle(
+        environ={"TRADING_MODE": "LIVE", "LIVE_FULL_STOCK_UNIVERSE": "false"},
+        settings=armed(),
+        broker=Broker(),
+        scanner=scanner,
+        state_store=LiveStateStore(tmp_path / "live.json"),
+    )
+    assert result["status"] == "submitted"
+    assert result["candidate"]["strategy"]["strategy_id"] == "stock_mean_reversion_v2"
+    assert result["candidate"]["strategy"]["ensemble_route"] == "sideways"
+
+
+def test_bearish_market_rejects_long_strategy_even_if_it_says_buy(tmp_path, monkeypatch):
+    def bearish_signal(_candidate):
+        return [{"strategy_id":"stock_trend_ensemble_v2", "signal":"BUY", "strategy_score":90,
+            "confidence":90, "data_quality_status":"ok", "market_regime":"bear"}]
+
+    monkeypatch.setattr(module, "evaluate_all_strategies", bearish_signal)
+    result = run_controlled_live_cycle(
+        environ={"TRADING_MODE": "LIVE", "LIVE_FULL_STOCK_UNIVERSE": "false"},
+        settings=armed(),
+        broker=Broker(),
+        scanner=scanner,
+        state_store=LiveStateStore(tmp_path / "live.json"),
+    )
+    assert result["status"] == "no_trade"
+    assert not result["submitted"]

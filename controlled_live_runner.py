@@ -24,6 +24,11 @@ from strategies.paper_strategy_plugins import evaluate_all_strategies
 
 FINAL_ORDER_STATUSES = {"filled", "canceled", "cancelled", "expired", "rejected", "done_for_day"}
 ACCEPTED_ORDER_STATUSES = {"accepted", "new", "pending", "pending_new", "partially_filled", "filled"}
+REGIME_STRATEGY_ROUTES = {
+    "bull": ("stock_trend_pullback_v3", "stock_trend_ensemble_v2"),
+    "weak_bull": ("stock_trend_pullback_v3", "stock_trend_ensemble_v2", "stock_mean_reversion_v2"),
+    "sideways": ("stock_mean_reversion_v2",),
+}
 
 
 def _utc_iso() -> str:
@@ -154,25 +159,34 @@ def select_live_candidate(
         quantity = int(math.floor(float(maximum_notional) / price))
         if quantity < 1:
             continue
-        signals = evaluate_all_strategies(candidate)
-        signal = next(
-            (
-                dict(item or {})
-                for item in signals
-                if str((item or {}).get("strategy_id") or "") == "stock_trend_pullback_v3"
+        signals = [dict(item or {}) for item in evaluate_all_strategies(candidate)]
+        regime = str(
+            ((candidate.get("quantum_score") or {}).get("market_regime"))
+            or next((item.get("market_regime") for item in signals if item.get("market_regime")), "unknown")
+        ).strip().lower()
+        routed_ids = set(REGIME_STRATEGY_ROUTES.get(regime, ()))
+        eligible_signals = [
+            item
+            for item in signals
+            if str(item.get("strategy_id") or "") in routed_ids
+            and str(item.get("signal") or "").upper() == "BUY"
+            and _as_float(item.get("strategy_score"), 0.0) >= settings.minimum_strategy_score
+            and _as_float(item.get("confidence"), 0.0) >= settings.minimum_confidence
+            and str(item.get("data_quality_status") or "").lower() in {"ok", "good"}
+        ]
+        if not eligible_signals:
+            continue
+        signal = max(
+            eligible_signals,
+            key=lambda item: (
+                _as_float(item.get("strategy_score"), 0.0),
+                _as_float(item.get("confidence"), 0.0),
             ),
-            None,
         )
-        if not signal or str(signal.get("signal") or "").upper() != "BUY":
-            continue
-        if _as_float(signal.get("strategy_score"), 0.0) < settings.minimum_strategy_score:
-            continue
-        if _as_float(signal.get("confidence"), 0.0) < settings.minimum_confidence:
-            continue
-        if str(signal.get("data_quality_status") or "").lower() not in {"ok", "good"}:
-            continue
-        if str(signal.get("market_regime") or "").lower() not in {"bull", "weak_bull"}:
-            continue
+        signal["ensemble_route"] = regime
+        signal["eligible_strategy_ids"] = sorted(
+            str(item.get("strategy_id") or "") for item in eligible_signals
+        )
         stop = round(price * (1.0 - settings.stop_loss_percent / 100.0), 2)
         target = round(price * (1.0 + settings.take_profit_percent / 100.0), 2)
         return {

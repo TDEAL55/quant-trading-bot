@@ -36,9 +36,13 @@ def test_strategy_plugins_emit_expected_fields_and_ids():
     rows = evaluate_all_strategies(payload)
 
     ids = {row["strategy_id"] for row in rows}
-    assert ids == {"stock_trend_pullback_v3"}
+    assert ids == {
+        "stock_trend_pullback_v3",
+        "stock_trend_ensemble_v2",
+        "stock_mean_reversion_v2",
+    }
     for row in rows:
-        assert row["strategy_version"] == "3.0.0"
+        assert row["strategy_version"] in {"2.0.0", "3.0.0"}
         assert row["symbol"] == "JPM"
         assert "entry_reason" in row
         assert "proposed_entry" in row
