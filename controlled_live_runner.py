@@ -46,7 +46,7 @@ def _resolve_stock_universe(
     policy: LiveRiskSettings,
     env: Mapping[str, str],
 ) -> tuple[LiveRiskSettings, list[dict[str, Any]]]:
-    if not _is_true(env.get("LIVE_FULL_STOCK_UNIVERSE", "false")):
+    if not _is_true(env.get("LIVE_FULL_STOCK_UNIVERSE", "true")):
         return policy, _symbol_records_from_list(list(policy.allowed_symbols))
     records = list(
         broker.get_tradable_stock_assets(
