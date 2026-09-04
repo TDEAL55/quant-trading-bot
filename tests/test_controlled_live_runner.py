@@ -23,6 +23,12 @@ class Broker:
         return {"order_id":"oid", "client_order_id":kwargs["client_order_id"], "symbol":kwargs["symbol"],
             "requested_quantity":kwargs["quantity"], "reference_price":kwargs["reference_price"],
             "stop_price":kwargs["stop_price"], "target_price":kwargs["target_price"], "status":"accepted"}
+    def get_tradable_stock_assets(self, *, include_etfs=False):
+        assert include_etfs is False
+        return [
+            {"symbol": "AAL", "company_name": "American Airlines"},
+            {"symbol": "F", "company_name": "Ford Motor"},
+        ]
 
 
 def armed():
@@ -76,3 +82,22 @@ def test_high_price_symbol_cannot_create_fractional_order(tmp_path, monkeypatch)
         scanner=lambda _: {"ranked_candidates":[{"symbol":"F", "latest_price":31}]},
         state_store=LiveStateStore(tmp_path / "live.json"))
     assert result["status"] == "no_trade"
+
+
+def test_full_universe_replaces_short_allowlist_for_scanning(tmp_path, monkeypatch):
+    monkeypatch.setattr(module, "evaluate_all_strategies", signal)
+    observed = {}
+
+    def broad_scanner(records):
+        observed["symbols"] = [row["symbol"] for row in records]
+        return {"ranked_candidates": [{"symbol": "F", "latest_price": 12}]}
+
+    result = run_controlled_live_cycle(
+        environ={"TRADING_MODE": "LIVE", "LIVE_FULL_STOCK_UNIVERSE": "true"},
+        settings=armed(),
+        broker=Broker(),
+        scanner=broad_scanner,
+        state_store=LiveStateStore(tmp_path / "live.json"),
+    )
+    assert result["status"] == "submitted"
+    assert observed["symbols"] == ["AAL", "F"]

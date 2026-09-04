@@ -27,6 +27,11 @@ def test_defaults_fail_closed():
     assert "live_symbol_allowlist_empty" in result["reasons"]
 
 
+def test_live_environment_uses_same_uncapped_entry_policy_as_paper():
+    settings = settings_from_environment({})
+    assert settings.entry_limits_enabled is False
+
+
 def test_healthy_micro_account_is_approved_and_caps_entry_at_30():
     settings = _armed()
     result = evaluate_live_readiness(_account(), {}, [], settings=settings, market_is_open=True, orders_submitted_today=0)

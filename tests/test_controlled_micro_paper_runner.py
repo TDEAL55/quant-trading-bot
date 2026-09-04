@@ -69,4 +69,7 @@ def test_armed_paper_runner_delegates_to_identical_controlled_cycle(monkeypatch)
     assert result["status"] == "no_trade"
     assert captured["broker"] is broker
     assert captured["environ"]["TRADING_MODE"] == "LIVE"
+    assert captured["environ"]["LIVE_FULL_STOCK_UNIVERSE"] == "true"
+    assert captured["environ"]["LIVE_MAX_UNIVERSE_SIZE"] == "0"
+    assert captured["environ"]["LIVE_INCLUDE_ETFS"] == "false"
     assert captured["environ"]["LIVE_STATE_PATH"].endswith("paper-micro-state.json")

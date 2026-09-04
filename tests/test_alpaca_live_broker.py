@@ -36,6 +36,17 @@ class NestedOrderClient(Client):
         return [parent]
 
 
+class AssetClient(Client):
+    def get_all_assets(self, request=None):
+        del request
+        return [
+            SimpleNamespace(symbol="F", name="Ford Motor", asset_class="us_equity", status="active", exchange="NYSE", tradable=True),
+            SimpleNamespace(symbol="SPY", name="SPDR S&P 500 ETF", asset_class="us_equity", status="active", exchange="ARCA", tradable=True),
+            SimpleNamespace(symbol="OLD", name="Old Corp", asset_class="us_equity", status="inactive", exchange="NYSE", tradable=True),
+            SimpleNamespace(symbol="BTC/USD", name="Bitcoin", asset_class="crypto", status="active", exchange="", tradable=True),
+        ]
+
+
 def env(**updates):
     payload = {"TRADING_MODE": "LIVE", "LIVE_TRADING_ENABLED": "true",
         "ALPACA_LIVE_ORDER_SUBMISSION_ENABLED": "true", "LIVE_TRADING_CONFIRMATION": "ENABLE_LIVE_MICRO_TRADING",
@@ -97,3 +108,9 @@ def test_order_history_flattens_bracket_legs_for_realized_pnl():
     orders = broker.get_order_history(limit=50)
     assert len(orders) == 3
     assert len([order for order in orders if order["side"] == "sell"]) == 2
+
+
+def test_live_broker_returns_broad_active_stock_universe_without_etfs():
+    broker = AlpacaLiveBroker(trading_client=AssetClient(), environ=env(), read_only=True)
+    assert [row["symbol"] for row in broker.get_tradable_stock_assets()] == ["F"]
+    assert [row["symbol"] for row in broker.get_tradable_stock_assets(include_etfs=True)] == ["F", "SPY"]

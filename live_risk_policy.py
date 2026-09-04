@@ -88,6 +88,7 @@ def settings_from_environment(environ: Mapping[str, str] | None = None) -> LiveR
         kill_switch=_is_true(env.get("LIVE_KILL_SWITCH", "true")),
         confirmation=str(env.get("LIVE_TRADING_CONFIRMATION", "")).strip(),
         private_dashboard_confirmed=_is_true(env.get("LIVE_PRIVATE_DASHBOARD_CONFIRMED", "false")),
+        entry_limits_enabled=_is_true(env.get("LIVE_ENTRY_LIMITS_ENABLED", "false")),
         maximum_account_equity=_as_float(env.get("LIVE_MAX_ACCOUNT_EQUITY"), 500.0),
         maximum_position_percent=_as_float(env.get("LIVE_MAX_POSITION_PERCENT"), 10.0),
         maximum_position_notional=_as_float(env.get("LIVE_MAX_POSITION_NOTIONAL"), 30.0),

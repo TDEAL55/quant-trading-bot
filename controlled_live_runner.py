@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import json
 import math
@@ -35,6 +35,32 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _is_true(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_stock_universe(
+    broker: Any,
+    policy: LiveRiskSettings,
+    env: Mapping[str, str],
+) -> tuple[LiveRiskSettings, list[dict[str, Any]]]:
+    if not _is_true(env.get("LIVE_FULL_STOCK_UNIVERSE", "false")):
+        return policy, _symbol_records_from_list(list(policy.allowed_symbols))
+    records = list(
+        broker.get_tradable_stock_assets(
+            include_etfs=_is_true(env.get("LIVE_INCLUDE_ETFS", "false"))
+        )
+        or []
+    )
+    maximum = max(int(env.get("LIVE_MAX_UNIVERSE_SIZE", "0") or 0), 0)
+    if maximum:
+        records = records[:maximum]
+    symbols = tuple(str(item.get("symbol") or "").strip().upper() for item in records if item.get("symbol"))
+    if not symbols:
+        raise RuntimeError("alpaca_full_stock_universe_empty")
+    return replace(policy, allowed_symbols=symbols), records
 
 
 class LiveStateStore:
@@ -191,6 +217,14 @@ def run_controlled_live_cycle(
         return {"status": "blocked", "reasons": preflight_reasons, "submitted": False}
 
     live_broker = broker or AlpacaLiveBroker(mode="LIVE", environ=env)
+    try:
+        policy, records = _resolve_stock_universe(live_broker, policy, env)
+    except Exception as exc:
+        return {
+            "status": "blocked",
+            "reasons": [f"stock_universe_unavailable_{type(exc).__name__}"],
+            "submitted": False,
+        }
     account = dict(live_broker.get_account() or {})
     positions = dict(live_broker.get_positions() or {})
     open_orders = [dict(item or {}) for item in list(live_broker.get_open_orders() or [])]
@@ -226,7 +260,6 @@ def run_controlled_live_cycle(
             "submitted": False,
         }
 
-    records = _symbol_records_from_list(list(policy.allowed_symbols))
     scan_payload = scanner(records)
     candidate = select_live_candidate(
         scan_payload,

@@ -6,14 +6,17 @@ from typing import Any, Mapping
 
 try:
     from alpaca.trading.client import TradingClient
-    from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
-    from alpaca.trading.requests import GetOrdersRequest, MarketOrderRequest, StopLossRequest, TakeProfitRequest
+    from alpaca.trading.enums import AssetClass, AssetStatus, OrderClass, OrderSide, QueryOrderStatus, TimeInForce
+    from alpaca.trading.requests import GetAssetsRequest, GetOrdersRequest, MarketOrderRequest, StopLossRequest, TakeProfitRequest
 except Exception:  # pragma: no cover - handled at runtime
     TradingClient = None
+    AssetClass = None
+    AssetStatus = None
     OrderClass = None
     OrderSide = None
     QueryOrderStatus = None
     TimeInForce = None
+    GetAssetsRequest = None
     GetOrdersRequest = None
     MarketOrderRequest = None
     StopLossRequest = None
@@ -106,6 +109,48 @@ class AlpacaLiveBroker(AlpacaPaperBroker):
 
     def get_tradable_crypto_assets(self) -> list[dict[str, Any]]:
         raise RuntimeError("crypto is disabled for micro-live trading")
+
+    def get_tradable_stock_assets(self, *, include_etfs: bool = False) -> list[dict[str, Any]]:
+        """Return every active tradable US stock exposed by this account endpoint."""
+        request = None
+        if GetAssetsRequest is not None and AssetClass is not None:
+            kwargs: dict[str, Any] = {"asset_class": AssetClass.US_EQUITY}
+            if AssetStatus is not None:
+                kwargs["status"] = AssetStatus.ACTIVE
+            request = GetAssetsRequest(**kwargs)
+        rows = self._trading_client.get_all_assets(request) if request is not None else self._trading_client.get_all_assets()
+        records: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for asset in rows or []:
+            symbol = str(getattr(asset, "symbol", "") or "").strip().upper().replace(".", "-")
+            name = str(getattr(asset, "name", symbol) or symbol)
+            asset_class = str(getattr(getattr(asset, "asset_class", ""), "value", getattr(asset, "asset_class", ""))).upper()
+            status = str(getattr(getattr(asset, "status", ""), "value", getattr(asset, "status", ""))).upper()
+            exchange = str(getattr(getattr(asset, "exchange", ""), "value", getattr(asset, "exchange", ""))).upper()
+            is_etf = symbol.endswith("ETF") or " ETF" in name.upper() or exchange in {"ARCA", "BATS"}
+            if (
+                not symbol
+                or symbol in seen
+                or asset_class.replace("-", "_") != "US_EQUITY"
+                or status != "ACTIVE"
+                or not bool(getattr(asset, "tradable", False))
+                or (is_etf and not include_etfs)
+            ):
+                continue
+            seen.add(symbol)
+            records.append(
+                {
+                    "symbol": symbol,
+                    "company_name": name,
+                    "sector": "Unknown",
+                    "industry": "Unknown",
+                    "asset_class": "US_EQUITY",
+                    "status": "ACTIVE",
+                    "tradable": True,
+                    "is_etf": is_etf,
+                }
+            )
+        return sorted(records, key=lambda item: str(item["symbol"]))
 
     def get_option_contracts(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         del args, kwargs

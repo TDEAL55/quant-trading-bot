@@ -63,6 +63,9 @@ def run_paper_micro_cycle(environ: Mapping[str, str] | None = None) -> dict[str,
     broker = AlpacaMicroPaperBroker(environ=env)
     internal_env = dict(env)
     internal_env["TRADING_MODE"] = "LIVE"
+    internal_env["LIVE_FULL_STOCK_UNIVERSE"] = env.get("PAPER_MICRO_FULL_STOCK_UNIVERSE", "true")
+    internal_env["LIVE_MAX_UNIVERSE_SIZE"] = env.get("PAPER_MICRO_MAX_UNIVERSE_SIZE", "0")
+    internal_env["LIVE_INCLUDE_ETFS"] = env.get("PAPER_MICRO_INCLUDE_ETFS", "false")
     internal_env["LIVE_STATE_PATH"] = env.get(
         "PAPER_MICRO_STATE_PATH", "/var/lib/quant-bot/paper-micro-state.json"
     )
