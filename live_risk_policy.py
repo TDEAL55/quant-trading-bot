@@ -35,6 +35,7 @@ class LiveRiskSettings:
     confirmation: str = ""
     private_dashboard_confirmed: bool = False
     entry_limits_enabled: bool = True
+    entry_cash_allocation_percent: float = 25.0
     maximum_account_equity: float = 500.0
     maximum_position_percent: float = 10.0
     maximum_position_notional: float = 30.0
@@ -51,6 +52,8 @@ class LiveRiskSettings:
     allowed_symbols: tuple[str, ...] = ()
 
     def validate(self) -> None:
+        if not 0 < self.entry_cash_allocation_percent <= 100:
+            raise ValueError("LIVE_ENTRY_CASH_ALLOCATION_PERCENT must be in (0, 100]")
         if not 0 < self.maximum_position_percent <= 10:
             raise ValueError("LIVE_MAX_POSITION_PERCENT must be in (0, 10]")
         if self.maximum_position_notional <= 0:
@@ -89,6 +92,7 @@ def settings_from_environment(environ: Mapping[str, str] | None = None) -> LiveR
         confirmation=str(env.get("LIVE_TRADING_CONFIRMATION", "")).strip(),
         private_dashboard_confirmed=_is_true(env.get("LIVE_PRIVATE_DASHBOARD_CONFIRMED", "false")),
         entry_limits_enabled=_is_true(env.get("LIVE_ENTRY_LIMITS_ENABLED", "false")),
+        entry_cash_allocation_percent=_as_float(env.get("LIVE_ENTRY_CASH_ALLOCATION_PERCENT"), 25.0),
         maximum_account_equity=_as_float(env.get("LIVE_MAX_ACCOUNT_EQUITY"), 500.0),
         maximum_position_percent=_as_float(env.get("LIVE_MAX_POSITION_PERCENT"), 10.0),
         maximum_position_notional=_as_float(env.get("LIVE_MAX_POSITION_NOTIONAL"), 30.0),
@@ -189,7 +193,11 @@ def live_entry_notional(account: Mapping[str, Any], positions: Mapping[str, Mapp
     equity = _as_float(account.get("equity"), 0.0)
     cash = _as_float(account.get("cash"), 0.0)
     if not settings.entry_limits_enabled:
-        return round(max(cash, 0.0), 2)
+        # Disabling the legacy count/exposure caps must not turn one entry into
+        # an all-cash order. A per-entry allocation leaves buying power for
+        # subsequent qualifying stocks while keeping the daily count unlimited.
+        allocation_cap = max(equity, 0.0) * settings.entry_cash_allocation_percent / 100.0
+        return round(max(min(cash, allocation_cap), 0.0), 2)
     gross_exposure = sum(abs(_as_float(row.get("market_value"), 0.0)) for row in dict(positions or {}).values())
     position_cap = min(
         equity * settings.maximum_position_percent / 100.0,

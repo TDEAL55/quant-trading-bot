@@ -30,6 +30,7 @@ def test_defaults_fail_closed():
 def test_live_environment_uses_same_uncapped_entry_policy_as_paper():
     settings = settings_from_environment({})
     assert settings.entry_limits_enabled is False
+    assert settings.entry_cash_allocation_percent == 25.0
 
 
 def test_healthy_micro_account_is_approved_and_caps_entry_at_30():
@@ -39,7 +40,7 @@ def test_healthy_micro_account_is_approved_and_caps_entry_at_30():
     assert live_entry_notional(_account(), {}, settings) == 30.0
 
 
-def test_disabled_entry_limits_use_available_cash_and_ignore_entry_counts():
+def test_disabled_entry_limits_reserve_cash_for_more_entries_and_ignore_entry_counts():
     settings = LiveRiskSettings(
         enabled=True,
         order_submission_enabled=True,
@@ -63,7 +64,13 @@ def test_disabled_entry_limits_use_available_cash_and_ignore_entry_counts():
         orders_submitted_today=50,
     )
     assert result["approved"]
-    assert live_entry_notional(_account(), positions, settings) == 300.0
+    assert live_entry_notional(_account(), positions, settings) == 75.0
+
+
+def test_unlimited_entry_allocation_is_configurable_but_never_exceeds_cash():
+    settings = settings_from_environment({"LIVE_ENTRY_CASH_ALLOCATION_PERCENT": "40"})
+    assert live_entry_notional(_account(), {}, settings) == 120.0
+    assert live_entry_notional(_account(cash=50), {}, settings) == 50.0
 
 
 @pytest.mark.parametrize("account,reason", [
@@ -79,6 +86,7 @@ def test_account_safety_blocks(account, reason):
 @pytest.mark.parametrize("key,value", [
     ("LIVE_MAX_POSITION_PERCENT", "11"), ("LIVE_MAX_GROSS_EXPOSURE_PERCENT", "31"),
     ("LIVE_MAX_OPEN_POSITIONS", "4"), ("LIVE_MAX_NEW_ORDERS_PER_DAY", "2"),
+    ("LIVE_ENTRY_CASH_ALLOCATION_PERCENT", "101"),
     ("LIVE_DAILY_LOSS_STOP_DOLLARS", "4"),
 ])
 def test_environment_cannot_raise_micro_caps(key, value):

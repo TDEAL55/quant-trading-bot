@@ -47,6 +47,7 @@ def test_read_only_paper_account_check_requires_no_arm_flags(monkeypatch):
 def test_paper_policy_disables_entry_limits_without_weakening_other_filters():
     settings = runner.paper_micro_settings(env())
     assert settings.entry_limits_enabled is False
+    assert settings.entry_cash_allocation_percent == 25.0
     assert settings.allowed_symbols == ("F",)
 
 

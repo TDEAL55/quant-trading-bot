@@ -34,6 +34,7 @@ def paper_micro_settings(environ: Mapping[str, str] | None = None) -> LiveRiskSe
         confirmation=LIVE_CONFIRMATION_PHRASE if confirmation_valid else "",
         private_dashboard_confirmed=True,
         entry_limits_enabled=_is_true(env.get("PAPER_MICRO_ENTRY_LIMITS_ENABLED", "false")),
+        entry_cash_allocation_percent=float(env.get("PAPER_MICRO_ENTRY_CASH_ALLOCATION_PERCENT", "25")),
         maximum_account_equity=float(env.get("PAPER_MICRO_MAX_ACCOUNT_EQUITY", "500")),
         maximum_position_percent=float(env.get("PAPER_MICRO_MAX_POSITION_PERCENT", "10")),
         maximum_position_notional=float(env.get("PAPER_MICRO_MAX_POSITION_NOTIONAL", "30")),

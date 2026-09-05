@@ -6,9 +6,9 @@ whole-share GTC bracket entries only, and starts unable to place orders.
 ## Hard limits
 
 - Account equity must remain at or below $500.
-- One new entry per UTC day, at most $30 and 10% of equity.
-- Three positions and 30% gross exposure maximum.
-- At least 70% of equity remains in cash.
+- There is no daily entry-count cap. Each new entry may use at most 25% of
+  current account equity and can never exceed available cash, preserving buying
+  power for additional qualifying stocks.
 - A $3 or 1% daily account loss (whichever is smaller) stops new entries.
 - Shorts, crypto, options, margin borrowing, and extended hours are disabled.
 - Existing positions must have both protective sell legs visible at Alpaca.
@@ -47,7 +47,8 @@ ALPACA_LIVE_ORDER_SUBMISSION_ENABLED=true
 LIVE_TRADING_CONFIRMATION=ENABLE_LIVE_MICRO_TRADING
 LIVE_KILL_SWITCH=false
 LIVE_PRIVATE_DASHBOARD_CONFIRMED=true
-LIVE_ALLOWED_SYMBOLS=<reviewed whole-share symbols>
+LIVE_FULL_STOCK_UNIVERSE=true
+LIVE_ENTRY_CASH_ALLOCATION_PERCENT=25
 ```
 
 Run one foreground cycle first. Only after inspecting the broker order and both
