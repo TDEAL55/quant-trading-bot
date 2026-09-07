@@ -385,6 +385,23 @@ def format_percent(value, default="0.00%"):
     return f"{sign}{number:.2f}%"
 
 
+def build_account_display(view: dict[str, Any]) -> dict[str, str]:
+    """Return one authoritative set of account labels for every dashboard shell."""
+    if not bool(view.get("account_data_available")):
+        return {
+            "portfolio_value": "Unavailable",
+            "cash": "Unavailable",
+            "buying_power": "Unavailable",
+            "open_positions": "—",
+        }
+    return {
+        "portfolio_value": format_currency(view.get("portfolio_value")),
+        "cash": format_currency(view.get("cash")),
+        "buying_power": format_currency(view.get("buying_power")),
+        "open_positions": str(int(view.get("open_positions") or 0)),
+    }
+
+
 def normalize_signal(signal):
     text = str(signal or "").strip().upper()
     if text in {"BUY", "HOLD", "SELL"}:
@@ -1297,6 +1314,14 @@ def build_dashboard_view_model(payload):
     latest_success = payload.get("latest_success") or {}
     latest_signal = payload.get("latest_signal") or {}
     latest_account = payload.get("latest_account") or {}
+    account_data_available = bool(
+        latest_account
+        and any(
+            latest_account.get(field) is not None
+            for field in ("portfolio_value", "equity", "cash", "buying_power")
+        )
+    )
+    account_data_error = _safe_text(payload.get("broker_sync_error"), "")
     starting_account = payload.get("starting_account") or {}
     portfolio_history = payload.get("portfolio_history") or []
 
@@ -1417,6 +1442,11 @@ def build_dashboard_view_model(payload):
         "open_positions": len(stock_position_rows),
         "account_status": friendly_status_text(latest_account.get("account_status"), "Unknown"),
         "account_source": _safe_text(latest_account.get("source"), "monitoring database"),
+        "account_data_available": account_data_available,
+        "account_data_status": "Available" if account_data_available else "Unavailable",
+        "account_data_error": account_data_error,
+        "account_snapshot_timestamp": latest_account.get("snapshot_timestamp"),
+        "dashboard_data_profile": _safe_text(payload.get("dashboard_data_profile"), "unspecified"),
         "short_positions": sum(1 for item in stock_position_rows if _as_float(item.get("quantity"), 0.0) < 0),
         "today_pl": daily_pl,
         "total_pl": total_pl,
@@ -3124,6 +3154,7 @@ def render_header(payload, view):
     market_label = "MARKET OPEN" if market_is_open else "MARKET CLOSED"
     bot_net_pl = _as_float(view.get("bot_net_pl"), 0.0)
     bot_net_pl_class = "positive" if bot_net_pl > 0 else "negative" if bot_net_pl < 0 else "flat"
+    account_display = build_account_display(view)
     st.markdown(
         f"""
         <div class='dq-shell-header'>
@@ -3142,12 +3173,12 @@ def render_header(payload, view):
             <div class='dq-desk-hero'>
                 <div class='dq-equity-block'>
                     <div class='dq-eyebrow'>PAPER PORTFOLIO</div>
-                    <div class='dq-equity-value'>{format_currency(view.get('portfolio_value'))}</div>
+                    <div class='dq-equity-value'>{account_display['portfolio_value']}</div>
                     <div class='dq-equity-change {bot_net_pl_class}'>{'+' if bot_net_pl > 0 else ''}{format_currency(bot_net_pl)} realized from closed trades</div>
                 </div>
                 <div class='dq-hero-facts'>
-                    <div><span>Open positions</span><strong>{int(view.get('open_positions') or 0)}</strong></div>
-                    <div><span>Available cash</span><strong>{format_currency(view.get('cash'))}</strong></div>
+                    <div><span>Open positions</span><strong>{account_display['open_positions']}</strong></div>
+                    <div><span>Available cash</span><strong>{account_display['cash']}</strong></div>
                     <div><span>Last bot check</span><strong title='{_safe_text(worker_parts['full'])}'>{_safe_text(worker_parts['relative'])}</strong></div>
                 </div>
             </div>
@@ -3156,10 +3187,18 @@ def render_header(payload, view):
         unsafe_allow_html=True,
     )
 
+    if not view.get("account_data_available"):
+        st.warning(
+            "Current account snapshot unavailable. Balances and positions are hidden instead of being shown as zero."
+        )
+
     status_col, refresh_col = st.columns([9.0, 1.0])
     with status_col:
         st.markdown(
-            f"<div class='dq-refresh-note' title='{_safe_text(refresh_parts['full'])}'>{_safe_text(refresh_parts['relative'])} · read-only PAPER account</div>",
+            f"<div class='dq-refresh-note' title='{_safe_text(refresh_parts['full'])}'>"
+            f"{_safe_text(refresh_parts['relative'])} · read-only PAPER account · "
+            f"{_safe_text(view.get('account_source'), 'unknown source')} · "
+            f"{_safe_text(view.get('dashboard_data_profile'), 'unspecified profile')}</div>",
             unsafe_allow_html=True,
         )
     with refresh_col:
@@ -3749,7 +3788,9 @@ def render_command_center_page(payload, view):
         f"<span class='dq-count-badge'>{len(summary['position_rows'])}</span></div>",
         unsafe_allow_html=True,
     )
-    if summary["position_rows"]:
+    if not view.get("account_data_available"):
+        _empty_state("Current position data is unavailable.")
+    elif summary["position_rows"]:
         st.dataframe(summary["position_rows"])
     else:
         _empty_state("No open paper positions.")
@@ -3828,6 +3869,7 @@ def render_mobile_command_center(payload, view):
     market_open = bool(view.get("market_is_open"))
     total_pl = _as_float(view.get("bot_net_pl"), 0.0)
     total_class = "positive" if total_pl > 0 else "negative" if total_pl < 0 else ""
+    account_display = build_account_display(view)
     entry_policy = dict((payload.get("latest_account") or {}).get("portfolio_entry_policy") or {})
     stock_enabled = (
         status.get("kill_switch") != "ON"
@@ -3843,6 +3885,8 @@ def render_mobile_command_center(payload, view):
         "</div>",
         unsafe_allow_html=True,
     )
+    if not view.get("account_data_available"):
+        st.warning("Current account snapshot unavailable. Balance and position totals are temporarily hidden.")
 
     st.markdown(
         "<div class='dq-mobile-balance'>"
@@ -3854,12 +3898,16 @@ def render_mobile_command_center(payload, view):
     )
     st.markdown(
         "<div class='dq-mobile-stat-grid'>"
-        f"<div class='dq-mobile-stat'><span>Buying power</span><strong>{format_currency(view.get('buying_power'))}</strong></div>"
-        f"<div class='dq-mobile-stat'><span>Cash</span><strong>{format_currency(view.get('cash'))}</strong></div>"
-        f"<div class='dq-mobile-stat'><span>Positions</span><strong>{int(view.get('open_positions') or 0)}</strong></div>"
+        f"<div class='dq-mobile-stat'><span>Buying power</span><strong>{account_display['buying_power']}</strong></div>"
+        f"<div class='dq-mobile-stat'><span>Cash</span><strong>{account_display['cash']}</strong></div>"
+        f"<div class='dq-mobile-stat'><span>Positions</span><strong>{account_display['open_positions']}</strong></div>"
         f"<div class='dq-mobile-stat'><span>Market</span><strong>{'OPEN' if market_open else 'CLOSED'}</strong></div>"
         "</div>",
         unsafe_allow_html=True,
+    )
+    st.caption(
+        f"Data source: {_safe_text(view.get('account_source'), 'unknown')} · "
+        f"Profile: {_safe_text(view.get('dashboard_data_profile'), 'unspecified')}"
     )
 
     engines = [("Stocks only", stock_enabled, "Open" if market_open else "Closed")]
@@ -3888,7 +3936,10 @@ def render_mobile_command_center(payload, view):
             f"<div class='dq-mobile-section'>Open positions <span>{len(summary['position_rows'])} total</span></div>",
             unsafe_allow_html=True,
         )
-        _render_mobile_position_cards(summary["position_rows"])
+        if view.get("account_data_available"):
+            _render_mobile_position_cards(summary["position_rows"])
+        else:
+            _empty_state("Current position data is unavailable.")
     elif selected_view == "Orders":
         st.markdown(
             f"<div class='dq-mobile-section'>Recent orders <span>{len(summary['order_rows'])} shown</span></div>",
@@ -3901,13 +3952,16 @@ def render_mobile_command_center(payload, view):
             "<div class='dq-mobile-stat-grid'>"
             f"<div class='dq-mobile-stat'><span>Realized profit</span><strong>{format_currency(view.get('stock_realized_pl'))}</strong></div>"
             f"<div class='dq-mobile-stat'><span>Closed trades</span><strong>{int(view.get('stock_closed_trade_count') or 0)}</strong></div>"
-            f"<div class='dq-mobile-stat'><span>Open positions</span><strong>{len(summary['position_rows'])}</strong></div>"
+            f"<div class='dq-mobile-stat'><span>Open positions</span><strong>{account_display['open_positions']}</strong></div>"
             f"<div class='dq-mobile-stat'><span>Last refresh</span><strong>{_safe_text(format_compact_timestamp(datetime.now(timezone.utc).isoformat()).get('time'), 'Now')}</strong></div>"
             "</div>",
             unsafe_allow_html=True,
         )
         st.markdown("<div class='dq-mobile-section'>Largest positions <span>top 3</span></div>", unsafe_allow_html=True)
-        _render_mobile_position_cards(summary["position_rows"], limit=3)
+        if view.get("account_data_available"):
+            _render_mobile_position_cards(summary["position_rows"], limit=3)
+        else:
+            _empty_state("Current position data is unavailable.")
         st.markdown("<div class='dq-mobile-section'>Latest orders <span>top 3</span></div>", unsafe_allow_html=True)
         _render_mobile_order_cards(summary["order_rows"], limit=3)
 

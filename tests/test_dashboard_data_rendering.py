@@ -328,6 +328,52 @@ def test_dashboard_view_model_handles_warning_error_and_market_closed_states():
     assert error_view["generated_signal"] == "SELL"
 
 
+def test_missing_account_snapshot_is_not_presented_as_zero_balance():
+    payload = {
+        "db_connected": True,
+        "latest_run": {"bot_status": "warning", "trading_mode": "PAPER"},
+        "latest_success": {},
+        "latest_signal": {"market_open": 0, "generated_signal": "HOLD"},
+        "latest_account": {},
+        "recent_runs": [],
+        "recent_orders": [],
+        "portfolio_history": [],
+        "signal_history": [],
+        "order_count_by_day": [],
+        "dashboard_data_profile": "original-paper",
+    }
+
+    view = dashboard_app.build_dashboard_view_model(payload)
+    account_display = dashboard_app.build_account_display(view)
+
+    assert view["account_data_available"] is False
+    assert view["account_data_status"] == "Unavailable"
+    assert view["dashboard_data_profile"] == "original-paper"
+    assert account_display == {
+        "portfolio_value": "Unavailable",
+        "cash": "Unavailable",
+        "buying_power": "Unavailable",
+        "open_positions": "—",
+    }
+
+
+def test_account_display_is_shared_by_desktop_and_mobile_renderers():
+    view = {
+        "account_data_available": True,
+        "portfolio_value": 299.47,
+        "cash": 218.22,
+        "buying_power": 196.76,
+        "open_positions": 3,
+    }
+
+    assert dashboard_app.build_account_display(view) == {
+        "portfolio_value": "$299.47",
+        "cash": "$218.22",
+        "buying_power": "$196.76",
+        "open_positions": "3",
+    }
+
+
 def test_positive_and_negative_pl_formatting():
     history_payload = {
         "db_connected": True,

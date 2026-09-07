@@ -667,6 +667,7 @@ def fetch_dashboard_payload(
         "options": {},
         "stock_pnl_reconstruction": {},
         "research": research_payload,
+        "dashboard_data_profile": str(os.getenv("DASHBOARD_DATA_PROFILE", "unspecified")).strip() or "unspecified",
     }
     if not db.enabled:
         return payload
