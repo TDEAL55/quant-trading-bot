@@ -57,7 +57,7 @@ from walk_forward_data import fetch_walk_forward_dashboard_payload
 
 MAX_DAILY_ORDERS = 3
 MAX_DAILY_SUBMITTED_NOTIONAL = 30.0
-DASHBOARD_VERSION = "v4.0"
+DASHBOARD_VERSION = "v5.0"
 UI_BUILD_LABEL = os.getenv("DASHBOARD_UI_BUILD_LABEL", "PAPER TRADING DESK")
 MOBILE_MODE_LABEL = os.getenv("DASHBOARD_MOBILE_SUBTITLE", "STOCKS · PAPER MODE")
 MOBILE_DESKTOP_URL = os.getenv("DASHBOARD_MOBILE_DESKTOP_URL", "/")
@@ -115,7 +115,7 @@ PRIMARY_PAGE_OPTIONS = ["Overview", "Portfolio", "Orders", "Strategy", "Performa
 PAGE_OPTIONS = ["Overview", "Portfolio", "Orders", "Risk", "Operations", "Strategy", "Performance", "Alerts", "Research", "LIVE Readiness", "Factor Attribution", "Factor Intelligence", "Self-Improving", "Walk-Forward Validation", "Portfolio Research", "Strategy Laboratory", "Paper Validation", "Daily Run"]
 NAVIGATION_SCOPE_OPTIONS = ["Essentials", "All pages"]
 MODE_OPTIONS = ["Standard Mode", "Focus Mode", "Presentation Mode"]
-THEME_OPTIONS = ["Studio"]
+THEME_OPTIONS = ["Ocean Blue"]
 AUTO_REFRESH_OPTIONS = ["Off", "30 seconds", "60 seconds", "5 minutes"]
 TIMEFRAME_OPTIONS = ["1D", "5D", "1M", "3M"]
 
@@ -127,8 +127,8 @@ def initialize_dashboard_session_state() -> None:
         "dashboard_page_selector": "Overview",
         "dashboard_navigation_scope": "Essentials",
         "dashboard_navigation_scope_selector": "Essentials",
-        "dashboard_theme": "Studio",
-        "dashboard_theme_selector": "Studio",
+        "dashboard_theme": "Ocean Blue",
+        "dashboard_theme_selector": "Ocean Blue",
         "dashboard_mode": "Standard Mode",
         "dashboard_mode_selector": "Standard Mode",
         "dashboard_focus_mode": False,
@@ -1917,7 +1917,7 @@ def clear_dashboard_cache():
         st.cache_data.clear()
 
 
-def apply_dashboard_css(theme_name="Studio"):
+def apply_dashboard_css(theme_name="Ocean Blue"):
     palette = build_palette(theme_name)
     st.markdown(
         f"""
@@ -3071,6 +3071,243 @@ def apply_dashboard_css(theme_name="Studio"):
             .dq-section-copy {{ display: none; }}
             .dq-mobile-app {{ padding-bottom: 4rem; }}
         }}
+
+        /* v5 Ocean Blue: unified desktop and mobile visual system. */
+        :root {{
+            --dq-bg: #050b18;
+            --dq-surface: #0b1629;
+            --dq-surface-2: #101f37;
+            --dq-surface-3: #142845;
+            --dq-line: rgba(96, 165, 250, 0.18);
+            --dq-line-strong: rgba(96, 165, 250, 0.38);
+            --dq-blue: #3b82f6;
+            --dq-blue-bright: #60a5fa;
+            --dq-cyan: #22d3ee;
+            --dq-text: #f8fbff;
+            --dq-muted: #8fa9c7;
+            --dq-green: #34d399;
+            --dq-red: #fb7185;
+            --dq-amber: #fbbf24;
+        }}
+        html, body, [class*="css"] {{
+            font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }}
+        .stApp {{
+            color: var(--dq-text);
+            background:
+                radial-gradient(circle at 8% -10%, rgba(37, 99, 235, 0.26), transparent 32%),
+                radial-gradient(circle at 92% 8%, rgba(6, 182, 212, 0.12), transparent 27%),
+                linear-gradient(180deg, #07101f 0%, var(--dq-bg) 52%, #030711 100%);
+            background-attachment: fixed;
+        }}
+        .stApp::before {{
+            content: "";
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            opacity: 0.28;
+            background-image:
+                linear-gradient(rgba(96,165,250,0.035) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(96,165,250,0.035) 1px, transparent 1px);
+            background-size: 48px 48px;
+            mask-image: linear-gradient(to bottom, black, transparent 72%);
+        }}
+        .main .block-container, [data-testid="stMainBlockContainer"] {{
+            position: relative;
+            max-width: 1420px;
+            padding: 1rem 1.4rem 3rem;
+        }}
+        .dq-shell-header {{
+            border: 1px solid var(--dq-line);
+            border-radius: 20px;
+            background: linear-gradient(135deg, rgba(16,31,55,0.98), rgba(8,19,37,0.98));
+            box-shadow: 0 28px 80px rgba(0,0,0,0.36), inset 0 1px 0 rgba(255,255,255,0.04);
+        }}
+        .dq-shell-header::before {{
+            display: block;
+            background:
+                radial-gradient(circle at 82% 35%, rgba(59,130,246,0.22), transparent 28%),
+                linear-gradient(90deg, transparent, rgba(34,211,238,0.035));
+        }}
+        .dq-desk-topline {{
+            position: relative;
+            z-index: 1;
+            padding: 0.9rem 1.05rem;
+            border-bottom: 1px solid var(--dq-line);
+            background: rgba(4,12,25,0.28);
+        }}
+        .dq-brand-mark {{
+            width: 38px;
+            height: 38px;
+            border-radius: 11px;
+            color: white;
+            background: linear-gradient(145deg, var(--dq-blue-bright), #2563eb 60%, #1d4ed8);
+            box-shadow: 0 10px 28px rgba(37,99,235,0.35), inset 0 1px 0 rgba(255,255,255,0.25);
+        }}
+        .dq-brand-name {{ color: var(--dq-text); font-size: 0.98rem; }}
+        .dq-brand-mode {{ color: var(--dq-muted); }}
+        .dq-desk-statuses {{ gap: 0.5rem; }}
+        .dq-desk-pill {{
+            padding: 0.35rem 0.62rem;
+            color: #b7c9de;
+            border-color: var(--dq-line);
+            background: rgba(9,22,41,0.75);
+            border-radius: 999px;
+        }}
+        .dq-desk-pill:hover {{ border-color: var(--dq-line-strong); color: white; }}
+        .dq-desk-pill.live {{ color: #a7f3d0; border-color: rgba(52,211,153,0.28); background: rgba(16,185,129,0.08); }}
+        .dq-desk-pill.live i, .dq-engine-state.on i {{ background: var(--dq-green); box-shadow: 0 0 0 4px rgba(52,211,153,0.1); }}
+        .dq-desk-pill.idle {{ color: #fde68a; border-color: rgba(251,191,36,0.24); background: rgba(251,191,36,0.06); }}
+        .dq-desk-pill.idle i, .dq-engine-state.off i {{ background: var(--dq-amber); }}
+        .dq-desk-clock {{ color: #cfe3fa; }}
+        .dq-desk-hero {{
+            position: relative;
+            z-index: 1;
+            min-height: 180px;
+            padding: 1.55rem 1.65rem 1.4rem;
+            background: linear-gradient(115deg, rgba(12,29,53,0.72), rgba(15,40,72,0.4));
+        }}
+        .dq-eyebrow {{ color: var(--dq-blue-bright); }}
+        .dq-equity-value {{
+            color: white;
+            font-size: clamp(2.35rem, 4vw, 3.35rem);
+            font-weight: 780;
+            text-shadow: 0 8px 30px rgba(59,130,246,0.22);
+        }}
+        .dq-equity-change.positive {{ color: var(--dq-green); }}
+        .dq-equity-change.negative {{ color: var(--dq-red); }}
+        .dq-equity-change.flat {{ color: var(--dq-muted); }}
+        .dq-hero-facts {{
+            border: 1px solid var(--dq-line);
+            border-radius: 14px;
+            background: rgba(5,14,28,0.44);
+            overflow: hidden;
+        }}
+        .dq-hero-facts > div {{ padding: 0.85rem 0.9rem; border-right: 1px solid var(--dq-line); }}
+        .dq-hero-facts > div:last-child {{ border-right: 0; }}
+        .dq-hero-facts span, .dq-metric-label, .dq-section-copy, .dq-refresh-note {{ color: var(--dq-muted); }}
+        .dq-hero-facts strong {{ color: var(--dq-text); }}
+        div[role="radiogroup"] {{
+            padding: 0.34rem;
+            gap: 0.32rem;
+            border: 1px solid var(--dq-line);
+            border-radius: 13px;
+            background: rgba(8,20,38,0.86);
+            box-shadow: 0 14px 40px rgba(0,0,0,0.18);
+        }}
+        div[role="radiogroup"] label {{ border-radius: 9px; min-height: 38px; }}
+        div[role="radiogroup"] label:has(input:checked) {{
+            background: linear-gradient(135deg, rgba(59,130,246,0.92), rgba(37,99,235,0.9));
+            box-shadow: 0 7px 20px rgba(37,99,235,0.22);
+        }}
+        div[role="radiogroup"] label p {{ color: var(--dq-muted) !important; }}
+        div[role="radiogroup"] label:has(input:checked) p {{ color: white !important; }}
+        .stButton > button {{
+            color: #d9e9fb;
+            border-color: var(--dq-line);
+            border-radius: 10px;
+            background: linear-gradient(145deg, var(--dq-surface-2), var(--dq-surface));
+        }}
+        .stButton > button:hover {{ color: white; border-color: var(--dq-blue-bright); background: var(--dq-surface-3); }}
+        .dq-section-intro {{ border-color: var(--dq-line); margin-top: 1.35rem; }}
+        .dq-section-index {{
+            color: #dbeafe;
+            background: linear-gradient(145deg, rgba(59,130,246,0.30), rgba(37,99,235,0.12));
+            border: 1px solid rgba(96,165,250,0.24);
+        }}
+        .dq-section-title {{ color: var(--dq-text); font-size: 0.96rem; }}
+        .dq-count-badge {{ color: #bfdbfe; background: rgba(59,130,246,0.12); border: 1px solid rgba(96,165,250,0.2); }}
+        .dq-engine-card, .dq-metric-card, .dq-panel, .dq-chart-frame, .dq-card, .dq-narrative-card, .dq-ops-node, .dq-matrix-row {{
+            border: 1px solid var(--dq-line);
+            border-radius: 14px;
+            background: linear-gradient(150deg, rgba(16,31,55,0.96), rgba(9,20,38,0.96));
+            box-shadow: 0 15px 38px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.025);
+        }}
+        .dq-engine-card {{ min-height: 76px; }}
+        .dq-engine-symbol {{ color: #bfdbfe; background: rgba(59,130,246,0.16); border: 1px solid rgba(96,165,250,0.18); }}
+        .dq-engine-name, .dq-metric-value, .dq-activity-line strong {{ color: var(--dq-text); }}
+        .dq-engine-market {{ color: var(--dq-muted); }}
+        .dq-engine-state.on {{ color: var(--dq-green); }}
+        .dq-engine-state.off {{ color: var(--dq-amber); }}
+        .dq-metric-card {{ min-height: 106px; padding: 0.94rem 1rem 0.82rem; }}
+        .dq-metric-card:hover {{ transform: translateY(-2px); border-color: var(--dq-line-strong); box-shadow: 0 20px 44px rgba(0,0,0,0.28); }}
+        .dq-metric-rule {{ height: 3px; box-shadow: 0 0 18px currentColor; }}
+        .dq-activity-line {{
+            color: var(--dq-muted);
+            border: 1px solid var(--dq-line);
+            border-left: 3px solid var(--dq-blue);
+            background: rgba(9,22,42,0.72);
+            border-radius: 11px;
+        }}
+        div[data-testid="stDataFrame"] {{
+            border: 1px solid var(--dq-line);
+            border-radius: 14px;
+            background: var(--dq-surface);
+            box-shadow: 0 16px 40px rgba(0,0,0,0.2);
+        }}
+        .dq-empty-state {{ color: var(--dq-muted); border-color: var(--dq-line); background: rgba(9,22,42,0.62); border-radius: 14px; }}
+        .dq-section-tag {{ color: var(--dq-blue-bright); }}
+        [data-testid="stAlert"] {{
+            color: #fde9a8;
+            border: 1px solid rgba(251,191,36,0.26);
+            border-radius: 13px;
+            background: linear-gradient(135deg, rgba(74,52,12,0.72), rgba(44,35,13,0.62));
+            box-shadow: 0 12px 30px rgba(0,0,0,0.16);
+        }}
+        .dq-mobile-app {{ max-width: 680px; }}
+        .dq-mobile-topbar {{
+            padding: 0.78rem 0.82rem;
+            border: 1px solid var(--dq-line);
+            border-radius: 16px;
+            background: linear-gradient(135deg, rgba(16,31,55,0.98), rgba(8,19,37,0.98));
+            box-shadow: 0 18px 50px rgba(0,0,0,0.28);
+        }}
+        .dq-mobile-title, .dq-mobile-symbol {{ color: var(--dq-text); }}
+        .dq-mobile-subtitle, .dq-mobile-caption, .dq-mobile-section span, .dq-mobile-card-grid span, .dq-mobile-back, .dq-mobile-install {{ color: var(--dq-muted); }}
+        .dq-mobile-live {{ color: var(--dq-green); }}
+        .dq-mobile-live i {{ background: var(--dq-green); box-shadow: 0 0 0 4px rgba(52,211,153,0.1); }}
+        .dq-mobile-live.off {{ color: var(--dq-amber); }}
+        .dq-mobile-live.off i {{ background: var(--dq-amber); }}
+        .dq-mobile-balance {{
+            position: relative;
+            overflow: hidden;
+            padding: 1.25rem;
+            border: 1px solid rgba(96,165,250,0.28);
+            border-radius: 18px;
+            background: linear-gradient(145deg, rgba(25,58,105,0.92), rgba(10,28,54,0.96));
+            box-shadow: 0 22px 55px rgba(0,0,0,0.3);
+        }}
+        .dq-mobile-balance::after {{ content:""; position:absolute; width:180px; height:180px; right:-65px; top:-90px; border-radius:50%; background:rgba(59,130,246,0.22); filter:blur(2px); }}
+        .dq-mobile-kicker {{ color: #bfdbfe; }}
+        .dq-mobile-pl {{ position: relative; z-index: 1; color: white; font-size: 2.5rem; }}
+        .dq-mobile-pl.positive {{ color: #6ee7b7; }}
+        .dq-mobile-pl.negative {{ color: #fda4af; }}
+        .dq-mobile-stat-grid {{ gap: 0.58rem; }}
+        .dq-mobile-stat, .dq-mobile-engine, .dq-mobile-card {{
+            border: 1px solid var(--dq-line);
+            border-radius: 14px;
+            background: linear-gradient(145deg, rgba(16,31,55,0.96), rgba(9,20,38,0.96));
+            box-shadow: 0 12px 30px rgba(0,0,0,0.16);
+        }}
+        .dq-mobile-stat {{ padding: 0.86rem; }}
+        .dq-mobile-stat span {{ color: var(--dq-muted); }}
+        .dq-mobile-stat strong, .dq-mobile-card-grid strong {{ color: var(--dq-text); }}
+        .dq-mobile-engine strong {{ color: var(--dq-green); }}
+        .dq-mobile-engine strong.off {{ color: var(--dq-amber); }}
+        .dq-mobile-section {{ color: var(--dq-text); margin-top: 1.05rem; }}
+        .dq-mobile-card {{ padding: 0.88rem 0.92rem; margin-bottom: 0.55rem; }}
+        .dq-mobile-tag {{ color: #bfdbfe; background: rgba(59,130,246,0.12); border: 1px solid rgba(96,165,250,0.16); border-radius: 999px; }}
+        .dq-mobile-card-grid strong.positive {{ color: var(--dq-green); }}
+        .dq-mobile-card-grid strong.negative {{ color: var(--dq-red); }}
+        .dq-mobile-back a {{ color: var(--dq-blue-bright); }}
+        @media (max-width: 768px) {{
+            .main .block-container, [data-testid="stMainBlockContainer"] {{ padding: 0.7rem 0.72rem 2rem; }}
+            .dq-shell-header {{ border-radius: 16px; }}
+            .dq-desk-hero {{ min-height: auto; padding: 1.25rem; }}
+            .dq-equity-value {{ font-size: 2.5rem; }}
+            .dq-hero-facts {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+            .dq-mobile-pl {{ font-size: 2.35rem; }}
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -3155,6 +3392,8 @@ def render_header(payload, view):
     bot_net_pl = _as_float(view.get("bot_net_pl"), 0.0)
     bot_net_pl_class = "positive" if bot_net_pl > 0 else "negative" if bot_net_pl < 0 else "flat"
     account_display = build_account_display(view)
+    data_profile = _safe_text(view.get("dashboard_data_profile"), "paper-account")
+    portfolio_label = "TRIAL PAPER PORTFOLIO" if "micro" in data_profile.lower() else "ORIGINAL PAPER PORTFOLIO"
     st.markdown(
         f"""
         <div class='dq-shell-header'>
@@ -3172,7 +3411,7 @@ def render_header(payload, view):
             </div>
             <div class='dq-desk-hero'>
                 <div class='dq-equity-block'>
-                    <div class='dq-eyebrow'>PAPER PORTFOLIO</div>
+                    <div class='dq-eyebrow'>{portfolio_label}</div>
                     <div class='dq-equity-value'>{account_display['portfolio_value']}</div>
                     <div class='dq-equity-change {bot_net_pl_class}'>{'+' if bot_net_pl > 0 else ''}{format_currency(bot_net_pl)} realized from closed trades</div>
                 </div>
@@ -3870,6 +4109,8 @@ def render_mobile_command_center(payload, view):
     total_pl = _as_float(view.get("bot_net_pl"), 0.0)
     total_class = "positive" if total_pl > 0 else "negative" if total_pl < 0 else ""
     account_display = build_account_display(view)
+    data_profile = _safe_text(view.get("dashboard_data_profile"), "paper-account")
+    account_label = "300 TRIAL" if "micro" in data_profile.lower() else "ORIGINAL PAPER"
     entry_policy = dict((payload.get("latest_account") or {}).get("portfolio_entry_policy") or {})
     stock_enabled = (
         status.get("kill_switch") != "ON"
@@ -3880,7 +4121,7 @@ def render_mobile_command_center(payload, view):
     st.markdown(
         "<div class='dq-mobile-topbar'>"
         "<div class='dq-mobile-brand'><span class='dq-brand-mark'>DQ</span>"
-        f"<div><div class='dq-mobile-title'>Deal Quant</div><div class='dq-mobile-subtitle'>{_safe_text(MOBILE_MODE_LABEL)}</div></div></div>"
+        f"<div><div class='dq-mobile-title'>Deal Quant</div><div class='dq-mobile-subtitle'>{account_label} · STOCKS</div></div></div>"
         f"<div class='dq-mobile-live {'' if service_active else 'off'}'><i></i>{'BOT ON' if service_active else 'BOT OFF'}</div>"
         "</div>",
         unsafe_allow_html=True,
@@ -3898,7 +4139,7 @@ def render_mobile_command_center(payload, view):
     )
     st.markdown(
         "<div class='dq-mobile-stat-grid'>"
-        f"<div class='dq-mobile-stat'><span>Buying power</span><strong>{account_display['buying_power']}</strong></div>"
+        f"<div class='dq-mobile-stat'><span>Portfolio value</span><strong>{account_display['portfolio_value']}</strong></div>"
         f"<div class='dq-mobile-stat'><span>Cash</span><strong>{account_display['cash']}</strong></div>"
         f"<div class='dq-mobile-stat'><span>Positions</span><strong>{account_display['open_positions']}</strong></div>"
         f"<div class='dq-mobile-stat'><span>Market</span><strong>{'OPEN' if market_open else 'CLOSED'}</strong></div>"
@@ -3978,7 +4219,7 @@ def render_sidebar(payload):
     # stays on essential pages and refreshes read-only account data automatically.
     st.session_state["dashboard_navigation_scope"] = "Essentials"
     st.session_state["dashboard_mode"] = "Standard Mode"
-    st.session_state["dashboard_theme"] = "Studio"
+    st.session_state["dashboard_theme"] = "Ocean Blue"
     st.session_state["dashboard_auto_refresh"] = "30 seconds"
     _refresh_mode_flags()
 
