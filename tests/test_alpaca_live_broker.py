@@ -25,8 +25,12 @@ class Client:
 
 
 class NestedOrderClient(Client):
+    def __init__(self):
+        super().__init__()
+        self.order_filter = None
+
     def get_orders(self, filter=None):
-        del filter
+        self.order_filter = filter
         leg = SimpleNamespace(id="leg", client_order_id="leg-cid", symbol="F", side="sell", qty="2",
             filled_qty="0", order_type="stop", time_in_force="gtc", submitted_at="now", updated_at="now",
             status="new", filled_avg_price=None, failed_at=None)
@@ -98,9 +102,14 @@ def test_bracket_order_is_whole_share_gtc(monkeypatch):
 
 
 def test_open_orders_flattens_protective_bracket_legs():
-    broker = AlpacaLiveBroker(trading_client=NestedOrderClient(), environ=env(), read_only=True)
+    client = NestedOrderClient()
+    broker = AlpacaLiveBroker(trading_client=client, environ=env(), read_only=True)
     orders = broker.get_open_orders()
-    assert len([order for order in orders if order["side"] == "sell"]) == 2
+    assert len(orders) == 2
+    assert all(order["side"] == "sell" for order in orders)
+    assert client.order_filter.status == module.QueryOrderStatus.ALL
+    assert client.order_filter.nested is True
+    assert client.order_filter.limit == 500
 
 
 def test_order_history_flattens_bracket_legs_for_realized_pnl():

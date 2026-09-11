@@ -159,8 +159,13 @@ class AlpacaLiveBroker(AlpacaPaperBroker):
     def get_open_orders(self) -> list[dict[str, Any]]:
         """Return open parents and flattened bracket legs for protection checks."""
         if GetOrdersRequest is not None and QueryOrderStatus is not None:
+            # A filled bracket parent can disappear from an ``OPEN`` query even
+            # while its take-profit and stop-loss children remain open.  Fetch
+            # recent parent orders with their nested legs, then filter locally,
+            # so the runner does not falsely mark a protected position as
+            # unprotected after the entry parent fills.
             rows = self._trading_client.get_orders(
-                filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, nested=True)
+                filter=GetOrdersRequest(status=QueryOrderStatus.ALL, limit=500, nested=True)
             )
         else:
             rows = self._trading_client.get_orders()
@@ -173,7 +178,19 @@ class AlpacaLiveBroker(AlpacaPaperBroker):
                 child = normalize_alpaca_order(leg)
                 if child:
                     normalized.append(child)
-        return normalized
+        final_statuses = {
+            "filled",
+            "canceled",
+            "cancelled",
+            "expired",
+            "rejected",
+            "done_for_day",
+        }
+        return [
+            order
+            for order in normalized
+            if str(order.get("status") or "").strip().lower() not in final_statuses
+        ]
 
     def get_order_history(self, limit: int = 50) -> list[dict[str, Any]]:
         """Return parent orders plus bracket legs so exit P/L can be reconstructed."""
