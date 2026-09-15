@@ -58,7 +58,9 @@ def _order_key(order: dict[str, Any], fallback_index: int) -> str:
 
 
 def _is_bot_order(order: dict[str, Any]) -> bool:
-    return str(order.get("client_order_id") or "").strip().lower().startswith("qtb-")
+    client_order_id = str(order.get("client_order_id") or "").strip().lower()
+    parent_client_order_id = str(order.get("parent_client_order_id") or "").strip().lower()
+    return client_order_id.startswith("qtb-") or parent_client_order_id.startswith("qtb-")
 
 
 def _asset_group(order: dict[str, Any]) -> tuple[str, bool]:

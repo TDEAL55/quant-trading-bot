@@ -31,12 +31,18 @@ class NestedOrderClient(Client):
 
     def get_orders(self, filter=None):
         self.order_filter = filter
-        leg = SimpleNamespace(id="leg", client_order_id="leg-cid", symbol="F", side="sell", qty="2",
-            filled_qty="0", order_type="stop", time_in_force="gtc", submitted_at="now", updated_at="now",
-            status="new", filled_avg_price=None, failed_at=None)
-        parent = SimpleNamespace(id="parent", client_order_id="parent-cid", symbol="F", side="buy", qty="2",
+        take_profit = SimpleNamespace(id="take-profit", client_order_id="take-profit-cid", symbol="F", side="sell", qty="2",
+            filled_qty="0", order_type="limit", time_in_force="gtc", submitted_at="2026-09-14T14:00:00+00:00",
+            updated_at="2026-09-15T14:00:00+00:00", status="new", filled_avg_price=None, failed_at=None,
+            asset_class="us_equity", position_intent="sell_to_close")
+        stop_loss = SimpleNamespace(id="stop-loss", client_order_id="stop-loss-cid", symbol="F", side="sell", qty="2",
+            filled_qty="0", order_type="stop", time_in_force="gtc", submitted_at="2026-09-14T14:00:00+00:00",
+            updated_at="2026-09-15T14:00:01+00:00", status="held", filled_avg_price=None, failed_at=None,
+            asset_class="us_equity", position_intent="sell_to_close")
+        parent = SimpleNamespace(id="parent", client_order_id="qtb-parent-cid", symbol="F", side="buy", qty="2",
             filled_qty="2", order_type="market", time_in_force="gtc", submitted_at="now", updated_at="now",
-            status="filled", filled_avg_price="12", failed_at=None, legs=[leg, leg])
+            status="filled", filled_avg_price="12", failed_at=None, legs=[take_profit, stop_loss],
+            asset_class="us_equity", position_intent="buy_to_open")
         return [parent]
 
 
@@ -116,7 +122,10 @@ def test_order_history_flattens_bracket_legs_for_realized_pnl():
     broker = AlpacaLiveBroker(trading_client=NestedOrderClient(), environ=env(), read_only=True)
     orders = broker.get_order_history(limit=50)
     assert len(orders) == 3
-    assert len([order for order in orders if order["side"] == "sell"]) == 2
+    sell_orders = [order for order in orders if order["side"] == "sell"]
+    assert len(sell_orders) == 2
+    assert all(order["parent_order_id"] == "parent" for order in sell_orders)
+    assert all(order["parent_client_order_id"] == "qtb-parent-cid" for order in sell_orders)
 
 
 def test_live_broker_returns_broad_active_stock_universe_without_etfs():

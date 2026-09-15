@@ -118,6 +118,21 @@ def test_only_qtb_stock_fills_are_included():
     assert "manual_stock_fills_were_excluded_so_inventory_interactions_are_not_provable" in result["confidence_reasons"]
 
 
+def test_alpaca_bracket_exit_inherits_bot_ownership_from_parent():
+    buy = _fill("eco-buy", "ECO", "buy", 1, 70.97, 1, client_order_id="qtb-eco-entry")
+    sell = _fill("eco-target", "ECO", "sell", 1, 76.99, 2, client_order_id="alpaca-generated-leg-id")
+    sell["parent_order_id"] = "eco-buy"
+    sell["parent_client_order_id"] = "qtb-eco-entry"
+    sell["position_intent"] = "sell_to_close"
+
+    result = reconstruct_stock_realized_pnl([sell, buy])
+
+    assert result["is_exact"] is True
+    assert result["closed_trade_count"] == 1
+    assert result["realized_stock_pnl"] == 6.02
+    assert realized_events_by_exit_order_id(result)["eco-target"]["realized_pnl"] == 6.02
+
+
 def test_unrelated_manual_stock_symbol_does_not_downgrade_bot_pnl():
     orders = [
         _fill("stock-buy", "AAPL", "buy", 2, 100, 1),

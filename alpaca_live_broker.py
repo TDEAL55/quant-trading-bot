@@ -177,6 +177,8 @@ class AlpacaLiveBroker(AlpacaPaperBroker):
             for leg in list(getattr(row, "legs", None) or []):
                 child = normalize_alpaca_order(leg)
                 if child:
+                    child["parent_order_id"] = str(parent.get("order_id") or "")
+                    child["parent_client_order_id"] = str(parent.get("client_order_id") or "")
                     normalized.append(child)
         final_statuses = {
             "filled",
@@ -209,6 +211,11 @@ class AlpacaLiveBroker(AlpacaPaperBroker):
             for leg in list(getattr(row, "legs", None) or []):
                 child = normalize_alpaca_order(leg)
                 if child:
+                    # Alpaca assigns independent client IDs to bracket legs.
+                    # Preserve their nested parent identity so downstream P/L
+                    # reconstruction can prove the exit belongs to this bot.
+                    child["parent_order_id"] = str(parent.get("order_id") or "")
+                    child["parent_client_order_id"] = str(parent.get("client_order_id") or "")
                     normalized.append(child)
         return sorted(
             normalized,
