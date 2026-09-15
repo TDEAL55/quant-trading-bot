@@ -588,7 +588,7 @@ class _FakeStreamlit(_FakeContainer):
         self._calls.append(("tabs", names))
         return [_FakeContainer(self, button_return=self._button_return) for _ in names]
 
-    def radio(self, label, options, horizontal=False, key=None):
+    def radio(self, label, options, horizontal=False, key=None, **kwargs):
         self._calls.append(("radio", label, options, horizontal, key))
         if key and key in self.session_state:
             return self.session_state[key]
@@ -911,7 +911,7 @@ def test_mobile_refresh_button_is_visible_and_reload_is_read_only(monkeypatch):
     refresh_calls = [call for call in fake_st._calls if call[0] == "button" and call[1] == "Refresh dashboard"]
     assert refresh_calls
     assert refresh_calls[0][3]["key"] == "mobile_dashboard_refresh_button"
-    assert refresh_calls[0][3]["use_container_width"] is True
+    assert refresh_calls[0][3]["width"] == "stretch"
     assert any(call[0] == "cache_clear" for call in fake_st._calls)
     assert any(call[0] == "rerun" for call in fake_st._calls)
     assert fake_st.session_state.get("dashboard_force_refresh") is True

@@ -1635,6 +1635,19 @@ def build_compact_dashboard_summary(payload, view):
 
     positions = [row for row in ((payload.get("latest_account") or {}).get("positions") or []) if _is_stock_row(row)]
     recent_orders = [row for row in (payload.get("recent_orders") or []) if _is_stock_row(row)]
+
+    def _is_display_order(row):
+        """Hide inactive bracket children that otherwise look like duplicate sells."""
+        is_bracket_child = bool(
+            str((row or {}).get("parent_order_id") or "").strip()
+            or str((row or {}).get("parent_client_order_id") or "").strip()
+        )
+        if not is_bracket_child:
+            return True
+        status_text = str((row or {}).get("safe_order_status") or (row or {}).get("status") or "").strip().lower()
+        return _as_float((row or {}).get("filled_quantity"), 0.0) > 0 or status_text == "filled"
+
+    display_orders = [row for row in recent_orders if _is_display_order(row)]
     eligible = _safe_int(scanner.get("eligible_count"), 0)
     submitted = _safe_int(status.get("orders_submitted_today"), 0)
 
@@ -1669,9 +1682,11 @@ def build_compact_dashboard_summary(payload, view):
         )
 
     order_rows = []
-    for order in recent_orders[:10]:
+    for order in display_orders[:10]:
         side = str(order.get("side") or order.get("signal") or "").strip().upper()
-        quantity = abs(_as_float(order.get("filled_quantity") or order.get("quantity"), 0.0))
+        filled_quantity = abs(_as_float(order.get("filled_quantity"), 0.0))
+        quantity = abs(_as_float(filled_quantity or order.get("quantity"), 0.0))
+        fill_price = _as_float(order.get("average_fill_price"), 0.0)
         realized_pl = order.get("realized_profit_loss")
         order_rows.append(
             {
@@ -1680,7 +1695,8 @@ def build_compact_dashboard_summary(payload, view):
                 "Asset": "Stock",
                 "Side": side if side in {"BUY", "SELL"} else normalize_signal(side),
                 "Quantity": round(quantity, 8),
-                "Fill": format_currency(order.get("average_fill_price")),
+                "Order type": friendly_status_text(order.get("order_type"), "Market"),
+                "Fill price": format_currency(fill_price) if filled_quantity > 0 and fill_price > 0 else "Pending",
                 "Realized P/L": format_currency(realized_pl) if realized_pl is not None else "—",
                 "Status": friendly_status_text(order.get("safe_order_status") or order.get("status"), "Unknown"),
             }
@@ -4095,9 +4111,9 @@ def _render_mobile_order_cards(rows, *, limit=None):
             f"<span class='dq-mobile-symbol'>{_safe_text(row.get('Symbol'), 'N/A')}</span>"
             f"<span class='dq-mobile-tag'>{_safe_text(row.get('Side'), 'HOLD')} · {_safe_text(row.get('Status'), 'Unknown')}</span>"
             "</div><div class='dq-mobile-card-grid'>"
-            f"<div><span>Asset</span><strong>{_safe_text(row.get('Asset'), 'Stock')}</strong></div>"
+            f"<div><span>Order</span><strong>{_safe_text(row.get('Order type'), 'Market')}</strong></div>"
             f"<div><span>Quantity</span><strong>{_safe_text(row.get('Quantity'), '0')}</strong></div>"
-            f"<div><span>Fill</span><strong>{_safe_text(row.get('Fill'), '$0.00')}</strong></div>"
+            f"<div><span>Fill price</span><strong>{_safe_text(row.get('Fill price'), 'Pending')}</strong></div>"
             f"<div><span>Closed P/L</span><strong class='{realized_class}'>{realized_text}</strong></div>"
             f"<div style='grid-column:1/-1'><span>Time</span><strong>{_safe_text(row.get('Time'), 'Waiting')}</strong></div>"
             "</div></div>",
@@ -4134,7 +4150,7 @@ def render_mobile_command_center(payload, view):
         "Refresh dashboard",
         key="mobile_dashboard_refresh_button",
         type="primary",
-        use_container_width=True,
+        width="stretch",
         help="Reload the latest read-only balances, positions, orders, and profit data",
     ):
         request_dashboard_refresh("Mobile dashboard data refreshed")

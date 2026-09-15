@@ -493,3 +493,77 @@ def test_broker_sell_order_displays_locked_in_profit_loss():
         {"trade_or_skip_reason": "Waiting"},
     )
     assert summary["order_rows"][0]["Realized P/L"] == "$20.00"
+
+
+def test_order_feed_hides_unfilled_bracket_children_but_keeps_filled_exit():
+    orders = [
+        {
+            "order_id": "parent",
+            "client_order_id": "qtb-parent",
+            "symbol": "ITUB",
+            "asset_class": "us_equity",
+            "side": "buy",
+            "status": "filled",
+            "safe_order_status": "filled",
+            "quantity": 9,
+            "filled_quantity": 9,
+            "average_fill_price": 8.23,
+            "order_type": "market",
+            "event_timestamp": "2026-09-15T15:15:27Z",
+        },
+        {
+            "order_id": "take-profit",
+            "parent_order_id": "parent",
+            "parent_client_order_id": "qtb-parent",
+            "symbol": "ITUB",
+            "asset_class": "us_equity",
+            "side": "sell",
+            "status": "new",
+            "safe_order_status": "new",
+            "quantity": 9,
+            "filled_quantity": 0,
+            "order_type": "limit",
+            "event_timestamp": "2026-09-15T15:15:27Z",
+        },
+        {
+            "order_id": "stop-loss",
+            "parent_order_id": "parent",
+            "parent_client_order_id": "qtb-parent",
+            "symbol": "ITUB",
+            "asset_class": "us_equity",
+            "side": "sell",
+            "status": "held",
+            "safe_order_status": "held",
+            "quantity": 9,
+            "filled_quantity": 0,
+            "order_type": "stop",
+            "event_timestamp": "2026-09-15T15:15:26Z",
+        },
+    ]
+    summary = dashboard_app.build_compact_dashboard_summary(
+        {
+            "latest_account": {"positions": []},
+            "recent_orders": orders,
+            "latest_scanner_run": {},
+            "top_scanner_results": [],
+        },
+        {"trade_or_skip_reason": "Waiting"},
+    )
+
+    assert len(summary["order_rows"]) == 1
+    assert summary["order_rows"][0]["Side"] == "BUY"
+    assert summary["order_rows"][0]["Fill price"] == "$8.23"
+
+    orders[1].update(status="filled", safe_order_status="filled", filled_quantity=9, average_fill_price=9.05)
+    summary = dashboard_app.build_compact_dashboard_summary(
+        {
+            "latest_account": {"positions": []},
+            "recent_orders": orders,
+            "latest_scanner_run": {},
+            "top_scanner_results": [],
+        },
+        {"trade_or_skip_reason": "Waiting"},
+    )
+
+    assert [row["Side"] for row in summary["order_rows"]] == ["BUY", "SELL"]
+    assert summary["order_rows"][1]["Fill price"] == "$9.05"
