@@ -96,6 +96,40 @@ class _BrokerWithManualInterleaving(_BrokerWithExactStockHistory):
         return rows
 
 
+class _BrokerWithUnrelatedManualHistory(_BrokerWithExactStockHistory):
+    def get_order_history(self, limit=50):
+        rows = super().get_order_history(limit=limit)
+        rows.append(
+            {
+                "order_id": "manual-buy",
+                "client_order_id": "manual-buy",
+                "symbol": "MSFT",
+                "asset_class": "us_equity",
+                "side": "buy",
+                "status": "filled",
+                "filled_quantity": 1,
+                "average_fill_price": 300,
+                "updated_at": "2026-08-01T13:00:00+00:00",
+            }
+        )
+        # Simulate older bot activity in the manually managed symbol. The
+        # confirmed AAPL round trip remains isolated from that uncertainty.
+        rows.append(
+            {
+                "order_id": "old-bot-msft",
+                "client_order_id": "qtb-old-msft",
+                "symbol": "MSFT",
+                "asset_class": "us_equity",
+                "side": "buy",
+                "status": "filled",
+                "filled_quantity": 1,
+                "average_fill_price": 290,
+                "updated_at": "2026-07-01T13:00:00+00:00",
+            }
+        )
+        return rows
+
+
 def test_broker_snapshot_exposes_exact_read_only_stock_reconstruction_and_order_pnl():
     snapshot = _fetch_paper_account_snapshot(
         _BrokerWithExactStockHistory,
@@ -135,6 +169,21 @@ def test_partial_subtotal_never_replaces_dashboard_headline_pnl():
     assert snapshot["closed_trade_source"] == "broker_stock_reconstruction_incomplete_use_durable_ledger"
     sell_event = next(row for row in snapshot["recent_orders"] if row["broker_order_id"] == "sell-1")
     assert sell_event["realized_profit_loss"] is None
+
+
+def test_confirmed_bot_subtotal_survives_unrelated_manual_symbol_history():
+    snapshot = _fetch_paper_account_snapshot(_BrokerWithUnrelatedManualHistory)
+
+    diagnostic = snapshot["stock_pnl_reconstruction"]
+    assert diagnostic["is_exact"] is False
+    assert diagnostic["confidence"] == "partial"
+    assert diagnostic["interfering_manual_stock_symbols"] == ["MSFT"]
+    assert snapshot["realized_paper_pl"] == 10.0
+    assert snapshot["closed_trade_count"] == 1
+    assert snapshot["closed_trade_source"] == "alpaca_confirmed_bot_only_filled_stock_orders"
+    sell_event = next(row for row in snapshot["recent_orders"] if row["broker_order_id"] == "sell-1")
+    assert sell_event["realized_profit_loss"] == 10.0
+    assert sell_event["realized_pl_exact"] is True
 
 
 def test_exact_nonempty_reconstruction_drives_in_memory_stock_headline_without_mutating_ledger():

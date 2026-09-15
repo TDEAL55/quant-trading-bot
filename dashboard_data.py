@@ -86,6 +86,54 @@ def _summarize_bot_closed_orders(orders: list[dict[str, Any]]) -> dict[str, Any]
     return summarize_closed_trade_records(build_closed_trade_records(orders))
 
 
+_MANUAL_STOCK_INTERFERENCE_REASON = (
+    "manual_stock_fills_were_excluded_so_inventory_interactions_are_not_provable"
+)
+
+
+def _stock_pnl_display_confidence(reconstruction: dict[str, Any]) -> str:
+    """Return the strongest safe label for a broker-fill P/L headline.
+
+    A reconstruction can be globally partial because old manual fills touched
+    symbols that are unrelated to a fully matched bot round trip.  In that
+    narrow case the bot-only subtotal is still confirmed and should not be
+    replaced with a misleading zero.  Manual activity in the same symbol, or
+    any other completeness problem, remains fail-closed.
+    """
+    diagnostic = dict(reconstruction or {})
+    realized_events = list(diagnostic.get("realized_events") or [])
+    closed_count = int(diagnostic.get("closed_trade_count") or 0)
+    if (
+        diagnostic.get("is_exact")
+        and diagnostic.get("confidence") == "exact"
+        and closed_count > 0
+        and len(realized_events) == closed_count
+    ):
+        return "exact"
+
+    reasons = {str(reason or "").strip() for reason in diagnostic.get("confidence_reasons") or []}
+    interfering_symbols = {
+        str(symbol or "").strip().upper()
+        for symbol in diagnostic.get("interfering_manual_stock_symbols") or []
+        if str(symbol or "").strip()
+    }
+    realized_symbols = {
+        str(event.get("symbol") or "").strip().upper()
+        for event in realized_events
+        if str(event.get("symbol") or "").strip()
+    }
+    if (
+        diagnostic.get("confidence") == "partial"
+        and reasons == {_MANUAL_STOCK_INTERFERENCE_REASON}
+        and closed_count > 0
+        and len(realized_events) == closed_count
+        and realized_symbols
+        and realized_symbols.isdisjoint(interfering_symbols)
+    ):
+        return "confirmed_bot_only"
+    return ""
+
+
 def _fetch_paper_account_snapshot(
     paper_broker_factory=AlpacaPaperBroker,
     *,
@@ -127,21 +175,34 @@ def _fetch_paper_account_snapshot(
     }
     reconstructed_stock_by_order_id = realized_events_by_exit_order_id(stock_pnl_reconstruction)
     stock_reconstruction_exact = bool(stock_pnl_reconstruction.get("is_exact"))
+    stock_display_confidence = _stock_pnl_display_confidence(stock_pnl_reconstruction)
+    stock_reconstruction_displayable = bool(stock_display_confidence)
+    interfering_manual_symbols = {
+        str(symbol or "").strip().upper()
+        for symbol in stock_pnl_reconstruction.get("interfering_manual_stock_symbols") or []
+    }
 
     def _closed_trade_for_order(order: dict[str, Any]) -> dict[str, Any] | None:
         order_id = str(order.get("order_id") or order.get("client_order_id") or "")
         client_order_id = str(order.get("client_order_id") or "")
         reconstructed = reconstructed_stock_by_order_id.get(order_id) or reconstructed_stock_by_order_id.get(client_order_id)
         if is_bot_stock_order(order):
-            # Never display an incomplete reconstructed subtotal as locked-in,
-            # exact P/L. The diagnostic payload still explains what is missing.
-            if not stock_reconstruction_exact or reconstructed is None:
+            reconstructed_symbol = str((reconstructed or {}).get("symbol") or "").strip().upper()
+            if (
+                reconstructed is None
+                or not stock_reconstruction_displayable
+                or reconstructed_symbol in interfering_manual_symbols
+            ):
                 return None
             return {
                 "net_pnl": reconstructed.get("realized_pnl"),
                 "percentage_return": reconstructed.get("percentage_return"),
                 "is_exact": True,
-                "source": stock_pnl_reconstruction.get("source"),
+                "source": (
+                    stock_pnl_reconstruction.get("source")
+                    if stock_reconstruction_exact
+                    else "alpaca_confirmed_bot_only_filled_stock_orders"
+                ),
             }
         return closed_by_order_id.get(order_id)
 
@@ -156,7 +217,7 @@ def _fetch_paper_account_snapshot(
     last_equity = float(account.get("last_equity") or equity)
     exact_stock_closed_count = (
         int(stock_pnl_reconstruction.get("closed_trade_count") or 0)
-        if stock_reconstruction_exact
+        if stock_reconstruction_displayable
         else 0
     )
     portfolio_entry_policy = evaluate_portfolio_entry_policy(
@@ -182,8 +243,12 @@ def _fetch_paper_account_snapshot(
         ),
         "closed_trade_count": exact_stock_closed_count,
         "closed_trade_source": (
-            stock_pnl_reconstruction.get("source")
-            if stock_reconstruction_exact
+            (
+                stock_pnl_reconstruction.get("source")
+                if stock_display_confidence == "exact"
+                else "alpaca_confirmed_bot_only_filled_stock_orders"
+            )
+            if stock_reconstruction_displayable
             else "broker_stock_reconstruction_incomplete_use_durable_ledger"
         ),
         "pending_orders": len(open_orders),
@@ -719,14 +784,15 @@ def fetch_dashboard_payload(
     )
     if paper_micro_dashboard_mode:
         reconstruction = dict(payload.get("stock_pnl_reconstruction") or {})
-        exact = bool(reconstruction.get("is_exact"))
-        closed_count = int(reconstruction.get("closed_trade_count") or 0) if exact else 0
-        realized_pl = float(reconstruction.get("realized_stock_pnl") or 0.0) if exact else 0.0
+        display_confidence = _stock_pnl_display_confidence(reconstruction)
+        displayable = bool(display_confidence)
+        closed_count = int(reconstruction.get("closed_trade_count") or 0) if displayable else 0
+        realized_pl = float(reconstruction.get("realized_stock_pnl") or 0.0) if displayable else 0.0
         stock_summary = {
             "closed_trades": closed_count,
             "net_pnl": realized_pl,
             "source": "micro_paper_broker_history",
-            "confidence": "exact" if exact else "awaiting_complete_broker_fills",
+            "confidence": display_confidence or "awaiting_complete_broker_fills",
         }
         payload["paper_tuning"] = {
             "closed_trades": dict(stock_summary),
