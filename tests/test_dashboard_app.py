@@ -889,6 +889,35 @@ def test_refresh_button_sets_force_refresh_without_page_reset(monkeypatch):
     assert fake_st.session_state.get("dashboard_page") == "Strategy"
 
 
+def test_mobile_refresh_button_is_visible_and_reload_is_read_only(monkeypatch):
+    fake_st = _FakeStreamlit(button_return=True)
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+
+    class _CacheData:
+        @staticmethod
+        def clear():
+            fake_st._calls.append(("cache_clear",))
+
+    fake_st.cache_data = _CacheData()
+    dashboard_app.render_mobile_command_center(
+        {"latest_account": {}},
+        {
+            "account_data_available": True,
+            "dashboard_data_profile": "paper-micro",
+            "market_is_open": False,
+        },
+    )
+
+    refresh_calls = [call for call in fake_st._calls if call[0] == "button" and call[1] == "Refresh dashboard"]
+    assert refresh_calls
+    assert refresh_calls[0][3]["key"] == "mobile_dashboard_refresh_button"
+    assert refresh_calls[0][3]["use_container_width"] is True
+    assert any(call[0] == "cache_clear" for call in fake_st._calls)
+    assert any(call[0] == "rerun" for call in fake_st._calls)
+    assert fake_st.session_state.get("dashboard_force_refresh") is True
+    assert fake_st.session_state.get("dashboard_last_manual_refresh_status") == "Mobile dashboard data refreshed"
+
+
 def test_timeframe_uses_persisted_session_state(monkeypatch):
     fake_st = _FakeStreamlit()
     fake_st.session_state["dashboard_timeframe"] = "5D"

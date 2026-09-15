@@ -1917,6 +1917,15 @@ def clear_dashboard_cache():
         st.cache_data.clear()
 
 
+def request_dashboard_refresh(status_message="Dashboard data refreshed"):
+    """Clear read-only dashboard data and immediately reload the current view."""
+    clear_dashboard_cache()
+    st.session_state["dashboard_last_refresh"] = datetime.now(timezone.utc).isoformat()
+    st.session_state["dashboard_force_refresh"] = True
+    st.session_state["dashboard_last_manual_refresh_status"] = status_message
+    st.rerun()
+
+
 def apply_dashboard_css(theme_name="Ocean Blue"):
     palette = build_palette(theme_name)
     st.markdown(
@@ -3442,12 +3451,7 @@ def render_header(payload, view):
         )
     with refresh_col:
         if st.button("Refresh", key="dashboard_refresh_button", help="Refresh dashboard read-only data only"):
-            clear_dashboard_cache()
-            st.session_state["dashboard_last_refresh"] = datetime.now(timezone.utc).isoformat()
-            st.session_state["dashboard_force_refresh"] = True
-            st.session_state["dashboard_last_manual_refresh_status"] = "Dashboard data refreshed"
-            # Intentional rerun: ensures data is fetched again after cache clear.
-            st.rerun()
+            request_dashboard_refresh()
     if st.session_state.get("dashboard_last_manual_refresh_status"):
         st.success(st.session_state.get("dashboard_last_manual_refresh_status"))
 
@@ -4126,6 +4130,14 @@ def render_mobile_command_center(payload, view):
         "</div>",
         unsafe_allow_html=True,
     )
+    if st.button(
+        "Refresh dashboard",
+        key="mobile_dashboard_refresh_button",
+        type="primary",
+        use_container_width=True,
+        help="Reload the latest read-only balances, positions, orders, and profit data",
+    ):
+        request_dashboard_refresh("Mobile dashboard data refreshed")
     if not view.get("account_data_available"):
         st.warning("Current account snapshot unavailable. Balance and position totals are temporarily hidden.")
 
