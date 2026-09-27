@@ -48,6 +48,14 @@ def test_hardened_micro_services_write_logs_only_to_state_directory():
         assert "ProtectSystem=strict" in text
 
 
+def test_live_micro_service_cannot_load_shared_paper_secrets_overlay():
+    service = (REPO_ROOT / "deployment" / "quant-bot-live-micro.service").read_text(encoding="utf-8")
+    example_env = (REPO_ROOT / "deployment" / "live-micro.example.env").read_text(encoding="utf-8")
+    isolation = "QUANT_BOT_SECRET_ENV_PATH=/nonexistent/quant-bot-live-no-overlay.env"
+    assert f"Environment={isolation}" in service
+    assert isolation in example_env
+
+
 def test_dashboard_service_targets_streamlit_dashboard():
     text = (REPO_ROOT / "deployment" / "quant-bot-dashboard.service").read_text(encoding="utf-8")
     assert "ExecStart=" in text

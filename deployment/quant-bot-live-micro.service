@@ -13,6 +13,8 @@ User=quantbot
 Group=quantbot
 WorkingDirectory=/home/quantbot/quant-trading-bot
 EnvironmentFile=/etc/quant-bot/quant-bot-live.env
+# Never load the PAPER runner's per-user secrets overlay in the LIVE process.
+Environment=QUANT_BOT_SECRET_ENV_PATH=/nonexistent/quant-bot-live-no-overlay.env
 Environment=PYTHONUNBUFFERED=1
 Environment=BOT_LOG_FILE=/var/lib/quant-bot/live-micro.log
 ExecStart=/home/quantbot/quant-trading-bot/.venv/bin/python /home/quantbot/quant-trading-bot/controlled_live_runner.py
