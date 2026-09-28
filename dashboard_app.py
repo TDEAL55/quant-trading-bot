@@ -3437,7 +3437,10 @@ def render_header(payload, view):
     bot_net_pl_class = "positive" if bot_net_pl > 0 else "negative" if bot_net_pl < 0 else "flat"
     account_display = build_account_display(view)
     data_profile = _safe_text(view.get("dashboard_data_profile"), "paper-account")
-    portfolio_label = "TRIAL PAPER PORTFOLIO" if "micro" in data_profile.lower() else "ORIGINAL PAPER PORTFOLIO"
+    if "live" in data_profile.lower():
+        portfolio_label = "LIVE ACCOUNT PORTFOLIO"
+    else:
+        portfolio_label = "TRIAL PAPER PORTFOLIO" if "micro" in data_profile.lower() else "ORIGINAL PAPER PORTFOLIO"
     st.markdown(
         f"""
         <div class='dq-shell-header'>
@@ -4149,7 +4152,10 @@ def render_mobile_command_center(payload, view):
     total_class = "positive" if total_pl > 0 else "negative" if total_pl < 0 else ""
     account_display = build_account_display(view)
     data_profile = _safe_text(view.get("dashboard_data_profile"), "paper-account")
-    account_label = "300 TRIAL" if "micro" in data_profile.lower() else "ORIGINAL PAPER"
+    if "live" in data_profile.lower():
+        account_label = "LIVE ACCOUNT"
+    else:
+        account_label = "300 TRIAL" if "micro" in data_profile.lower() else "ORIGINAL PAPER"
     entry_policy = dict((payload.get("latest_account") or {}).get("portfolio_entry_policy") or {})
     stock_enabled = (
         status.get("kill_switch") != "ON"
