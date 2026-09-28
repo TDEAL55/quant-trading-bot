@@ -1264,3 +1264,9 @@ def test_paper_validation_page_renders_payload(monkeypatch):
 def test_dashboard_app_has_no_use_container_width_calls():
     module_text = (REPO_ROOT / "dashboard_app.py").read_text(encoding="utf-8")
     assert "use_container_width" not in module_text
+
+
+def test_live_dashboard_header_cannot_inherit_a_paper_trial_label():
+    module_text = (REPO_ROOT / "dashboard_app.py").read_text(encoding="utf-8")
+    assert 'UI_BUILD_LABEL = "LIVE ACCOUNT" if LIVE_DASHBOARD_PROCESS' in module_text
+    assert 'MOBILE_MODE_LABEL = "STOCKS · LIVE ACCOUNT" if LIVE_DASHBOARD_PROCESS' in module_text
