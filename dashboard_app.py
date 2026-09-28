@@ -1658,9 +1658,11 @@ def build_compact_dashboard_summary(payload, view):
     display_orders = [row for row in recent_orders if _is_display_order(row)]
     eligible = _safe_int(scanner.get("eligible_count"), 0)
     submitted = _safe_int(status.get("orders_submitted_today"), 0)
+    data_profile = _safe_text(view.get("dashboard_data_profile"), "paper-account")
+    order_mode = "LIVE" if "live" in data_profile.lower() else "PAPER"
 
     if submitted > 0:
-        outcome = f"{submitted} PAPER order{'s' if submitted != 1 else ''} submitted today."
+        outcome = f"{submitted} {order_mode} order{'s' if submitted != 1 else ''} submitted today."
     elif eligible > 0:
         outcome = "Candidates passed the scanner; portfolio and risk checks did not submit an order."
     elif _safe_int(scanner.get("symbol_count"), 0) > 0:
@@ -3480,9 +3482,10 @@ def render_header(payload, view):
 
     status_col, refresh_col = st.columns([9.0, 1.0])
     with status_col:
+        account_mode_label = "read-only LIVE account" if "live" in data_profile.lower() else "read-only PAPER account"
         st.markdown(
             f"<div class='dq-refresh-note' title='{_safe_text(refresh_parts['full'])}'>"
-            f"{_safe_text(refresh_parts['relative'])} · read-only PAPER account · "
+            f"{_safe_text(refresh_parts['relative'])} · {account_mode_label} · "
             f"{_safe_text(view.get('account_source'), 'unknown source')} · "
             f"{_safe_text(view.get('dashboard_data_profile'), 'unspecified profile')}</div>",
             unsafe_allow_html=True,
@@ -3584,9 +3587,11 @@ def render_live_readiness_page(payload, view):
 
 def render_alert_banner(payload, view):
     alert_messages = []
+    data_profile = _safe_text(view.get("dashboard_data_profile"), "paper-account").lower()
+    broker_direct_live_account = "live" in data_profile and bool(view.get("account_data_available"))
     if view.get("review_required"):
         alert_messages.append("Review required is active")
-    if not payload.get("db_connected"):
+    if not payload.get("db_connected") and not broker_direct_live_account:
         alert_messages.append("Database disconnected")
     if view.get("bot_health", {}).get("style") == "error":
         alert_messages.append("Bot status reports an error")
