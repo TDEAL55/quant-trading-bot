@@ -1898,7 +1898,7 @@ def _fetch_payload_uncached(database_url: str | None):
             payload = fetch_live_dashboard_payload()
         else:
             payload = fetch_dashboard_payload(database_url or os.getenv("DATABASE_URL"), database_factory=MonitoringDatabase)
-    except Exception:
+    except Exception as exc:
         payload = {
             "db_connected": False,
             "latest_run": {},
@@ -1910,6 +1910,12 @@ def _fetch_payload_uncached(database_url: str | None):
             "portfolio_history": [],
             "signal_history": [],
             "order_count_by_day": [],
+            "broker_sync_error": type(exc).__name__,
+            "dashboard_data_profile": (
+                "live-micro-account-error"
+                if _as_bool(os.getenv("LIVE_DASHBOARD_MODE", "false"))
+                else "unavailable"
+            ),
             "paper_tuning": {},
             "research": {
                 "db_connected": False,
