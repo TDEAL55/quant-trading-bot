@@ -138,8 +138,10 @@ def _fetch_paper_account_snapshot(
     paper_broker_factory=AlpacaPaperBroker,
     *,
     strategy_by_order_id: dict[str, Any] | None = None,
+    broker_mode: str = "PAPER",
+    snapshot_source: str = "alpaca_paper_read_only",
 ) -> dict[str, Any]:
-    broker = paper_broker_factory(mode="PAPER")
+    broker = paper_broker_factory(mode=broker_mode)
     account = broker.get_account()
     positions_by_symbol = broker.get_positions()
     open_orders = broker.get_open_orders()
@@ -213,6 +215,9 @@ def _fetch_paper_account_snapshot(
         )
         for order in broker_orders[:120]
     ]
+    if snapshot_source != "alpaca_paper_read_only":
+        for event in recent_orders:
+            event["source"] = snapshot_source
     equity = float(account.get("equity") or account.get("portfolio_value") or 0.0)
     last_equity = float(account.get("last_equity") or equity)
     exact_stock_closed_count = (
@@ -260,7 +265,89 @@ def _fetch_paper_account_snapshot(
         "market_open": market_clock.get("is_open") if "is_open" in market_clock else None,
         "stock_pnl_reconstruction": stock_pnl_reconstruction,
         "portfolio_entry_policy": portfolio_entry_policy,
-        "source": "alpaca_paper_read_only",
+        "source": snapshot_source,
+    }
+
+
+def fetch_live_dashboard_payload(
+    *,
+    live_broker_factory=None,
+    service_probe=_systemd_service_active,
+) -> dict[str, Any]:
+    """Fetch the live account through a read-only broker adapter only."""
+    if live_broker_factory is None:
+        from alpaca_live_broker import AlpacaLiveBroker
+
+        live_broker_factory = lambda mode="LIVE": AlpacaLiveBroker(mode=mode, read_only=True)
+
+    snapshot = _fetch_paper_account_snapshot(
+        live_broker_factory,
+        broker_mode="LIVE",
+        snapshot_source="alpaca_live_read_only",
+    )
+    reconstruction = dict(snapshot.get("stock_pnl_reconstruction") or {})
+    confidence = _stock_pnl_display_confidence(reconstruction)
+    closed_count = int(reconstruction.get("closed_trade_count") or 0) if confidence else 0
+    realized_pl = float(reconstruction.get("realized_stock_pnl") or 0.0) if confidence else 0.0
+    snapshot["realized_paper_pl"] = realized_pl
+    snapshot["closed_trade_count"] = closed_count
+    snapshot["closed_trade_source"] = "live_broker_filled_stock_orders"
+    timestamp = str(snapshot.get("snapshot_timestamp") or datetime.now(timezone.utc).isoformat())
+    service_active = bool(service_probe("quant-bot-live-micro.service"))
+    starting_equity = float(os.getenv("LIVE_DASHBOARD_STARTING_EQUITY", "0") or 0)
+    if starting_equity <= 0:
+        starting_equity = float(snapshot.get("equity") or snapshot.get("portfolio_value") or 0.0)
+    stock_summary = {
+        "closed_trades": closed_count,
+        "net_pnl": realized_pl,
+        "source": "live_broker_filled_stock_orders",
+        "confidence": confidence or "awaiting_complete_live_fills",
+    }
+    return {
+        "db_connected": False,
+        "latest_run": {
+            "run_timestamp": timestamp,
+            "trading_mode": "LIVE",
+            "bot_status": "healthy" if service_active else "stopped",
+            "stop_reason": "Controlled live stock runner",
+        },
+        "latest_success": {"run_timestamp": timestamp, "trading_mode": "LIVE"},
+        "latest_signal": {"market_open": snapshot.get("market_open")},
+        "latest_account": snapshot,
+        "starting_account": {
+            "portfolio_value": starting_equity,
+            "equity": starting_equity,
+            "source": "live_dashboard_baseline",
+        },
+        "recent_runs": [],
+        "recent_orders": list(snapshot.get("recent_orders") or []),
+        "portfolio_history": [],
+        "signal_history": [],
+        "order_count_by_day": [],
+        "latest_scanner_run": {},
+        "top_scanner_results": [],
+        "scanner_rejections": [],
+        "scanner_sector_distribution": [],
+        "service_health": {
+            "recent_error_count_24h": 0,
+            "observed_runner_restarts_24h": 0,
+            "observed_runner_run_id_transitions": 0,
+            "continuous_service_active": service_active,
+        },
+        "paper_tuning": {
+            "closed_trades": dict(stock_summary),
+            "closed_trades_by_asset": {
+                "stocks": dict(stock_summary),
+                "crypto": {"closed_trades": 0, "net_pnl": 0.0},
+                "options": {"closed_trades": 0, "net_pnl": 0.0},
+            },
+            "live_dashboard_mode": True,
+        },
+        "crypto": {"enabled": False, "positions": [], "recent_orders": []},
+        "options": {"enabled": False, "positions": [], "recent_orders": []},
+        "stock_pnl_reconstruction": reconstruction,
+        "research": {"db_connected": False},
+        "dashboard_data_profile": "live-micro-account",
     }
 
 
@@ -898,4 +985,7 @@ def fetch_dashboard_payload(
         "options": payload["options"],
         "stock_pnl_reconstruction": payload["stock_pnl_reconstruction"],
         "research": payload["research"],
+        "starting_account": payload["starting_account"],
+        "dashboard_data_profile": payload["dashboard_data_profile"],
+        "broker_sync_error": payload.get("broker_sync_error", ""),
     }

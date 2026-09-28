@@ -48,6 +48,8 @@ systemctl restart quant-bot-dashboard.service
 systemctl restart quant-bot-mobile-dashboard.service
 systemctl restart quant-bot-paper-micro-dashboard.service
 systemctl restart quant-bot-paper-micro-mobile-dashboard.service
+systemctl restart quant-bot-live-micro-dashboard.service
+systemctl restart quant-bot-live-micro-mobile-dashboard.service
 
 if command -v ufw >/dev/null 2>&1; then
     ufw allow OpenSSH || true

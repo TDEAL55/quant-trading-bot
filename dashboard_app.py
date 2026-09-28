@@ -320,12 +320,19 @@ else:
         return _fetch_payload_uncached(database_url)
 
 
-def enforce_paper_mode(mode: str | None):
+def enforce_dashboard_mode(mode: str | None, *, live_dashboard_mode: bool = False):
     normalized = str(mode or "").strip().upper()
-    if normalized == "LIVE":
+    if normalized == "LIVE" and not live_dashboard_mode:
         raise RuntimeError("Dashboard is blocked in LIVE mode")
+    if normalized == "LIVE":
+        return
     if normalized and normalized != "PAPER":
         raise RuntimeError("Dashboard requires TRADING_MODE=PAPER")
+
+
+def enforce_paper_mode(mode: str | None):
+    """Backward-compatible guard used by the PAPER dashboard tests."""
+    enforce_dashboard_mode(mode, live_dashboard_mode=False)
 
 
 def check_dashboard_password(provided: str, expected: str | None) -> bool:
@@ -1885,7 +1892,12 @@ def build_live_readiness_snapshot(payload, view):
 
 def _fetch_payload_uncached(database_url: str | None):
     try:
-        payload = fetch_dashboard_payload(database_url or os.getenv("DATABASE_URL"), database_factory=MonitoringDatabase)
+        if _as_bool(os.getenv("LIVE_DASHBOARD_MODE", "false")):
+            from dashboard_data import fetch_live_dashboard_payload
+
+            payload = fetch_live_dashboard_payload()
+        else:
+            payload = fetch_dashboard_payload(database_url or os.getenv("DATABASE_URL"), database_factory=MonitoringDatabase)
     except Exception:
         payload = {
             "db_connected": False,
@@ -5479,7 +5491,10 @@ def render_dashboard(database_url: str | None = None):
     if st is None:
         raise RuntimeError("streamlit is required to run the dashboard")
 
-    enforce_paper_mode(os.getenv("TRADING_MODE", "PAPER"))
+    enforce_dashboard_mode(
+        os.getenv("TRADING_MODE", "PAPER"),
+        live_dashboard_mode=_as_bool(os.getenv("LIVE_DASHBOARD_MODE", "false")),
+    )
     st.set_page_config(
         page_title="DEAL QUANT COMMAND CENTER",
         page_icon="📈",

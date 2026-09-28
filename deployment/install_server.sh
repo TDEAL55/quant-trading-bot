@@ -12,6 +12,8 @@ DASHBOARD_SERVICE_PATH="/etc/systemd/system/quant-bot-dashboard.service"
 MOBILE_DASHBOARD_SERVICE_PATH="/etc/systemd/system/quant-bot-mobile-dashboard.service"
 PAPER_MICRO_DASHBOARD_SERVICE_PATH="/etc/systemd/system/quant-bot-paper-micro-dashboard.service"
 PAPER_MICRO_MOBILE_DASHBOARD_SERVICE_PATH="/etc/systemd/system/quant-bot-paper-micro-mobile-dashboard.service"
+LIVE_MICRO_DASHBOARD_SERVICE_PATH="/etc/systemd/system/quant-bot-live-micro-dashboard.service"
+LIVE_MICRO_MOBILE_DASHBOARD_SERVICE_PATH="/etc/systemd/system/quant-bot-live-micro-mobile-dashboard.service"
 BACKUP_SCRIPT_PATH="/usr/local/bin/quant-bot-backup"
 
 install -d -o "${APP_USER}" -g "${APP_GROUP}" -m 0755 "${PROJECT_PATH}"
@@ -32,6 +34,8 @@ cp "${PROJECT_PATH}/deployment/quant-bot-dashboard.service" "${DASHBOARD_SERVICE
 cp "${PROJECT_PATH}/deployment/quant-bot-mobile-dashboard.service" "${MOBILE_DASHBOARD_SERVICE_PATH}"
 cp "${PROJECT_PATH}/deployment/quant-bot-paper-micro-dashboard.service" "${PAPER_MICRO_DASHBOARD_SERVICE_PATH}"
 cp "${PROJECT_PATH}/deployment/quant-bot-paper-micro-mobile-dashboard.service" "${PAPER_MICRO_MOBILE_DASHBOARD_SERVICE_PATH}"
+cp "${PROJECT_PATH}/deployment/quant-bot-live-micro-dashboard.service" "${LIVE_MICRO_DASHBOARD_SERVICE_PATH}"
+cp "${PROJECT_PATH}/deployment/quant-bot-live-micro-mobile-dashboard.service" "${LIVE_MICRO_MOBILE_DASHBOARD_SERVICE_PATH}"
 install -o "${APP_USER}" -g "${APP_GROUP}" -m 0750 "${PROJECT_PATH}/deployment/backup_daily_database.sh" "${BACKUP_SCRIPT_PATH}"
 
 systemctl daemon-reload
@@ -46,3 +50,7 @@ systemctl enable quant-bot-paper-micro-dashboard.service
 systemctl restart quant-bot-paper-micro-dashboard.service
 systemctl enable quant-bot-paper-micro-mobile-dashboard.service
 systemctl restart quant-bot-paper-micro-mobile-dashboard.service
+systemctl enable quant-bot-live-micro-dashboard.service
+systemctl restart quant-bot-live-micro-dashboard.service
+systemctl enable quant-bot-live-micro-mobile-dashboard.service
+systemctl restart quant-bot-live-micro-mobile-dashboard.service

@@ -110,6 +110,31 @@ def test_micro_paper_mobile_dashboard_is_a_fourth_isolated_service_and_url():
     assert "auth_basic off" in trial_mobile_block
 
 
+def test_live_account_dashboards_are_separate_read_only_protected_services():
+    nginx = (REPO_ROOT / "deployment" / "nginx-quant-bot-dashboard.conf").read_text(encoding="utf-8")
+    desktop = (REPO_ROOT / "deployment" / "quant-bot-live-micro-dashboard.service").read_text(encoding="utf-8")
+    mobile = (REPO_ROOT / "deployment" / "quant-bot-live-micro-mobile-dashboard.service").read_text(encoding="utf-8")
+
+    for service in (desktop, mobile):
+        assert "EnvironmentFile=/etc/quant-bot/quant-bot-live.env" in service
+        assert "Environment=QUANT_BOT_SECRET_ENV_PATH=/nonexistent/quant-bot-live-no-overlay.env" in service
+        assert "Environment=LIVE_DASHBOARD_MODE=true" in service
+        assert "controlled_live_runner.py" not in service
+    assert "--server.port 8505" in desktop
+    assert "--server.baseUrlPath live" in desktop
+    assert "--server.port 8506" in mobile
+    assert "--server.baseUrlPath live-mobile" in mobile
+    assert "Environment=DASHBOARD_FORCE_MOBILE=true" in mobile
+    assert "location /live/" in nginx
+    assert "proxy_pass http://127.0.0.1:8505" in nginx
+    assert "location /live-mobile/" in nginx
+    assert "proxy_pass http://127.0.0.1:8506" in nginx
+    live_block = nginx.split("location /live/", 1)[1].split("location /live-mobile/", 1)[0]
+    live_mobile_block = nginx.split("location /live-mobile/", 1)[1].split("location /", 1)[0]
+    assert "auth_basic off" not in live_block
+    assert "auth_basic off" not in live_mobile_block
+
+
 def test_original_dashboards_cannot_fall_back_to_micro_broker_account():
     for service_name in ("quant-bot-dashboard.service", "quant-bot-mobile-dashboard.service"):
         service = (REPO_ROOT / "deployment" / service_name).read_text(encoding="utf-8")

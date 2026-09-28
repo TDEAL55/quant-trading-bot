@@ -62,6 +62,27 @@ class _ReadOnlyPaperBroker:
         }
 
 
+class _ReadOnlyLiveBroker(_ReadOnlyPaperBroker):
+    def __init__(self, mode):
+        assert mode == "LIVE"
+
+    def get_account(self):
+        account = super().get_account()
+        account["portfolio_value"] = 1164.95
+        account["equity"] = 1164.95
+        account["last_equity"] = 1164.95
+        account["cash"] = 1164.95
+        account["buying_power"] = 1164.95
+        return account
+
+    def get_positions(self):
+        return {}
+
+    def get_order_history(self, limit=50):
+        assert limit == 500
+        return []
+
+
 def test_read_only_paper_account_fallback_builds_dashboard_snapshot():
     snapshot = dashboard_data._fetch_paper_account_snapshot(_ReadOnlyPaperBroker)
 
@@ -76,6 +97,20 @@ def test_read_only_paper_account_fallback_builds_dashboard_snapshot():
     assert snapshot["recent_orders"][0]["filled_quantity"] == 2.0
     assert snapshot["market_open"] is False
     assert snapshot["market_clock"]["source"] == "alpaca"
+
+
+def test_live_dashboard_uses_live_read_only_account_and_service():
+    payload = dashboard_data.fetch_live_dashboard_payload(
+        live_broker_factory=_ReadOnlyLiveBroker,
+        service_probe=lambda name: name == "quant-bot-live-micro.service",
+    )
+
+    assert payload["dashboard_data_profile"] == "live-micro-account"
+    assert payload["latest_run"]["trading_mode"] == "LIVE"
+    assert payload["latest_run"]["bot_status"] == "healthy"
+    assert payload["latest_account"]["source"] == "alpaca_live_read_only"
+    assert payload["latest_account"]["portfolio_value"] == 1164.95
+    assert payload["service_health"]["continuous_service_active"] is True
 
 
 def test_live_broker_market_clock_overrides_stale_signal_state():
