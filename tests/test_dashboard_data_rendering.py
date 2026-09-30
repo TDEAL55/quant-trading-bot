@@ -111,6 +111,8 @@ def test_live_dashboard_uses_live_read_only_account_and_service():
     assert payload["latest_account"]["source"] == "alpaca_live_read_only"
     assert payload["latest_account"]["portfolio_value"] == 1164.95
     assert payload["service_health"]["continuous_service_active"] is True
+    assert payload["trade_review"]["metrics"]["number_of_trades"] == 0
+    assert payload["trade_review"]["conclusions"]["loss_cause"] == "no_completed_losses_to_diagnose"
 
 
 def test_live_broker_market_clock_overrides_stale_signal_state():

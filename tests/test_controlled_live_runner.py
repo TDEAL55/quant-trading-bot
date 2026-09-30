@@ -43,7 +43,12 @@ def scanner(_records):
 
 def signal(_candidate):
     return [{"strategy_id":"stock_trend_pullback_v3", "strategy_version":"3", "signal":"BUY",
-        "strategy_score":80, "confidence":80, "data_quality_status":"ok", "market_regime":"bull"}]
+        "strategy_score":80, "confidence":80, "data_quality_status":"ok", "market_regime":"bull",
+        "expected_reward_risk": 2.0, "entry_reason": "trend and volume agree",
+        "target_or_exit_rule": "trail strong winners", "supporting_factors": {
+            "confirmations": {"trend": True, "volume": True},
+            "components": {"trend": 88, "volume": 76, "relative_strength": 81, "volatility": 60},
+        }}]
 
 
 def mean_reversion_signal(_candidate):
@@ -69,6 +74,12 @@ def test_healthy_cycle_submits_once_then_daily_limit_blocks(tmp_path, monkeypatc
         state_store=store, now_provider=now)
     assert first["status"] == "submitted"
     assert broker.submitted[0]["quantity"] == 2
+    saved = store.load()["submissions"][0]
+    assert saved["market_regime"] == "bull"
+    assert saved["confirmation_categories"] == ["trend", "volume"]
+    assert saved["entry_reason"] == "trend and volume agree"
+    assert saved["position_risk_dollars"] > 0
+    assert saved["rule_checks"]["regime_route"] is True
     assert second["status"] == "blocked"
     assert "daily_new_order_limit_reached" in second["reasons"]
 

@@ -25,6 +25,7 @@ from scanner_data import fetch_scan_rejection_reasons, fetch_scanner_sector_dist
 from self_improving_data import fetch_self_improving_dashboard_payload
 from stock_pnl_reconstruction import is_bot_stock_order, reconstruct_stock_realized_pnl, realized_events_by_exit_order_id
 from strategy_lab_data import fetch_strategy_lab_dashboard_payload
+from trade_review import build_trade_review, index_submission_records
 from walk_forward_data import fetch_walk_forward_dashboard_payload
 
 
@@ -273,6 +274,7 @@ def fetch_live_dashboard_payload(
     *,
     live_broker_factory=None,
     service_probe=_systemd_service_active,
+    state_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Fetch the live account through a read-only broker adapter only."""
     if live_broker_factory is None:
@@ -280,12 +282,26 @@ def fetch_live_dashboard_payload(
 
         live_broker_factory = lambda mode="LIVE": AlpacaLiveBroker(mode=mode, read_only=True)
 
+    live_state_path = Path(state_path or os.getenv("LIVE_STATE_PATH", "/var/lib/quant-bot/live-micro-state.json"))
+    try:
+        live_state = json.loads(live_state_path.read_text(encoding="utf-8"))
+        if not isinstance(live_state, dict):
+            live_state = {}
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        live_state = {}
+    submission_records = list(live_state.get("submissions") or [])
+    strategy_metadata = index_submission_records(submission_records)
     snapshot = _fetch_paper_account_snapshot(
         live_broker_factory,
+        strategy_by_order_id=strategy_metadata,
         broker_mode="LIVE",
         snapshot_source="alpaca_live_read_only",
     )
     reconstruction = dict(snapshot.get("stock_pnl_reconstruction") or {})
+    trade_review = build_trade_review(
+        reconstruction,
+        submission_records=submission_records,
+    )
     confidence = _stock_pnl_display_confidence(reconstruction)
     closed_count = int(reconstruction.get("closed_trade_count") or 0) if confidence else 0
     realized_pl = float(reconstruction.get("realized_stock_pnl") or 0.0) if confidence else 0.0
@@ -346,6 +362,7 @@ def fetch_live_dashboard_payload(
         "crypto": {"enabled": False, "positions": [], "recent_orders": []},
         "options": {"enabled": False, "positions": [], "recent_orders": []},
         "stock_pnl_reconstruction": reconstruction,
+        "trade_review": trade_review,
         "research": {"db_connected": False},
         "dashboard_data_profile": "live-micro-account",
     }
@@ -818,6 +835,7 @@ def fetch_dashboard_payload(
         "crypto": {},
         "options": {},
         "stock_pnl_reconstruction": {},
+        "trade_review": {},
         "research": research_payload,
         "dashboard_data_profile": str(os.getenv("DASHBOARD_DATA_PROFILE", "unspecified")).strip() or "unspecified",
     }
@@ -869,6 +887,7 @@ def fetch_dashboard_payload(
         payload["paper_tuning"],
         payload["stock_pnl_reconstruction"],
     )
+    payload["trade_review"] = build_trade_review(payload["stock_pnl_reconstruction"])
     if paper_micro_dashboard_mode:
         reconstruction = dict(payload.get("stock_pnl_reconstruction") or {})
         display_confidence = _stock_pnl_display_confidence(reconstruction)
@@ -984,6 +1003,7 @@ def fetch_dashboard_payload(
         "crypto": payload["crypto"],
         "options": payload["options"],
         "stock_pnl_reconstruction": payload["stock_pnl_reconstruction"],
+        "trade_review": payload["trade_review"],
         "research": payload["research"],
         "starting_account": payload["starting_account"],
         "dashboard_data_profile": payload["dashboard_data_profile"],

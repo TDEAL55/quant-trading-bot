@@ -4537,6 +4537,48 @@ def render_performance_page(payload):
     else:
         st.info("No completed stock trades are available for the strategy scoreboard yet.")
 
+    review = dict(payload.get("trade_review") or {})
+    metrics = dict(review.get("metrics") or {})
+    conclusions = dict(review.get("conclusions") or {})
+    st.markdown("#### Evidence-Based Trade Review")
+    if not int(metrics.get("number_of_trades") or 0):
+        st.info(
+            "No completed stock trades exist in this account yet. The bot has no realized loss to diagnose, "
+            "and open-position movement is not counted as strategy profit or loss."
+        )
+    else:
+        review_cards = st.columns(6)
+        review_values = [
+            ("Trades", int(metrics.get("number_of_trades") or 0)),
+            ("Win Rate", format_percent(_as_float(metrics.get("win_rate"), 0.0) * 100.0, "N/A")),
+            ("Expectancy", format_currency(metrics.get("expectancy_per_trade"))),
+            ("Profit Factor", "N/A" if metrics.get("profit_factor") is None else round(_as_float(metrics.get("profit_factor")), 2)),
+            ("Max Drawdown", format_currency(metrics.get("maximum_drawdown"))),
+            ("Longest Loss Streak", int(metrics.get("maximum_consecutive_losses") or 0)),
+        ]
+        for column, (label, value) in zip(review_cards, review_values):
+            _metric_card(column, label, value, "neutral")
+        st.dataframe(list(review.get("trades") or []))
+        for title, key in (
+            ("By Strategy", "by_strategy"),
+            ("By Market Regime", "by_market_regime"),
+            ("By Symbol", "by_symbol"),
+            ("By Time of Day", "by_time_of_day"),
+        ):
+            rows = list(dict(review.get("breakdowns") or {}).get(key) or [])
+            if rows:
+                st.markdown(f"##### {title}")
+                st.dataframe(rows)
+    if not conclusions.get("sample_sufficient"):
+        st.warning(
+            f"Insufficient sample: {int(metrics.get('number_of_trades') or 0)} completed trades; "
+            f"at least {int(conclusions.get('minimum_sample') or 30)} are required before ranking or reallocating strategies."
+        )
+    missing = list(dict(review.get("data_quality") or {}).get("missing_fields") or [])
+    if missing:
+        st.caption("Missing historical evidence: " + ", ".join(missing) + ". These fields will populate for newly recorded entries where data is available.")
+    st.caption("Risk controls override signals. This report never increases risk to recover a loss and does not auto-disable a strategy from a small sample.")
+
 
 def render_daily_run_page():
     st.markdown("### DAILY RUN - READ ONLY")
@@ -5539,7 +5581,14 @@ def render_dashboard(database_url: str | None = None):
 
     try:
         with st.spinner("Loading command center..."):
-            payload = _cached_payload(database_url or os.getenv("DATABASE_URL"))
+            # LIVE balances and fills must never be served from Streamlit's
+            # shared data cache. A stale cached account can hide filled stops
+            # and present closed positions as still open. PAPER/research views
+            # retain the small cache because they are not execution-critical.
+            if _as_bool(os.getenv("LIVE_DASHBOARD_MODE", "false")):
+                payload = _fetch_payload_uncached(database_url or os.getenv("DATABASE_URL"))
+            else:
+                payload = _cached_payload(database_url or os.getenv("DATABASE_URL"))
         st.session_state["dashboard_last_db_refresh"] = datetime.now(timezone.utc).isoformat()
     except Exception as exc:
         st.info(f"Dashboard data unavailable right now: {_safe_text(exc, 'temporary data error')}")

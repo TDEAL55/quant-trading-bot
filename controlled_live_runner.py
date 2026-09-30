@@ -88,6 +88,14 @@ class LiveStateStore:
         orders_by_date = dict(state.get("orders_by_date") or {})
         orders_by_date[str(date_key)] = int(orders_by_date.get(str(date_key), 0) or 0) + 1
         submissions = list(state.get("submissions") or [])
+        supporting = dict(strategy.get("supporting_factors") or {})
+        confirmations = dict(supporting.get("confirmations") or {})
+        components = dict(supporting.get("components") or {})
+        factor_values = dict(supporting.get("factor_values") or {})
+        confirmation_categories = sorted(str(name) for name, passed in confirmations.items() if passed)
+        reference_price = _as_float(order.get("reference_price"), 0.0)
+        stop_price = _as_float(order.get("stop_price"), 0.0)
+        quantity = _as_float(order.get("requested_quantity"), 0.0)
         submissions.append(
             {
                 "recorded_at": _utc_iso(),
@@ -96,15 +104,30 @@ class LiveStateStore:
                 "client_order_id": str(order.get("client_order_id") or ""),
                 "symbol": str(order.get("symbol") or "").upper(),
                 "status": str(order.get("status") or "unknown").lower(),
-                "quantity": _as_float(order.get("requested_quantity"), 0.0),
-                "reference_price": _as_float(order.get("reference_price"), 0.0),
-                "stop_price": _as_float(order.get("stop_price"), 0.0),
+                "quantity": quantity,
+                "reference_price": reference_price,
+                "stop_price": stop_price,
                 "target_price": _as_float(order.get("target_price"), 0.0),
                 "strategy_id": str(strategy.get("strategy_id") or ""),
                 "strategy_version": str(strategy.get("strategy_version") or ""),
+                "market_regime": str(strategy.get("market_regime") or strategy.get("ensemble_route") or "unknown"),
+                "strategy_score": _as_float(strategy.get("strategy_score"), 0.0),
+                "confidence": _as_float(strategy.get("confidence"), 0.0),
+                "expected_reward_risk": _as_float(strategy.get("expected_reward_risk"), 0.0),
+                "entry_reason": str(strategy.get("entry_reason") or ""),
+                "target_or_exit_rule": str(strategy.get("target_or_exit_rule") or ""),
+                "eligible_strategy_ids": list(strategy.get("eligible_strategy_ids") or []),
+                "confirmation_categories": confirmation_categories,
+                "confirmations": confirmations,
+                "trend_strength": components.get("trend") or factor_values.get("trend_strength"),
+                "volatility": components.get("volatility") or factor_values.get("volatility"),
+                "volume": components.get("volume") or factor_values.get("volume"),
+                "relative_strength": components.get("relative_strength") or factor_values.get("relative_strength"),
+                "position_risk_dollars": round(max(reference_price - stop_price, 0.0) * quantity, 6),
+                "rule_checks": dict(strategy.get("rule_checks") or {}),
             }
         )
-        state.update({"orders_by_date": orders_by_date, "submissions": submissions[-100:]})
+        state.update({"orders_by_date": orders_by_date, "submissions": submissions[-5000:]})
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle, temporary_path = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=str(self.path.parent))
         try:
@@ -187,6 +210,19 @@ def select_live_candidate(
         signal["eligible_strategy_ids"] = sorted(
             str(item.get("strategy_id") or "") for item in eligible_signals
         )
+        supporting = dict(signal.get("supporting_factors") or {})
+        confirmations = dict(supporting.get("confirmations") or {})
+        distinct_confirmation_count = sum(1 for passed in confirmations.values() if passed)
+        signal["rule_checks"] = {
+            "regime_route": str(signal.get("strategy_id") or "") in routed_ids,
+            "quality_threshold": (
+                _as_float(signal.get("strategy_score"), 0.0) >= settings.minimum_strategy_score
+                and _as_float(signal.get("confidence"), 0.0) >= settings.minimum_confidence
+            ),
+            "independent_confirmations": distinct_confirmation_count >= 2,
+            "risk_limit": maximum_notional > 0,
+            "protective_exit": settings.stop_loss_percent > 0 and settings.take_profit_percent > 0,
+        }
         stop = round(price * (1.0 - settings.stop_loss_percent / 100.0), 2)
         target = round(price * (1.0 + settings.take_profit_percent / 100.0), 2)
         return {
