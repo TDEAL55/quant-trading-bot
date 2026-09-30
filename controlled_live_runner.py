@@ -4,7 +4,6 @@ import argparse
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import json
-import math
 import os
 from pathlib import Path
 import tempfile
@@ -12,13 +11,17 @@ import time
 from typing import Any, Callable, Mapping
 
 from alpaca_live_broker import AlpacaLiveBroker
+from correlation_engine import CorrelationPolicy, assess_symbol_correlation
 from live_risk_policy import (
     LiveRiskSettings,
+    evaluate_live_performance_controls,
     evaluate_live_readiness,
     live_entry_notional,
     settings_from_environment,
+    stop_risk_position_size,
 )
 from scanner_runner import _symbol_records_from_list, run_scan
+from stock_pnl_reconstruction import reconstruct_stock_realized_pnl
 from strategies.paper_strategy_plugins import evaluate_all_strategies
 
 
@@ -83,6 +86,98 @@ class LiveStateStore:
         state = self.load()
         return int(dict(state.get("orders_by_date") or {}).get(str(date_key), 0) or 0)
 
+    def _save(self, state: Mapping[str, Any]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle, temporary_path = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=str(self.path.parent))
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                json.dump(dict(state), stream, indent=2, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_path, self.path)
+        finally:
+            if os.path.exists(temporary_path):
+                os.unlink(temporary_path)
+
+    def record_position_observations(
+        self,
+        positions: Mapping[str, Mapping[str, Any]],
+        *,
+        observed_at: datetime,
+    ) -> None:
+        """Persist price observations used for evidence-based MFE/MAE review."""
+        state = self.load()
+        paths = dict(state.get("price_paths") or {})
+        timestamp = observed_at.astimezone(timezone.utc).isoformat()
+        for raw_symbol, raw_position in dict(positions or {}).items():
+            symbol = str(raw_symbol or "").strip().upper()
+            position = dict(raw_position or {})
+            current = _as_float(
+                position.get("current_price") or position.get("market_price") or position.get("price"),
+                0.0,
+            )
+            if not symbol or current <= 0:
+                continue
+            rows = list(paths.get(symbol) or [])
+            rows.append({"timestamp": timestamp, "high": current, "low": current, "source": "live_cycle_observation"})
+            paths[symbol] = rows[-10000:]
+        state["price_paths"] = paths
+        self._save(state)
+
+    def record_account_observation(
+        self,
+        account: Mapping[str, Any],
+        *,
+        observed_at: datetime,
+    ) -> None:
+        state = self.load()
+        rows = list(state.get("equity_history") or [])
+        rows.append(
+            {
+                "timestamp": observed_at.astimezone(timezone.utc).isoformat(),
+                "equity": _as_float(account.get("equity"), 0.0),
+                "cash": _as_float(account.get("cash"), 0.0),
+            }
+        )
+        state["equity_history"] = rows[-10000:]
+        self._save(state)
+
+    def record_market_bars(
+        self,
+        price_history_by_symbol: Mapping[str, Any],
+        *,
+        symbols: set[str],
+    ) -> None:
+        """Merge scanner OHLC bars for held symbols into the durable review path."""
+        if not symbols:
+            return
+        state = self.load()
+        paths = dict(state.get("price_paths") or {})
+        for symbol in sorted(symbols):
+            incoming = list(dict(price_history_by_symbol or {}).get(symbol) or [])
+            existing = list(paths.get(symbol) or [])
+            merged: dict[str, dict[str, Any]] = {
+                str(row.get("timestamp") or row.get("date") or ""): dict(row)
+                for row in existing
+                if isinstance(row, dict) and (row.get("timestamp") or row.get("date"))
+            }
+            for raw in incoming:
+                row = dict(raw or {}) if isinstance(raw, dict) else {}
+                timestamp = str(row.get("timestamp") or row.get("date") or row.get("t") or "")
+                close = _as_float(row.get("close") or row.get("price") or row.get("c"), 0.0)
+                high = _as_float(row.get("high") or row.get("h"), close)
+                low = _as_float(row.get("low") or row.get("l"), close)
+                if timestamp and high > 0 and low > 0:
+                    merged[timestamp] = {
+                        "timestamp": timestamp,
+                        "high": high,
+                        "low": low,
+                        "source": "scanner_market_bar",
+                    }
+            paths[symbol] = [merged[key] for key in sorted(merged)][-10000:]
+        state["price_paths"] = paths
+        self._save(state)
+
     def record_submission(self, order: Mapping[str, Any], *, date_key: str, strategy: Mapping[str, Any]) -> None:
         state = self.load()
         orders_by_date = dict(state.get("orders_by_date") or {})
@@ -128,17 +223,7 @@ class LiveStateStore:
             }
         )
         state.update({"orders_by_date": orders_by_date, "submissions": submissions[-5000:]})
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle, temporary_path = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=str(self.path.parent))
-        try:
-            with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                json.dump(state, stream, indent=2, sort_keys=True)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary_path, self.path)
-        finally:
-            if os.path.exists(temporary_path):
-                os.unlink(temporary_path)
+        self._save(state)
 
 
 def _protective_order_symbols(
@@ -170,6 +255,7 @@ def select_live_candidate(
     settings: LiveRiskSettings,
     positions: Mapping[str, Mapping[str, Any]],
     maximum_notional: float,
+    account_equity: float,
 ) -> dict[str, Any] | None:
     held = {str(symbol).upper() for symbol in dict(positions or {})}
     allowed = set(settings.allowed_symbols)
@@ -178,9 +264,6 @@ def select_live_candidate(
         symbol = str(candidate.get("symbol") or "").upper()
         price = _as_float(candidate.get("latest_price"), 0.0)
         if not symbol or symbol not in allowed or symbol in held or price <= 0:
-            continue
-        quantity = int(math.floor(float(maximum_notional) / price))
-        if quantity < 1:
             continue
         signals = [dict(item or {}) for item in evaluate_all_strategies(candidate)]
         regime = str(
@@ -213,6 +296,49 @@ def select_live_candidate(
         supporting = dict(signal.get("supporting_factors") or {})
         confirmations = dict(supporting.get("confirmations") or {})
         distinct_confirmation_count = sum(1 for passed in confirmations.values() if passed)
+        stop = _as_float(signal.get("stop") or signal.get("stop_price"), 0.0)
+        if not 0 < stop < price:
+            stop = round(price * (1.0 - settings.stop_loss_percent / 100.0), 2)
+        target = _as_float(signal.get("target") or signal.get("target_price"), 0.0)
+        if target <= price:
+            target = round(price * (1.0 + settings.take_profit_percent / 100.0), 2)
+
+        correlation = assess_symbol_correlation(
+            symbol,
+            sorted(held),
+            dict(scan_payload.get("price_history_by_symbol") or {}),
+            CorrelationPolicy(
+                lookback_days=settings.correlation_lookback_days,
+                min_overlap_days=settings.correlation_min_overlap_days,
+                max_correlation=settings.maximum_pair_correlation,
+                allocation_reduction_factor=1.0,
+            ),
+        )
+        if held and int(correlation.get("insufficient_pair_count") or 0) > 0:
+            continue
+        high_peers = {
+            str(row.get("peer_symbol") or "").upper()
+            for row in list(correlation.get("high_correlation_pairs") or [])
+        }
+        correlated_exposure = sum(
+            abs(_as_float(dict(positions.get(peer) or {}).get("market_value"), 0.0))
+            for peer in high_peers
+        )
+        correlated_room = max(
+            account_equity * settings.maximum_correlated_exposure_percent / 100.0 - correlated_exposure,
+            0.0,
+        )
+        correlation_notional_cap = min(maximum_notional, correlated_room) if high_peers else maximum_notional
+        sizing = stop_risk_position_size(
+            equity=account_equity,
+            entry_price=price,
+            stop_price=stop,
+            maximum_notional=correlation_notional_cap,
+            settings=settings,
+        )
+        quantity = int(sizing.get("quantity") or 0)
+        if quantity < 1:
+            continue
         signal["rule_checks"] = {
             "regime_route": str(signal.get("strategy_id") or "") in routed_ids,
             "quality_threshold": (
@@ -220,11 +346,13 @@ def select_live_candidate(
                 and _as_float(signal.get("confidence"), 0.0) >= settings.minimum_confidence
             ),
             "independent_confirmations": distinct_confirmation_count >= 2,
-            "risk_limit": maximum_notional > 0,
+            "risk_limit": _as_float(sizing.get("planned_risk_dollars"), 0.0) <= _as_float(sizing.get("allowed_risk_dollars"), 0.0),
+            "correlation_limit": not held or int(correlation.get("insufficient_pair_count") or 0) == 0,
             "protective_exit": settings.stop_loss_percent > 0 and settings.take_profit_percent > 0,
         }
-        stop = round(price * (1.0 - settings.stop_loss_percent / 100.0), 2)
-        target = round(price * (1.0 + settings.take_profit_percent / 100.0), 2)
+        signal["risk_sizing"] = sizing
+        signal["correlation_assessment"] = correlation
+        signal["correlated_exposure_before"] = round(correlated_exposure, 6)
         return {
             "symbol": symbol,
             "quantity": quantity,
@@ -276,11 +404,52 @@ def run_controlled_live_cycle(
             "submitted": False,
         }
     account = dict(live_broker.get_account() or {})
+    store.record_account_observation(account, observed_at=now)
     positions = dict(live_broker.get_positions() or {})
+    store.record_position_observations(positions, observed_at=now)
     open_orders = [dict(item or {}) for item in list(live_broker.get_open_orders() or [])]
     clock = dict(live_broker.get_market_clock() or {})
     _, unreconciled_orders, unprotected_positions = _protective_order_symbols(positions, open_orders)
     orders_submitted_today = store.orders_submitted_on(date_key)
+    try:
+        history_limit = 500
+        order_history = [dict(item or {}) for item in list(live_broker.get_order_history(limit=history_limit) or [])]
+        state = store.load()
+        strategy_metadata: dict[str, Any] = {}
+        for row in list(state.get("submissions") or []):
+            for key in ("order_id", "client_order_id"):
+                identifier = str(dict(row or {}).get(key) or "").strip()
+                if identifier:
+                    strategy_metadata[identifier] = dict(row or {})
+        reconstruction = reconstruct_stock_realized_pnl(
+            order_history,
+            bot_orders_only=True,
+            history_limit=history_limit,
+            strategy_by_order_id=strategy_metadata,
+        )
+        history_complete = not bool(reconstruction.get("history_limit_reached")) and not bool(
+            reconstruction.get("missing_timestamp_count") or reconstruction.get("unmatched_close_count")
+        )
+        performance_controls = evaluate_live_performance_controls(
+            account,
+            list(reconstruction.get("realized_events") or []),
+            settings=policy,
+            now=now,
+            equity_history=list(state.get("equity_history") or []),
+            history_available=True,
+            history_complete=history_complete,
+        )
+    except Exception as exc:
+        performance_controls = evaluate_live_performance_controls(
+            account,
+            [],
+            settings=policy,
+            now=now,
+            equity_history=list(store.load().get("equity_history") or []),
+            history_available=False,
+            history_complete=False,
+        )
+        performance_controls["history_error_type"] = type(exc).__name__
     readiness = evaluate_live_readiness(
         account,
         positions,
@@ -289,6 +458,10 @@ def run_controlled_live_cycle(
         market_is_open=bool(clock.get("is_open")),
         orders_submitted_today=orders_submitted_today,
     )
+    if not performance_controls.get("approved"):
+        readiness["approved"] = False
+        readiness.setdefault("reasons", []).extend(list(performance_controls.get("reasons") or []))
+    readiness["performance_controls"] = performance_controls
     if unprotected_positions:
         readiness["approved"] = False
         readiness.setdefault("reasons", []).append("unprotected_live_positions_require_manual_review")
@@ -311,16 +484,21 @@ def run_controlled_live_cycle(
         }
 
     scan_payload = scanner(records)
+    store.record_market_bars(
+        dict(scan_payload.get("price_history_by_symbol") or {}),
+        symbols={str(symbol).upper() for symbol in positions},
+    )
     candidate = select_live_candidate(
         scan_payload,
         settings=policy,
         positions=positions,
         maximum_notional=maximum_notional,
+        account_equity=_as_float(account.get("equity"), 0.0),
     )
     if candidate is None:
         return {
             "status": "no_trade",
-            "reasons": ["no_eligible_whole_share_trend_pullback_candidate"],
+            "reasons": ["no_eligible_risk_checked_candidate"],
             "readiness": readiness,
             "submitted": False,
         }

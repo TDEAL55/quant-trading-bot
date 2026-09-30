@@ -3,13 +3,19 @@
 This runner is separate from the PAPER runner. It supports long US stocks only,
 whole-share GTC bracket entries only, and starts unable to place orders.
 
-## Hard limits
+## Hard risk controls
 
-- Account equity must remain at or below $500.
+- Account equity must remain at or below the explicitly configured live ceiling.
 - There is no daily entry-count cap. Each new entry may use at most 25% of
   current account equity and can never exceed available cash, preserving buying
   power for additional qualifying stocks.
 - A $3 or 1% daily account loss (whichever is smaller) stops new entries.
+- A 3% weekly realized drawdown stops new entries.
+- Three consecutive realized losses trigger a 60-minute cooldown.
+- Every order is whole-share sized from stop distance and at most 0.5% account
+  risk; the allocation cap can only reduce that size.
+- Correlation data is required when positions are already open. Highly
+  correlated positions share a 20% account-exposure ceiling.
 - Shorts, crypto, options, margin borrowing, and extended hours are disabled.
 - Existing positions must have both protective sell legs visible at Alpaca.
 
@@ -55,3 +61,8 @@ Run one foreground cycle first. Only after inspecting the broker order and both
 bracket legs should the service be enabled. To stop new entries immediately,
 set `LIVE_KILL_SWITCH=true` and restart the service. Broker-held protective
 orders remain at Alpaca and must be reviewed there.
+
+The live state file also records once-per-cycle price observations for MFE/MAE
+review. The dashboard reads optional backtest and paper JSON artifacts and
+compares them with live results on every refresh. Missing history is labeled
+unknown and never invented or used to justify more risk.

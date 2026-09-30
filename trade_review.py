@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
 
@@ -17,9 +17,12 @@ def _timestamp(value: Any) -> datetime | None:
     if not text:
         return None
     try:
-        return datetime.fromisoformat(text)
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def index_submission_records(records: Iterable[Mapping[str, Any]] | None) -> dict[str, dict[str, Any]]:
@@ -220,16 +223,33 @@ def build_trade_review(
         "maximum_consecutive_losses": loss_streak,
     }
     sufficient = count >= max(int(minimum_sample), 1)
+    compliant_trades = [row for row in trades if row.get("followed_strategy_rules") is True]
+    violating_trades = [row for row in trades if row.get("followed_strategy_rules") is False]
+    unreviewable_trades = [row for row in trades if row.get("followed_strategy_rules") is None]
     conclusions = {
         "sample_sufficient": sufficient,
         "minimum_sample": max(int(minimum_sample), 1),
         "loss_cause": (
             "no_completed_losses_to_diagnose" if not losers else
+            "documented_rule_violations_present" if violating_trades else
             "insufficient_evidence_do_not_change_strategy" if not sufficient else
             "requires_trade_level_review"
         ),
         "best_strategy": None,
         "worst_strategy": None,
+        "correctly_followed_trade_ids": [
+            f"{row.get('symbol')}@{row.get('exit_timestamp')}" for row in compliant_trades
+        ],
+        "trades_that_should_not_have_been_taken": [
+            {
+                "trade_id": f"{row.get('symbol')}@{row.get('exit_timestamp')}",
+                "violations": list(row.get("rule_review_notes") or []),
+            }
+            for row in violating_trades
+        ],
+        "unreviewable_trade_ids": [
+            f"{row.get('symbol')}@{row.get('exit_timestamp')}" for row in unreviewable_trades
+        ],
     }
     by_strategy = _breakdown(trades, "strategy")
     if sufficient and by_strategy:

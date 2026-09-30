@@ -4579,6 +4579,25 @@ def render_performance_page(payload):
         st.caption("Missing historical evidence: " + ", ".join(missing) + ". These fields will populate for newly recorded entries where data is available.")
     st.caption("Risk controls override signals. This report never increases risk to recover a loss and does not auto-disable a strategy from a small sample.")
 
+    comparison = dict(payload.get("performance_comparison") or {})
+    st.markdown("#### Backtest vs Paper vs Live")
+    comparison_rows = list(comparison.get("rows") or [])
+    if comparison_rows:
+        st.dataframe(comparison_rows)
+        if not comparison.get("comparison_ready"):
+            st.warning(
+                "The three-way comparison is not decision-ready. Missing artifacts or samples below "
+                f"{int(comparison.get('minimum_sample') or 30)} trades remain labeled instead of inferred."
+            )
+        for flag in list(comparison.get("flags") or []):
+            st.caption(str(flag))
+        strategy_comparison_rows = list(comparison.get("strategy_rows") or [])
+        if strategy_comparison_rows:
+            st.markdown("##### Strategy-Level Comparison")
+            st.dataframe(strategy_comparison_rows)
+    else:
+        st.info("No comparable backtest, paper, or live performance artifacts are available yet.")
+
 
 def render_daily_run_page():
     st.markdown("### DAILY RUN - READ ONLY")

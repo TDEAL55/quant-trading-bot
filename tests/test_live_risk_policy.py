@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import pytest
 
-from live_risk_policy import LiveRiskSettings, evaluate_live_readiness, live_entry_notional, settings_from_environment
+from live_risk_policy import (
+    LiveRiskSettings,
+    evaluate_live_performance_controls,
+    evaluate_live_readiness,
+    live_entry_notional,
+    settings_from_environment,
+    stop_risk_position_size,
+)
 
 
 def _account(**overrides):
@@ -92,3 +100,62 @@ def test_account_safety_blocks(account, reason):
 def test_environment_cannot_raise_micro_caps(key, value):
     with pytest.raises(ValueError):
         settings_from_environment({key: value})
+
+
+def test_stop_distance_sizing_uses_smaller_of_risk_and_notional_caps():
+    result = stop_risk_position_size(
+        equity=1000,
+        entry_price=100,
+        stop_price=95,
+        maximum_notional=400,
+        settings=_armed(),
+    )
+    assert result["allowed_risk_dollars"] == 5
+    assert result["quantity"] == 1
+    assert result["planned_risk_dollars"] == 5
+
+
+def test_weekly_drawdown_and_consecutive_losses_block_new_entries():
+    now = datetime(2026, 9, 30, 15, tzinfo=timezone.utc)
+    trades = [
+        {"exit_timestamp": (now - timedelta(minutes=20 * offset)).isoformat(), "realized_pnl": -4}
+        for offset in (3, 2, 1)
+    ]
+    result = evaluate_live_performance_controls(
+        _account(equity=300),
+        trades,
+        settings=_armed(),
+        now=now,
+    )
+    assert not result["approved"]
+    assert "weekly_drawdown_stop_active" in result["reasons"]
+    assert "consecutive_loss_cooldown_active" in result["reasons"]
+
+
+def test_missing_order_history_fails_closed():
+    result = evaluate_live_performance_controls(
+        _account(),
+        [],
+        settings=_armed(),
+        now=datetime(2026, 9, 30, tzinfo=timezone.utc),
+        history_available=False,
+        history_complete=False,
+    )
+    assert result["reasons"] == ["live_order_history_unavailable", "live_order_history_incomplete"]
+
+
+def test_weekly_peak_to_current_equity_drawdown_is_enforced():
+    now = datetime(2026, 9, 30, 15, tzinfo=timezone.utc)
+    result = evaluate_live_performance_controls(
+        _account(equity=290),
+        [],
+        settings=_armed(),
+        now=now,
+        equity_history=[
+            {"timestamp": (now - timedelta(days=1)).isoformat(), "equity": 300},
+            {"timestamp": now.isoformat(), "equity": 290},
+        ],
+    )
+    assert "weekly_drawdown_stop_active" in result["reasons"]
+    assert result["weekly_peak_equity"] == 300
+    assert result["weekly_drawdown_dollars"] == 10

@@ -17,6 +17,7 @@ class Broker:
             "multiplier":1, "trading_blocked":False, "account_blocked":False}
     def get_positions(self): return self.positions
     def get_open_orders(self): return self.orders
+    def get_order_history(self, limit=500): return []
     def get_market_clock(self): return {"is_open": True}
     def submit_bracket_entry(self, **kwargs):
         self.submitted.append(kwargs)
@@ -148,3 +149,42 @@ def test_bearish_market_rejects_long_strategy_even_if_it_says_buy(tmp_path, monk
     )
     assert result["status"] == "no_trade"
     assert not result["submitted"]
+
+
+def test_missing_broker_history_fails_closed(tmp_path):
+    broker = Broker()
+    broker.get_order_history = None
+    result = run_controlled_live_cycle(
+        environ={"TRADING_MODE": "LIVE", "LIVE_FULL_STOCK_UNIVERSE": "false"},
+        settings=armed(),
+        broker=broker,
+        scanner=scanner,
+        state_store=LiveStateStore(tmp_path / "live.json"),
+    )
+    assert result["status"] == "blocked"
+    assert "live_order_history_unavailable" in result["reasons"]
+
+
+def test_highly_correlated_position_uses_shared_exposure_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(module, "evaluate_all_strategies", signal)
+    history = [{"date": f"2026-07-{day:02d}", "close": 100 + day} for day in range(1, 29)]
+    history += [{"date": f"2026-08-{day:02d}", "close": 128 + day} for day in range(1, 29)]
+    broker = Broker(
+        positions={"AAL": {"market_value": 55, "current_price": 15}},
+        orders=[
+            {"symbol": "AAL", "side": "sell", "status": "new"},
+            {"symbol": "AAL", "side": "sell", "status": "new"},
+        ],
+    )
+    result = run_controlled_live_cycle(
+        environ={"TRADING_MODE": "LIVE", "LIVE_FULL_STOCK_UNIVERSE": "false"},
+        settings=armed(),
+        broker=broker,
+        scanner=lambda _records: {
+            "ranked_candidates": [{"symbol": "F", "latest_price": 12}],
+            "price_history_by_symbol": {"F": history, "AAL": history},
+        },
+        state_store=LiveStateStore(tmp_path / "live.json"),
+    )
+    assert result["status"] == "no_trade"
+    assert result["reasons"] == ["no_eligible_risk_checked_candidate"]

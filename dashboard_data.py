@@ -17,6 +17,7 @@ from daily_run_repository import DailyRunRepository
 from factor_attribution import fetch_factor_attribution_dashboard_payload
 from factor_intelligence_data import fetch_factor_intelligence_dashboard_payload
 from performance_dashboard import fetch_performance_dashboard_payload
+from performance_comparison import build_performance_comparison, load_performance_artifact
 from paper_validation_data import fetch_paper_validation_dashboard_payload
 from portfolio_research_data import fetch_portfolio_research_dashboard_payload
 from quantum_score_data import fetch_quantum_score_dashboard_payload
@@ -301,6 +302,16 @@ def fetch_live_dashboard_payload(
     trade_review = build_trade_review(
         reconstruction,
         submission_records=submission_records,
+        price_paths=dict(live_state.get("price_paths") or {}),
+    )
+    performance_comparison = build_performance_comparison(
+        backtest=load_performance_artifact(
+            os.getenv("BACKTEST_PERFORMANCE_PATH", "/var/lib/quant-bot/backtest-performance.json")
+        ),
+        paper=load_performance_artifact(
+            os.getenv("PAPER_PERFORMANCE_PATH", "/var/lib/quant-bot/paper-performance.json")
+        ),
+        live=trade_review,
     )
     confidence = _stock_pnl_display_confidence(reconstruction)
     closed_count = int(reconstruction.get("closed_trade_count") or 0) if confidence else 0
@@ -363,6 +374,7 @@ def fetch_live_dashboard_payload(
         "options": {"enabled": False, "positions": [], "recent_orders": []},
         "stock_pnl_reconstruction": reconstruction,
         "trade_review": trade_review,
+        "performance_comparison": performance_comparison,
         "research": {"db_connected": False},
         "dashboard_data_profile": "live-micro-account",
     }
