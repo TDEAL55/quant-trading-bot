@@ -142,6 +142,21 @@ class LiveStateStore:
         state["equity_history"] = rows[-10000:]
         self._save(state)
 
+    def record_cycle_result(self, result: Mapping[str, Any], *, recorded_at: str | None = None) -> None:
+        """Persist the latest runner decision so the dashboard can explain pauses."""
+        state = self.load()
+        payload = dict(result or {})
+        state["last_cycle"] = {
+            "recorded_at": str(recorded_at or _utc_iso()),
+            "status": str(payload.get("status") or "unknown"),
+            "reasons": [str(item) for item in list(payload.get("reasons") or [])],
+            "submitted": bool(payload.get("submitted")),
+            "readiness": dict(payload.get("readiness") or {}),
+            "candidate_symbol": str(dict(payload.get("candidate") or {}).get("symbol") or ""),
+            "scan_summary": dict(payload.get("scan_summary") or {}),
+        }
+        self._save(state)
+
     def record_market_bars(
         self,
         price_history_by_symbol: Mapping[str, Any],
@@ -500,6 +515,7 @@ def run_controlled_live_cycle(
             "status": "no_trade",
             "reasons": ["no_eligible_risk_checked_candidate"],
             "readiness": readiness,
+            "scan_summary": dict(scan_payload.get("summary") or {}),
             "submitted": False,
         }
 
@@ -524,6 +540,7 @@ def run_controlled_live_cycle(
         "reasons": [] if submitted else [f"broker_order_status_{order_status}"],
         "readiness": readiness,
         "candidate": candidate,
+        "scan_summary": dict(scan_payload.get("summary") or {}),
         "order": order,
         "submitted": submitted,
     }
@@ -533,6 +550,9 @@ def run_forever(*, interval_seconds: int = 60) -> None:
     while True:
         try:
             result = run_controlled_live_cycle()
+            LiveStateStore(
+                os.getenv("LIVE_STATE_PATH", "/var/lib/quant-bot/live-micro-state.json")
+            ).record_cycle_result(result)
             print(json.dumps({"event": "controlled_live_cycle", "timestamp": _utc_iso(), **result}, default=str))
         except Exception as exc:
             print(

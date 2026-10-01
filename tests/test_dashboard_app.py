@@ -274,6 +274,31 @@ def test_monitor_status_reports_autonomous_paper_fields(monkeypatch):
     assert int(snapshot.get("open_paper_positions") or 0) == 2
 
 
+def test_monitor_status_reports_armed_live_submission_as_enabled(monkeypatch):
+    monkeypatch.setenv("TRADING_MODE", "LIVE")
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+    monkeypatch.setenv("ALPACA_LIVE_ORDER_SUBMISSION_ENABLED", "true")
+    monkeypatch.setenv("LIVE_KILL_SWITCH", "false")
+    snapshot = dashboard_app.build_monitor_status_snapshot(
+        {
+            "latest_run": {
+                "trading_mode": "LIVE",
+                "run_timestamp": "2026-09-30T15:00:00+00:00",
+                "bot_status": "healthy",
+            },
+            "latest_signal": {"market_open": True},
+            "latest_account": {},
+            "recent_orders": [],
+            "recent_runs": [],
+            "service_health": {"continuous_service_active": True},
+        },
+        {"bot_health": {"style": "healthy"}},
+    )
+    assert snapshot["live_order_submission"] == "ENABLED"
+    assert snapshot["entry_submission"] == "ENABLED"
+    assert snapshot["kill_switch"] == "OFF"
+
+
 def test_monitor_status_uses_read_only_service_health_probe(monkeypatch):
     monkeypatch.setenv("TRADING_MODE", "PAPER")
     snapshot = dashboard_app.build_monitor_status_snapshot(

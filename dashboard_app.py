@@ -1534,7 +1534,11 @@ def build_monitor_status_snapshot(payload, view):
     dry_run = _as_bool(os.getenv("CONTINUOUS_RUNNER_DRY_RUN", "true"))
     paper_execution_enabled = _as_bool(os.getenv("PAPER_EXECUTION_ENABLED", "false"))
     controlled_validation = _as_bool(os.getenv("CONTROLLED_PAPER_VALIDATION", "false"))
-    kill_switch = _as_bool(os.getenv("KILL_SWITCH", "false"))
+    kill_switch = _as_bool(
+        os.getenv("LIVE_KILL_SWITCH", "true")
+        if trading_mode == "LIVE"
+        else os.getenv("KILL_SWITCH", "false")
+    )
     last_scan_start_raw = latest_scanner_run.get("started_at")
     last_scan_finish_raw = latest_scanner_run.get("completed_at") or latest_signal.get("snapshot_timestamp")
     last_scan = last_scan_finish_raw
@@ -1585,6 +1589,13 @@ def build_monitor_status_snapshot(payload, view):
         and (not dry_run)
         and (not kill_switch)
     )
+    live_submission_enabled = bool(
+        trading_mode == "LIVE"
+        and _as_bool(os.getenv("LIVE_TRADING_ENABLED", "false"))
+        and _as_bool(os.getenv("ALPACA_LIVE_ORDER_SUBMISSION_ENABLED", "false"))
+        and (not kill_switch)
+    )
+    entry_submission_enabled = autonomous_enabled or live_submission_enabled
 
     scan_duration_seconds = None
     try:
@@ -1602,6 +1613,8 @@ def build_monitor_status_snapshot(payload, view):
         "dashboard_service": "RUNNING",
         "trading_mode": trading_mode,
         "autonomous_paper_trading": "ENABLED" if autonomous_enabled else "DISABLED",
+        "live_order_submission": "ENABLED" if live_submission_enabled else "DISABLED",
+        "entry_submission": "ENABLED" if entry_submission_enabled else "DISABLED",
         "dry_run": "ON" if dry_run else "OFF",
         "paper_execution": "ENABLED" if paper_execution_enabled else "DISABLED",
         "controlled_validation": "ON" if controlled_validation else "OFF",
@@ -4005,7 +4018,7 @@ def render_command_center_page(payload, view):
     status = summary["status"]
     entry_policy = dict((payload.get("latest_account") or {}).get("portfolio_entry_policy") or {})
     stock_market = "Open" if bool(view.get("market_is_open")) else "Closed"
-    trading_enabled = status.get("kill_switch") != "ON" and status.get("autonomous_paper_trading") == "ENABLED"
+    trading_enabled = status.get("kill_switch") != "ON" and status.get("entry_submission") == "ENABLED"
     engine_items = [("EQ", "Stocks only", "Enabled" if trading_enabled else "Paused", stock_market, trading_enabled)]
     engine_html = "".join(
         "<div class='dq-engine-card'>"
@@ -4164,7 +4177,7 @@ def render_mobile_command_center(payload, view):
     entry_policy = dict((payload.get("latest_account") or {}).get("portfolio_entry_policy") or {})
     stock_enabled = (
         status.get("kill_switch") != "ON"
-        and status.get("autonomous_paper_trading") == "ENABLED"
+        and status.get("entry_submission") == "ENABLED"
         and not bool(entry_policy.get("exit_only"))
     )
 

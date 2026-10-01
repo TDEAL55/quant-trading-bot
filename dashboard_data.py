@@ -291,6 +291,10 @@ def fetch_live_dashboard_payload(
     except (FileNotFoundError, OSError, ValueError, TypeError):
         live_state = {}
     submission_records = list(live_state.get("submissions") or [])
+    last_cycle = dict(live_state.get("last_cycle") or {})
+    last_scan_summary = dict(last_cycle.get("scan_summary") or {})
+    last_cycle_reasons = [str(item) for item in list(last_cycle.get("reasons") or [])]
+    last_cycle_reason_text = ", ".join(last_cycle_reasons) or str(last_cycle.get("status") or "waiting")
     strategy_metadata = index_submission_records(submission_records)
     snapshot = _fetch_paper_account_snapshot(
         live_broker_factory,
@@ -333,13 +337,17 @@ def fetch_live_dashboard_payload(
     return {
         "db_connected": False,
         "latest_run": {
-            "run_timestamp": timestamp,
+            "run_timestamp": str(last_cycle.get("recorded_at") or timestamp),
             "trading_mode": "LIVE",
             "bot_status": "healthy" if service_active else "stopped",
-            "stop_reason": "Controlled live stock runner",
+            "stop_reason": last_cycle_reason_text,
         },
-        "latest_success": {"run_timestamp": timestamp, "trading_mode": "LIVE"},
-        "latest_signal": {"market_open": snapshot.get("market_open")},
+        "latest_success": {"run_timestamp": str(last_cycle.get("recorded_at") or timestamp), "trading_mode": "LIVE"},
+        "latest_signal": {
+            "market_open": snapshot.get("market_open"),
+            "trade_or_skip_reason": last_cycle_reason_text,
+            "snapshot_timestamp": str(last_cycle.get("recorded_at") or timestamp),
+        },
         "latest_account": snapshot,
         "starting_account": {
             "portfolio_value": starting_equity,
@@ -351,7 +359,20 @@ def fetch_live_dashboard_payload(
         "portfolio_history": [],
         "signal_history": [],
         "order_count_by_day": [],
-        "latest_scanner_run": {},
+        "latest_scanner_run": {
+            "status": str(last_cycle.get("status") or "waiting"),
+            "completed_at": str(last_cycle.get("recorded_at") or ""),
+            "symbol_count": int(
+                last_scan_summary.get("success_count")
+                or last_scan_summary.get("symbol_count")
+                or 0
+            ),
+            "eligible_count": int(
+                last_scan_summary.get("eligible_count")
+                or (1 if last_cycle.get("candidate_symbol") else 0)
+            ),
+            "reason": last_cycle_reason_text,
+        },
         "top_scanner_results": [],
         "scanner_rejections": [],
         "scanner_sector_distribution": [],
