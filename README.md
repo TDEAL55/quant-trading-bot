@@ -75,7 +75,7 @@ DigitalOcean VPS
 - Dry-run enabled by default (`CONTINUOUS_RUNNER_DRY_RUN=true`)
 - Autonomous execution disabled by default (`PAPER_EXECUTION_ENABLED=false`)
 - Controlled validation disabled by default (`CONTROLLED_PAPER_VALIDATION=false`)
-- Bounded scan runtime defaults (`SCANNER_MAX_SCAN_SECONDS=180`, `SCANNER_MAX_COARSE_CANDIDATES=500`, `SCANNER_MAX_DEEP_SCORE_SYMBOLS=100`)
+- Bounded scan runtime defaults (`SCANNER_MAX_SCAN_SECONDS=240`, `SCANNER_MAX_COARSE_CANDIDATES=400`, `SCANNER_MAX_DEEP_SCORE_SYMBOLS=100`)
 - LIVE mode blocked (`TRADING_MODE=LIVE` raises and exits)
 
 ### Initial server deployment

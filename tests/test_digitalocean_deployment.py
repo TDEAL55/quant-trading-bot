@@ -56,6 +56,13 @@ def test_live_micro_service_cannot_load_shared_paper_secrets_overlay():
     assert isolation in example_env
 
 
+def test_live_micro_scanner_budget_finishes_deep_scoring_window():
+    example_env = (REPO_ROOT / "deployment" / "live-micro.example.env").read_text(encoding="utf-8")
+    assert "SCANNER_MAX_SCAN_SECONDS=240" in example_env
+    assert "SCANNER_MAX_COARSE_CANDIDATES=400" in example_env
+    assert "SCANNER_MAX_DEEP_SCORE_SYMBOLS=100" in example_env
+
+
 def test_dashboard_service_targets_streamlit_dashboard():
     text = (REPO_ROOT / "deployment" / "quant-bot-dashboard.service").read_text(encoding="utf-8")
     assert "ExecStart=" in text
