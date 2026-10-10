@@ -58,6 +58,7 @@ def test_live_micro_service_cannot_load_shared_paper_secrets_overlay():
 
 def test_live_micro_scanner_budget_finishes_deep_scoring_window():
     example_env = (REPO_ROOT / "deployment" / "live-micro.example.env").read_text(encoding="utf-8")
+    assert "LIVE_MAX_ACCOUNT_EQUITY=0" in example_env
     assert "SCANNER_MAX_SCAN_SECONDS=240" in example_env
     assert "SCANNER_MAX_COARSE_CANDIDATES=400" in example_env
     assert "SCANNER_MAX_DEEP_SCORE_SYMBOLS=100" in example_env

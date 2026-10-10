@@ -38,7 +38,9 @@ class LiveRiskSettings:
     private_dashboard_confirmed: bool = False
     entry_limits_enabled: bool = True
     entry_cash_allocation_percent: float = 25.0
-    maximum_account_equity: float = 500.0
+    # Optional deployment ceiling. Zero disables the obsolete micro-launch
+    # account-size gate while leaving every trade and portfolio risk control on.
+    maximum_account_equity: float = 0.0
     maximum_position_percent: float = 10.0
     maximum_position_notional: float = 30.0
     maximum_gross_exposure_percent: float = 30.0
@@ -62,6 +64,8 @@ class LiveRiskSettings:
     allowed_symbols: tuple[str, ...] = ()
 
     def validate(self) -> None:
+        if self.maximum_account_equity < 0:
+            raise ValueError("LIVE_MAX_ACCOUNT_EQUITY must be zero (disabled) or positive")
         if not 0 < self.entry_cash_allocation_percent <= 100:
             raise ValueError("LIVE_ENTRY_CASH_ALLOCATION_PERCENT must be in (0, 100]")
         if not 0 < self.maximum_position_percent <= 10:
@@ -119,7 +123,7 @@ def settings_from_environment(environ: Mapping[str, str] | None = None) -> LiveR
         private_dashboard_confirmed=_is_true(env.get("LIVE_PRIVATE_DASHBOARD_CONFIRMED", "false")),
         entry_limits_enabled=_is_true(env.get("LIVE_ENTRY_LIMITS_ENABLED", "false")),
         entry_cash_allocation_percent=_as_float(env.get("LIVE_ENTRY_CASH_ALLOCATION_PERCENT"), 25.0),
-        maximum_account_equity=_as_float(env.get("LIVE_MAX_ACCOUNT_EQUITY"), 500.0),
+        maximum_account_equity=_as_float(env.get("LIVE_MAX_ACCOUNT_EQUITY"), 0.0),
         maximum_position_percent=_as_float(env.get("LIVE_MAX_POSITION_PERCENT"), 10.0),
         maximum_position_notional=_as_float(env.get("LIVE_MAX_POSITION_NOTIONAL"), 30.0),
         maximum_gross_exposure_percent=_as_float(env.get("LIVE_MAX_GROSS_EXPOSURE_PERCENT"), 30.0),
@@ -189,7 +193,7 @@ def evaluate_live_readiness(
         reasons.append("account_trading_blocked")
     if equity <= 0:
         reasons.append("account_equity_unavailable")
-    if equity > settings.maximum_account_equity:
+    if settings.maximum_account_equity > 0 and equity > settings.maximum_account_equity:
         reasons.append("account_equity_above_micro_launch_limit")
     if cash < 0 or multiplier > 2:
         reasons.append("margin_or_negative_cash_not_allowed")

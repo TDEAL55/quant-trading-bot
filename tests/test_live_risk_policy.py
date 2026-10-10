@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import pytest
 
@@ -83,12 +84,52 @@ def test_unlimited_entry_allocation_is_configurable_but_never_exceeds_cash():
 
 @pytest.mark.parametrize("account,reason", [
     (_account(day_pl=-3), "daily_loss_stop_active"),
-    (_account(equity=501, cash=501), "account_equity_above_micro_launch_limit"),
     (_account(multiplier=4), "margin_or_negative_cash_not_allowed"),
 ])
 def test_account_safety_blocks(account, reason):
     result = evaluate_live_readiness(account, {}, [], settings=_armed(), market_is_open=True, orders_submitted_today=0)
     assert reason in result["reasons"]
+
+
+def test_zero_account_equity_ceiling_allows_funded_account():
+    settings = settings_from_environment({"LIVE_MAX_ACCOUNT_EQUITY": "0"})
+    settings = replace(
+        settings,
+        enabled=True,
+        order_submission_enabled=True,
+        kill_switch=False,
+        confirmation="ENABLE_LIVE_MICRO_TRADING",
+        private_dashboard_confirmed=True,
+        allowed_symbols=("F",),
+    )
+    result = evaluate_live_readiness(
+        _account(equity=1342.59, cash=1113.26),
+        {},
+        [],
+        settings=settings,
+        market_is_open=True,
+        orders_submitted_today=0,
+    )
+    assert result["approved"]
+    assert "account_equity_above_micro_launch_limit" not in result["reasons"]
+
+
+def test_positive_account_equity_ceiling_remains_available():
+    settings = replace(_armed(), maximum_account_equity=500)
+    result = evaluate_live_readiness(
+        _account(equity=501, cash=501),
+        {},
+        [],
+        settings=settings,
+        market_is_open=True,
+        orders_submitted_today=0,
+    )
+    assert "account_equity_above_micro_launch_limit" in result["reasons"]
+
+
+def test_negative_account_equity_ceiling_is_invalid():
+    with pytest.raises(ValueError):
+        settings_from_environment({"LIVE_MAX_ACCOUNT_EQUITY": "-1"})
 
 
 @pytest.mark.parametrize("key,value", [
