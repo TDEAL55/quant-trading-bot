@@ -1350,7 +1350,14 @@ def build_dashboard_view_model(payload):
     closed_by_asset = dict((payload.get("paper_tuning") or {}).get("closed_trades_by_asset") or {})
     account_pnl_policy = evaluate_account_pnl_policy(
         latest_account,
-        settings=settings_from_environment(maximum_position_percent=10.0),
+        settings=settings_from_environment(
+            maximum_position_percent=10.0,
+            trading_mode=(
+                "LIVE"
+                if LIVE_DASHBOARD_PROCESS or payload.get("dashboard_data_profile") == "live-micro-account"
+                else "PAPER"
+            ),
+        ),
     )
     dashboard_pnl_policy = account_pnl_policy
     stock_closed = dict(closed_by_asset.get("stocks") or {})
@@ -4896,6 +4903,8 @@ def render_scanner_candidate_panel(payload):
     top_rows = payload.get("top_scanner_results") or []
     rejection_rows = payload.get("scanner_rejections") or []
     sector_rows = payload.get("scanner_sector_distribution") or []
+    funnel = dict(scanner.get("candidate_funnel") or {})
+    exit_shadow = list(payload.get("live_exit_shadow") or [])
 
     cols = st.columns(5)
     _metric_card(cols[0], "Last Scan", format_timestamp_eastern(scanner.get("completed_at")), "neutral")
@@ -4925,9 +4934,34 @@ def render_scanner_candidate_panel(payload):
     if rejection_rows:
         rej = []
         for row in rejection_rows:
-            rej.append({"symbol": row.get("symbol"), "rejection_reason": _safe_text(row.get("rejection_reasons_json"), "N/A")})
+            rej.append(
+                {
+                    "symbol": row.get("symbol"),
+                    "rejection_reason": _safe_text(
+                        row.get("reason")
+                        or row.get("rejection_reason")
+                        or row.get("rejection_reasons_json"),
+                        "N/A",
+                    ),
+                    "count": row.get("count") or 1,
+                    "strategy_score": row.get("best_strategy_score"),
+                    "confidence": row.get("best_confidence"),
+                }
+            )
         st.markdown("#### Rejection Reasons")
         st.dataframe(rej)
+
+    if funnel:
+        st.caption(
+            "Live selection funnel: "
+            f"{int(funnel.get('evaluated_count') or 0)} evaluated · "
+            f"selected {str(funnel.get('selected_symbol') or 'none')}"
+        )
+
+    if exit_shadow:
+        st.markdown("#### Exit Monitor (Shadow Only)")
+        st.caption("These recommendations are diagnostic only. Broker-hosted protective orders remain in control.")
+        st.dataframe(exit_shadow)
 
     if sector_rows:
         st.markdown("#### Sector Breakdown")

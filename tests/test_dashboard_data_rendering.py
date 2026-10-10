@@ -1,3 +1,5 @@
+import json
+
 from monitoring_db import MonitoringDatabase
 from monitoring_recorder import MonitoringRecorder
 import dashboard_app
@@ -99,10 +101,31 @@ def test_read_only_paper_account_fallback_builds_dashboard_snapshot():
     assert snapshot["market_clock"]["source"] == "alpaca"
 
 
-def test_live_dashboard_uses_live_read_only_account_and_service():
+def test_live_dashboard_uses_live_read_only_account_and_service(tmp_path):
+    state_path = tmp_path / "live-state.json"
+    state_path.write_text(
+        json.dumps({
+            "last_cycle": {
+                "status": "no_trade",
+                "scan_summary": {
+                    "universe_total_count": 7819,
+                    "success_count": 50,
+                    "error_count": 0,
+                    "filtered_count_by_reason": {"overall score below minimum": 7},
+                },
+                "candidate_funnel": {
+                    "evaluated_count": 1,
+                    "near_misses": [{"symbol": "F", "reason": "position_size_below_one_share"}],
+                },
+                "live_exit_shadow": [{"symbol": "ECO", "mode": "SHADOW_ONLY"}],
+            }
+        }),
+        encoding="utf-8",
+    )
     payload = dashboard_data.fetch_live_dashboard_payload(
         live_broker_factory=_ReadOnlyLiveBroker,
         service_probe=lambda name: name == "quant-bot-live-micro.service",
+        state_path=state_path,
     )
 
     assert payload["dashboard_data_profile"] == "live-micro-account"
@@ -113,6 +136,9 @@ def test_live_dashboard_uses_live_read_only_account_and_service():
     assert payload["service_health"]["continuous_service_active"] is True
     assert payload["trade_review"]["metrics"]["number_of_trades"] == 0
     assert payload["trade_review"]["conclusions"]["loss_cause"] == "no_completed_losses_to_diagnose"
+    assert payload["latest_scanner_run"]["symbol_count"] == 7819
+    assert payload["scanner_rejections"][0]["reason"] == "position_size_below_one_share"
+    assert payload["live_exit_shadow"][0]["mode"] == "SHADOW_ONLY"
 
 
 def test_live_broker_market_clock_overrides_stale_signal_state():

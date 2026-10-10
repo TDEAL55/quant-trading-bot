@@ -54,7 +54,8 @@ def signal(_candidate):
 
 def mean_reversion_signal(_candidate):
     return [{"strategy_id":"stock_mean_reversion_v2", "strategy_version":"2", "signal":"BUY",
-        "strategy_score":82, "confidence":76, "data_quality_status":"ok", "market_regime":"sideways"}]
+        "strategy_score":82, "confidence":76, "data_quality_status":"ok", "market_regime":"sideways",
+        "supporting_factors": {"confirmations": {"momentum": True, "support": True}}}]
 
 
 def test_disabled_cycle_never_touches_broker():
@@ -99,6 +100,35 @@ def test_high_price_symbol_cannot_create_fractional_order(tmp_path, monkeypatch)
         scanner=lambda _: {"ranked_candidates":[{"symbol":"F", "latest_price":31}]},
         state_store=LiveStateStore(tmp_path / "live.json"))
     assert result["status"] == "no_trade"
+    assert result["candidate_funnel"]["rejection_counts"] == {"position_size_below_one_share": 1}
+    assert result["candidate_funnel"]["near_misses"][0]["symbol"] == "F"
+
+
+def test_candidate_requires_two_independent_confirmations(tmp_path, monkeypatch):
+    weak = signal({})
+    weak[0]["supporting_factors"]["confirmations"] = {"trend": True, "volume": False}
+    monkeypatch.setattr(module, "evaluate_all_strategies", lambda _candidate: weak)
+    result = run_controlled_live_cycle(
+        environ={"TRADING_MODE": "LIVE", "LIVE_FULL_STOCK_UNIVERSE": "false"},
+        settings=armed(), broker=Broker(), scanner=scanner,
+        state_store=LiveStateStore(tmp_path / "live.json"),
+    )
+    assert result["status"] == "no_trade"
+    assert result["candidate_funnel"]["rejection_counts"] == {
+        "insufficient_independent_confirmations": 1
+    }
+
+
+def test_cycle_result_persists_funnel_and_shadow_review(tmp_path):
+    store = LiveStateStore(tmp_path / "live.json")
+    store.record_cycle_result({
+        "status": "no_trade",
+        "candidate_funnel": {"rejection_counts": {"too_small": 1}},
+        "live_exit_shadow": [{"symbol": "F", "mode": "SHADOW_ONLY"}],
+    })
+    saved = store.load()["last_cycle"]
+    assert saved["candidate_funnel"]["rejection_counts"] == {"too_small": 1}
+    assert saved["live_exit_shadow"][0]["mode"] == "SHADOW_ONLY"
 
 
 def test_full_universe_replaces_short_allowlist_for_scanning(tmp_path, monkeypatch):

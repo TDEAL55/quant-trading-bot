@@ -29,6 +29,7 @@ def _parse_timestamp(value: Any) -> datetime | None:
 @dataclass(frozen=True)
 class PnLRiskSettings:
     daily_loss_stop_percent: float = 2.0
+    daily_loss_stop_dollars: float | None = None
     maximum_position_percent: float = 10.0
     maximum_risk_per_trade_percent: float = 1.0
     maximum_consecutive_losses: int = 3
@@ -39,6 +40,8 @@ class PnLRiskSettings:
         trading_mode = str(os.getenv("TRADING_MODE", "SIMULATION")).strip().upper()
         if not 0 < daily_stop:
             raise ValueError("daily_loss_stop_percent must be > 0")
+        if self.daily_loss_stop_dollars is not None and float(self.daily_loss_stop_dollars) <= 0:
+            raise ValueError("daily_loss_stop_dollars must be > 0 when configured")
         if trading_mode == "LIVE" and daily_stop > 25:
             raise ValueError("daily_loss_stop_percent must be <= 25 in LIVE mode")
         if not 0 < float(self.maximum_position_percent) <= 10:
@@ -51,22 +54,51 @@ class PnLRiskSettings:
             raise ValueError("loss_cooldown_minutes must be at least 1")
 
 
-def settings_from_environment(*, maximum_position_percent: float = 10.0) -> PnLRiskSettings:
+def settings_from_environment(
+    *,
+    maximum_position_percent: float = 10.0,
+    trading_mode: str | None = None,
+) -> PnLRiskSettings:
+    mode = str(trading_mode or os.getenv("TRADING_MODE", "PAPER")).strip().upper()
+    live = mode == "LIVE"
+    prefix = "LIVE" if live else "PAPER"
     settings = PnLRiskSettings(
-        daily_loss_stop_percent=_as_float(os.getenv("PAPER_DAILY_LOSS_STOP_PERCENT", "2"), 2.0),
+        daily_loss_stop_percent=_as_float(
+            os.getenv(f"{prefix}_DAILY_LOSS_STOP_PERCENT", "1" if live else "2"),
+            1.0 if live else 2.0,
+        ),
+        daily_loss_stop_dollars=(
+            _as_float(os.getenv("LIVE_DAILY_LOSS_STOP_DOLLARS", "3"), 3.0)
+            if live
+            else None
+        ),
         maximum_position_percent=min(
-            max(_as_float(maximum_position_percent, 10.0), 0.1),
+            max(
+                _as_float(
+                    os.getenv("LIVE_MAX_POSITION_PERCENT", maximum_position_percent)
+                    if live
+                    else maximum_position_percent,
+                    10.0,
+                ),
+                0.1,
+            ),
             10.0,
         ),
         maximum_risk_per_trade_percent=_as_float(
-            os.getenv("PAPER_MAX_RISK_PER_TRADE_PERCENT", "1"),
-            1.0,
+            os.getenv(f"{prefix}_MAX_RISK_PER_TRADE_PERCENT", "0.5" if live else "1"),
+            0.5 if live else 1.0,
         ),
         maximum_consecutive_losses=int(
-            _as_float(os.getenv("PAPER_MAX_CONSECUTIVE_LOSSES", "3"), 3.0)
+            _as_float(os.getenv(f"{prefix}_MAX_CONSECUTIVE_LOSSES", "3"), 3.0)
         ),
         loss_cooldown_minutes=int(
-            _as_float(os.getenv("PAPER_LOSS_COOLDOWN_MINUTES", "60"), 60.0)
+            _as_float(
+                os.getenv(
+                    "LIVE_CONSECUTIVE_LOSS_COOLDOWN_MINUTES" if live else "PAPER_LOSS_COOLDOWN_MINUTES",
+                    "60",
+                ),
+                60.0,
+            )
         ),
     )
     settings.validate()
@@ -188,10 +220,18 @@ def evaluate_account_pnl_policy(
     day_pl = _as_float(reported_day_pl, equity - last_equity) if reported_day_pl is not None else equity - last_equity
     reference_equity = last_equity if last_equity > 0 else max(equity - day_pl, equity, 0.0)
     day_return_percent = (day_pl / reference_equity) * 100.0 if reference_equity > 0 else 0.0
-    daily_loss_stop_active = bool(
-        reference_equity > 0
-        and day_return_percent <= -abs(float(policy.daily_loss_stop_percent))
+    percent_loss_limit = reference_equity * abs(float(policy.daily_loss_stop_percent)) / 100.0
+    dollar_loss_limit = (
+        abs(float(policy.daily_loss_stop_dollars))
+        if policy.daily_loss_stop_dollars is not None
+        else None
     )
+    effective_loss_limit = (
+        min(percent_loss_limit, dollar_loss_limit)
+        if dollar_loss_limit is not None and reference_equity > 0
+        else percent_loss_limit
+    )
+    daily_loss_stop_active = bool(reference_equity > 0 and day_pl <= -effective_loss_limit)
 
     normalized_trades: list[tuple[datetime, float]] = []
     for row in list(closed_trades or []):
@@ -240,6 +280,8 @@ def evaluate_account_pnl_policy(
         "day_pl": round(day_pl, 6),
         "day_return_percent": round(day_return_percent, 6),
         "daily_loss_stop_percent": float(policy.daily_loss_stop_percent),
+        "daily_loss_stop_dollars": dollar_loss_limit,
+        "daily_loss_limit": round(effective_loss_limit, 6),
         "daily_loss_stop_active": daily_loss_stop_active,
         "consecutive_losses": consecutive_losses,
         "maximum_consecutive_losses": int(policy.maximum_consecutive_losses),

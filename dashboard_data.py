@@ -293,6 +293,17 @@ def fetch_live_dashboard_payload(
     submission_records = list(live_state.get("submissions") or [])
     last_cycle = dict(live_state.get("last_cycle") or {})
     last_scan_summary = dict(last_cycle.get("scan_summary") or {})
+    candidate_funnel = dict(last_cycle.get("candidate_funnel") or {})
+    live_exit_shadow = list(last_cycle.get("live_exit_shadow") or [])
+    scanner_rejections = list(candidate_funnel.get("near_misses") or [])
+    scanner_rejections.extend(
+        {
+            "symbol": "SCAN_STAGE",
+            "reason": str(reason),
+            "count": int(count or 0),
+        }
+        for reason, count in dict(last_scan_summary.get("filtered_count_by_reason") or {}).items()
+    )
     last_cycle_reasons = [str(item) for item in list(last_cycle.get("reasons") or [])]
     last_cycle_reason_text = ", ".join(last_cycle_reasons) or str(last_cycle.get("status") or "waiting")
     strategy_metadata = index_submission_records(submission_records)
@@ -363,18 +374,21 @@ def fetch_live_dashboard_payload(
             "status": str(last_cycle.get("status") or "waiting"),
             "completed_at": str(last_cycle.get("recorded_at") or ""),
             "symbol_count": int(
-                last_scan_summary.get("success_count")
+                last_scan_summary.get("universe_total_count")
                 or last_scan_summary.get("symbol_count")
                 or 0
             ),
+            "success_count": int(last_scan_summary.get("success_count") or 0),
+            "error_count": int(last_scan_summary.get("error_count") or 0),
             "eligible_count": int(
                 last_scan_summary.get("eligible_count")
                 or (1 if last_cycle.get("candidate_symbol") else 0)
             ),
             "reason": last_cycle_reason_text,
+            "candidate_funnel": candidate_funnel,
         },
         "top_scanner_results": [],
-        "scanner_rejections": [],
+        "scanner_rejections": scanner_rejections[:50],
         "scanner_sector_distribution": [],
         "service_health": {
             "recent_error_count_24h": 0,
@@ -396,6 +410,8 @@ def fetch_live_dashboard_payload(
         "stock_pnl_reconstruction": reconstruction,
         "trade_review": trade_review,
         "performance_comparison": performance_comparison,
+        "live_readiness": dict(last_cycle.get("readiness") or {}),
+        "live_exit_shadow": live_exit_shadow,
         "research": {"db_connected": False},
         "dashboard_data_profile": "live-micro-account",
     }

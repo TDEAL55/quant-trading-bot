@@ -146,6 +146,21 @@ def test_environment_can_effectively_disable_daily_stop_for_paper_testing(monkey
 def test_live_mode_keeps_daily_loss_ceiling(monkeypatch):
     monkeypatch.setenv("TRADING_MODE", "LIVE")
     monkeypatch.setenv("PAPER_DAILY_LOSS_STOP_PERCENT", "100")
+    monkeypatch.setenv("LIVE_DAILY_LOSS_STOP_PERCENT", "1")
 
-    with pytest.raises(ValueError, match="LIVE mode"):
-        settings_from_environment()
+    settings = settings_from_environment()
+    assert settings.daily_loss_stop_percent == 1
+    assert settings.maximum_risk_per_trade_percent == 0.5
+    assert settings.daily_loss_stop_dollars == 3
+
+
+def test_live_dollar_stop_is_reflected_by_dashboard_policy():
+    result = evaluate_account_pnl_policy(
+        {"equity": 1196, "last_equity": 1200, "day_pl": -4},
+        settings=PnLRiskSettings(
+            daily_loss_stop_percent=1,
+            daily_loss_stop_dollars=3,
+        ),
+    )
+    assert result["daily_loss_limit"] == 3
+    assert result["daily_loss_stop_active"] is True

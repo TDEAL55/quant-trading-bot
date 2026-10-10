@@ -22,6 +22,7 @@ from live_risk_policy import (
 )
 from scanner_runner import _symbol_records_from_list, run_scan
 from stock_pnl_reconstruction import reconstruct_stock_realized_pnl
+from stock_exit_policy import evaluate_stock_exit
 from strategies.paper_strategy_plugins import evaluate_all_strategies
 
 
@@ -154,6 +155,8 @@ class LiveStateStore:
             "readiness": dict(payload.get("readiness") or {}),
             "candidate_symbol": str(dict(payload.get("candidate") or {}).get("symbol") or ""),
             "scan_summary": dict(payload.get("scan_summary") or {}),
+            "candidate_funnel": dict(payload.get("candidate_funnel") or {}),
+            "live_exit_shadow": list(payload.get("live_exit_shadow") or []),
         }
         self._save(state)
 
@@ -264,6 +267,89 @@ def _protective_order_symbols(
     return protected, unreconciled, unprotected
 
 
+def build_live_exit_shadow_reviews(
+    positions: Mapping[str, Mapping[str, Any]],
+    state: Mapping[str, Any],
+    *,
+    observed_at: datetime,
+    settings: LiveRiskSettings,
+) -> list[dict[str, Any]]:
+    """Evaluate richer exits for visibility only; never submit or alter orders."""
+    submissions = list(state.get("submissions") or [])
+    price_paths = dict(state.get("price_paths") or {})
+    reviews: list[dict[str, Any]] = []
+    for raw_symbol, raw_position in dict(positions or {}).items():
+        symbol = str(raw_symbol or "").strip().upper()
+        position = dict(raw_position or {})
+        quantity = _as_float(position.get("quantity") or position.get("qty"), 0.0)
+        side = "SHORT" if quantity < 0 else "LONG"
+        entry_price = _as_float(position.get("avg_entry_price") or position.get("average_entry_price"), 0.0)
+        current_price = _as_float(position.get("current_price") or position.get("market_price"), 0.0)
+        if not symbol or entry_price <= 0 or current_price <= 0:
+            continue
+        submission = next(
+            (dict(row or {}) for row in reversed(submissions) if str(dict(row or {}).get("symbol") or "").upper() == symbol),
+            {},
+        )
+        path_prices = [
+            _as_float(dict(row or {}).get("high"), 0.0)
+            for row in list(price_paths.get(symbol) or [])
+            if isinstance(row, dict)
+        ]
+        if side == "SHORT":
+            return_percent = ((entry_price - current_price) / entry_price) * 100.0
+            positive_prices = [price for price in path_prices if price > 0]
+            peak_return = max(
+                [return_percent]
+                + [((entry_price - price) / entry_price) * 100.0 for price in positive_prices]
+            )
+        else:
+            return_percent = ((current_price - entry_price) / entry_price) * 100.0
+            peak_return = max(
+                [return_percent]
+                + [((price - entry_price) / entry_price) * 100.0 for price in path_prices if price > 0]
+            )
+        context = {
+            "bot_entry_confirmed": bool(submission),
+            "bot_entry_attributed": bool(submission),
+            "attribution_checked": True,
+            "entry_timestamp": submission.get("recorded_at"),
+            "stop_price": submission.get("stop_price"),
+            "target_price": submission.get("target_price"),
+            "strategy": submission,
+        }
+        decision = evaluate_stock_exit(
+            strategy_id=str(submission.get("strategy_id") or ""),
+            position_side=side,
+            return_percent=return_percent,
+            entry_price=entry_price,
+            current_price=current_price,
+            entry_context=context,
+            current_timestamp=observed_at,
+            peak_return_percent=peak_return,
+            legacy_stop_loss_percent=settings.stop_loss_percent,
+            legacy_take_profit_percent=settings.take_profit_percent,
+            # PAPER selects the strategy-specific model; this result is then
+            # explicitly quarantined as shadow-only below.
+            trading_mode="PAPER",
+        )
+        reviews.append(
+            {
+                "symbol": symbol,
+                "mode": "SHADOW_ONLY",
+                "actionable": False,
+                "orders_changed": False,
+                "return_percent": round(return_percent, 6),
+                "recommendation": decision.get("recommendation"),
+                "exit_reason": decision.get("exit_reason"),
+                "profile_id": decision.get("profile_id"),
+                "strategy_id": decision.get("strategy_id"),
+                "attribution_reason": decision.get("attribution_reason"),
+            }
+        )
+    return reviews
+
+
 def select_live_candidate(
     scan_payload: Mapping[str, Any],
     *,
@@ -271,14 +357,46 @@ def select_live_candidate(
     positions: Mapping[str, Mapping[str, Any]],
     maximum_notional: float,
     account_equity: float,
+    diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    funnel = diagnostics if diagnostics is not None else {}
+    funnel.update(
+        {
+            "ranked_candidate_count": len(list(scan_payload.get("ranked_candidates") or [])),
+            "evaluated_count": 0,
+            "rejection_counts": {},
+            "near_misses": [],
+            "selected_symbol": "",
+        }
+    )
+
+    def reject(symbol: str, reason: str, **details: Any) -> None:
+        counts = dict(funnel.get("rejection_counts") or {})
+        counts[reason] = int(counts.get(reason, 0)) + 1
+        funnel["rejection_counts"] = counts
+        near_misses = list(funnel.get("near_misses") or [])
+        if len(near_misses) < 20:
+            near_misses.append({"symbol": symbol, "reason": reason, **details})
+        funnel["near_misses"] = near_misses
+
     held = {str(symbol).upper() for symbol in dict(positions or {})}
     allowed = set(settings.allowed_symbols)
     for raw_candidate in list(scan_payload.get("ranked_candidates") or []):
         candidate = dict(raw_candidate or {})
         symbol = str(candidate.get("symbol") or "").upper()
         price = _as_float(candidate.get("latest_price"), 0.0)
-        if not symbol or symbol not in allowed or symbol in held or price <= 0:
+        funnel["evaluated_count"] = int(funnel.get("evaluated_count") or 0) + 1
+        if not symbol:
+            reject("", "missing_symbol")
+            continue
+        if symbol not in allowed:
+            reject(symbol, "symbol_not_in_live_universe")
+            continue
+        if symbol in held:
+            reject(symbol, "position_already_held")
+            continue
+        if price <= 0:
+            reject(symbol, "invalid_latest_price", latest_price=price)
             continue
         signals = [dict(item or {}) for item in evaluate_all_strategies(candidate)]
         regime = str(
@@ -296,6 +414,30 @@ def select_live_candidate(
             and str(item.get("data_quality_status") or "").lower() in {"ok", "good"}
         ]
         if not eligible_signals:
+            signal_reasons: set[str] = set()
+            if not signals:
+                signal_reasons.add("no_strategy_signals")
+            if not routed_ids:
+                signal_reasons.add("unsupported_market_regime")
+            for item in signals:
+                if str(item.get("strategy_id") or "") not in routed_ids:
+                    signal_reasons.add("strategy_not_routed_for_regime")
+                if str(item.get("signal") or "").upper() != "BUY":
+                    signal_reasons.add("strategy_signal_not_buy")
+                if _as_float(item.get("strategy_score"), 0.0) < settings.minimum_strategy_score:
+                    signal_reasons.add("strategy_score_below_minimum")
+                if _as_float(item.get("confidence"), 0.0) < settings.minimum_confidence:
+                    signal_reasons.add("strategy_confidence_below_minimum")
+                if str(item.get("data_quality_status") or "").lower() not in {"ok", "good"}:
+                    signal_reasons.add("strategy_data_quality_not_acceptable")
+            reject(
+                symbol,
+                "no_eligible_strategy_signal",
+                regime=regime,
+                signal_reasons=sorted(signal_reasons),
+                best_strategy_score=max((_as_float(item.get("strategy_score"), 0.0) for item in signals), default=0.0),
+                best_confidence=max((_as_float(item.get("confidence"), 0.0) for item in signals), default=0.0),
+            )
             continue
         signal = max(
             eligible_signals,
@@ -311,6 +453,14 @@ def select_live_candidate(
         supporting = dict(signal.get("supporting_factors") or {})
         confirmations = dict(supporting.get("confirmations") or {})
         distinct_confirmation_count = sum(1 for passed in confirmations.values() if passed)
+        if distinct_confirmation_count < 2:
+            reject(
+                symbol,
+                "insufficient_independent_confirmations",
+                confirmation_count=distinct_confirmation_count,
+                required_confirmation_count=2,
+            )
+            continue
         stop = _as_float(signal.get("stop") or signal.get("stop_price"), 0.0)
         if not 0 < stop < price:
             stop = round(price * (1.0 - settings.stop_loss_percent / 100.0), 2)
@@ -330,6 +480,11 @@ def select_live_candidate(
             ),
         )
         if held and int(correlation.get("insufficient_pair_count") or 0) > 0:
+            reject(
+                symbol,
+                "correlation_history_incomplete",
+                insufficient_pair_count=int(correlation.get("insufficient_pair_count") or 0),
+            )
             continue
         high_peers = {
             str(row.get("peer_symbol") or "").upper()
@@ -353,6 +508,14 @@ def select_live_candidate(
         )
         quantity = int(sizing.get("quantity") or 0)
         if quantity < 1:
+            reject(
+                symbol,
+                "position_size_below_one_share",
+                latest_price=price,
+                stop_price=stop,
+                maximum_notional=round(correlation_notional_cap, 6),
+                allowed_risk_dollars=_as_float(sizing.get("allowed_risk_dollars"), 0.0),
+            )
             continue
         signal["rule_checks"] = {
             "regime_route": str(signal.get("strategy_id") or "") in routed_ids,
@@ -368,6 +531,7 @@ def select_live_candidate(
         signal["risk_sizing"] = sizing
         signal["correlation_assessment"] = correlation
         signal["correlated_exposure_before"] = round(correlated_exposure, 6)
+        funnel["selected_symbol"] = symbol
         return {
             "symbol": symbol,
             "quantity": quantity,
@@ -426,10 +590,29 @@ def run_controlled_live_cycle(
     clock = dict(live_broker.get_market_clock() or {})
     _, unreconciled_orders, unprotected_positions = _protective_order_symbols(positions, open_orders)
     orders_submitted_today = store.orders_submitted_on(date_key)
+    state = store.load()
+    try:
+        live_exit_shadow = build_live_exit_shadow_reviews(
+            positions,
+            state,
+            observed_at=now,
+            settings=policy,
+        )
+    except Exception as exc:
+        # Shadow diagnostics must never interrupt broker protection or the
+        # primary live decision loop.
+        live_exit_shadow = [
+            {
+                "mode": "SHADOW_ONLY",
+                "actionable": False,
+                "orders_changed": False,
+                "status": "unavailable",
+                "error_type": type(exc).__name__,
+            }
+        ]
     try:
         history_limit = 500
         order_history = [dict(item or {}) for item in list(live_broker.get_order_history(limit=history_limit) or [])]
-        state = store.load()
         strategy_metadata: dict[str, Any] = {}
         for row in list(state.get("submissions") or []):
             for key in ("order_id", "client_order_id"):
@@ -486,6 +669,7 @@ def run_controlled_live_cycle(
             "status": "blocked",
             "reasons": list(readiness.get("reasons") or []),
             "readiness": readiness,
+            "live_exit_shadow": live_exit_shadow,
             "submitted": False,
         }
 
@@ -495,6 +679,7 @@ def run_controlled_live_cycle(
             "status": "no_trade",
             "reasons": ["available_live_notional_below_one_dollar"],
             "readiness": readiness,
+            "live_exit_shadow": live_exit_shadow,
             "submitted": False,
         }
 
@@ -503,12 +688,14 @@ def run_controlled_live_cycle(
         dict(scan_payload.get("price_history_by_symbol") or {}),
         symbols={str(symbol).upper() for symbol in positions},
     )
+    candidate_funnel: dict[str, Any] = {}
     candidate = select_live_candidate(
         scan_payload,
         settings=policy,
         positions=positions,
         maximum_notional=maximum_notional,
         account_equity=_as_float(account.get("equity"), 0.0),
+        diagnostics=candidate_funnel,
     )
     if candidate is None:
         return {
@@ -516,6 +703,8 @@ def run_controlled_live_cycle(
             "reasons": ["no_eligible_risk_checked_candidate"],
             "readiness": readiness,
             "scan_summary": dict(scan_payload.get("summary") or {}),
+            "candidate_funnel": candidate_funnel,
+            "live_exit_shadow": live_exit_shadow,
             "submitted": False,
         }
 
@@ -541,6 +730,8 @@ def run_controlled_live_cycle(
         "readiness": readiness,
         "candidate": candidate,
         "scan_summary": dict(scan_payload.get("summary") or {}),
+        "candidate_funnel": candidate_funnel,
+        "live_exit_shadow": live_exit_shadow,
         "order": order,
         "submitted": submitted,
     }

@@ -21,6 +21,26 @@ def _frame(rows=260, base=100.0, step=0.2, volume=1_500_000):
     )
 
 
+def test_rotating_budget_window_advances_by_a_full_window():
+    records = [{"symbol": f"S{i:04d}"} for i in range(1000)]
+    first, _ = market_scanner._rotating_budget_window(records, 400, slot=0)
+    second, _ = market_scanner._rotating_budget_window(records, 400, slot=1)
+
+    assert first[0]["symbol"] == "S0000"
+    assert second[0]["symbol"] == "S0400"
+    assert not {row["symbol"] for row in first}.intersection(row["symbol"] for row in second)
+
+
+def test_rotating_budget_window_wraps_without_losing_window_size():
+    records = [{"symbol": f"S{i:04d}"} for i in range(1000)]
+    selected, deferred = market_scanner._rotating_budget_window(records, 400, slot=2)
+
+    assert len(selected) == 400
+    assert len(deferred) == 600
+    assert selected[0]["symbol"] == "S0800"
+    assert selected[-1]["symbol"] == "S0199"
+
+
 def test_scan_symbol_success(monkeypatch):
     monkeypatch.setattr(market_scanner, "generate_strategy_result", lambda **kwargs: {
         "overall_score": 82.0,

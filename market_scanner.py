@@ -86,12 +86,20 @@ def _invoke_loader_with_timeout(loader: Callable[..., Any], *args: Any, timeout_
     return loader(*args)
 
 
-def _rotating_budget_window(records: list[dict[str, Any]], limit: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _rotating_budget_window(
+    records: list[dict[str, Any]],
+    limit: int,
+    *,
+    slot: int | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if limit <= 0 or len(records) <= limit:
         return list(records), []
     # Rotate the scan window each cycle to preserve broad discovery over time.
-    slot = int(time.time() // 300)
-    offset = slot % len(records)
+    # Advance by a complete window, not one symbol.  The former one-symbol
+    # offset made consecutive 400-symbol live scans overlap by 399 symbols,
+    # leaving most of a large universe effectively undiscovered all day.
+    window_slot = int(time.time() // 300) if slot is None else int(slot)
+    offset = (window_slot * limit) % len(records)
     rotated = records[offset:] + records[:offset]
     return rotated[:limit], rotated[limit:]
 
