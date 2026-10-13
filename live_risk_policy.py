@@ -61,6 +61,9 @@ class LiveRiskSettings:
     minimum_confidence: float = 70.0
     stop_loss_percent: float = 5.0
     take_profit_percent: float = 10.0
+    # Observation-only until the ratchet has been validated against paper and
+    # live-shadow samples. This setting cannot submit or replace broker orders.
+    trailing_stop_ratchet_shadow_enabled: bool = True
     allowed_symbols: tuple[str, ...] = ()
 
     def validate(self) -> None:
@@ -144,6 +147,9 @@ def settings_from_environment(environ: Mapping[str, str] | None = None) -> LiveR
         minimum_confidence=_as_float(env.get("LIVE_MINIMUM_CONFIDENCE"), 70.0),
         stop_loss_percent=_as_float(env.get("LIVE_STOP_LOSS_PERCENT"), 5.0),
         take_profit_percent=_as_float(env.get("LIVE_TAKE_PROFIT_PERCENT"), 10.0),
+        trailing_stop_ratchet_shadow_enabled=_is_true(
+            env.get("LIVE_TRAILING_STOP_RATCHET_SHADOW_ENABLED", "true")
+        ),
         allowed_symbols=symbols,
     )
     settings.validate()

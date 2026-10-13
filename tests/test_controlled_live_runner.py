@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import controlled_live_runner as module
@@ -36,6 +37,89 @@ def armed():
     return LiveRiskSettings(enabled=True, order_submission_enabled=True, kill_switch=False,
         confirmation="ENABLE_LIVE_MICRO_TRADING", private_dashboard_confirmed=True,
         minimum_strategy_score=75, minimum_confidence=70, allowed_symbols=("F",))
+
+
+def recorded_submission(
+    *,
+    symbol="NVDA",
+    strategy_id="stock_trend_pullback_v3",
+    quantity=1,
+    reference_price=100,
+    stop_price=95,
+    target_price=115,
+    order_id="parent-order",
+    client_order_id="qtb-live-parent",
+):
+    return {
+        "symbol": symbol,
+        "strategy_id": strategy_id,
+        "recorded_at": "2026-09-29T14:00:00+00:00",
+        "order_id": order_id,
+        "client_order_id": client_order_id,
+        "quantity": quantity,
+        "reference_price": reference_price,
+        "stop_price": stop_price,
+        "target_price": target_price,
+    }
+
+
+def broker_bracket_legs(
+    *,
+    symbol="NVDA",
+    quantity=1,
+    stop_price=95,
+    target_price=115,
+    side="sell",
+    parent_order_id="parent-order",
+    parent_client_order_id="qtb-live-parent",
+):
+    common = {
+        "symbol": symbol,
+        "side": side,
+        "requested_quantity": quantity,
+        "filled_quantity": 0,
+        "parent_order_id": parent_order_id,
+        "parent_client_order_id": parent_client_order_id,
+    }
+    return [
+        {
+            **common,
+            "order_id": f"{parent_order_id}-target",
+            "status": "new",
+            "order_type": "limit",
+            "limit_price": target_price,
+        },
+        {
+            **common,
+            "order_id": f"{parent_order_id}-stop",
+            "status": "held",
+            "order_type": "stop",
+            "stop_price": stop_price,
+        },
+    ]
+
+
+def filled_parent_order(
+    *,
+    symbol="NVDA",
+    quantity=1,
+    average_fill_price=100,
+    side="buy",
+    filled_at="2026-09-29T14:01:00+00:00",
+    order_id="parent-order",
+    client_order_id="qtb-live-parent",
+):
+    return {
+        "order_id": order_id,
+        "client_order_id": client_order_id,
+        "symbol": symbol,
+        "side": side,
+        "status": "filled",
+        "requested_quantity": quantity,
+        "filled_quantity": quantity,
+        "average_fill_price": average_fill_price,
+        "filled_at": filled_at,
+    }
 
 
 def scanner(_records):
@@ -129,6 +213,346 @@ def test_cycle_result_persists_funnel_and_shadow_review(tmp_path):
     saved = store.load()["last_cycle"]
     assert saved["candidate_funnel"]["rejection_counts"] == {"too_small": 1}
     assert saved["live_exit_shadow"][0]["mode"] == "SHADOW_ONLY"
+
+
+def test_live_exit_shadow_reports_stop_ratchet_without_changing_orders():
+    reviews = module.build_live_exit_shadow_reviews(
+        {
+            "NVDA": {
+                "qty": "1",
+                "avg_entry_price": "100",
+                "current_price": "108",
+            }
+        },
+        {
+            "submissions": [recorded_submission()],
+            "price_paths": {
+                "NVDA": [{"timestamp": "2026-09-30T15:00:00+00:00", "high": 110}]
+            },
+        },
+        observed_at=datetime(2026, 10, 1, 15, tzinfo=timezone.utc),
+        settings=armed(),
+        open_orders=broker_bracket_legs(),
+        order_history=[filled_parent_order()],
+    )
+
+    assert len(reviews) == 1
+    review = reviews[0]
+    assert review["trailing_shadow_enabled"] is True
+    assert review["current_protective_stop_price"] == 95
+    assert review["proposed_protective_stop_price"] == 107
+    assert review["would_raise_protective_stop"] is True
+    assert review["would_trigger_exit_now"] is False
+    assert review["trailing_action"] == "RATCHET_STOP_UP"
+    assert review["actionable"] is False
+    assert review["orders_changed"] is False
+
+
+def test_live_exit_shadow_disabled_setting_suppresses_ratchet_recommendation():
+    reviews = module.build_live_exit_shadow_reviews(
+        {
+            "NVDA": {
+                "qty": "1",
+                "avg_entry_price": "100",
+                "current_price": "108",
+            }
+        },
+        {
+            "submissions": [recorded_submission()],
+            "price_paths": {
+                "NVDA": [{"timestamp": "2026-09-30T15:00:00+00:00", "high": 110}]
+            },
+        },
+        observed_at=datetime(2026, 10, 1, 15, tzinfo=timezone.utc),
+        settings=replace(armed(), trailing_stop_ratchet_shadow_enabled=False),
+        open_orders=broker_bracket_legs(),
+        order_history=[filled_parent_order()],
+    )
+
+    review = reviews[0]
+    assert review["trailing_shadow_enabled"] is False
+    assert review["current_protective_stop_price"] == 95
+    assert review["proposed_protective_stop_price"] is None
+    assert review["would_raise_protective_stop"] is False
+    assert review["would_trigger_exit_now"] is False
+    assert review["trailing_action"] == "DISABLED"
+
+
+def test_live_exit_shadow_uses_filled_parent_time_and_ignores_prefill_highs():
+    reviews = module.build_live_exit_shadow_reviews(
+        {
+            "NVDA": {
+                "qty": "1",
+                "avg_price": "100",
+                "current_price": "104",
+            }
+        },
+        {
+            "submissions": [
+                recorded_submission()
+            ],
+            "price_paths": {
+                "NVDA": [
+                    {"timestamp": "2026-09-30T15:00:00+00:00", "high": 130},
+                    {"timestamp": "2026-10-02T15:00:00+00:00", "high": 105},
+                ]
+            },
+        },
+        observed_at=datetime(2026, 10, 2, 16, tzinfo=timezone.utc),
+        settings=armed(),
+        open_orders=broker_bracket_legs(),
+        order_history=[
+            filled_parent_order(filled_at="2026-10-01T14:00:00+00:00")
+        ],
+    )
+
+    review = reviews[0]
+    assert review["entry_fill_timestamp"] == "2026-10-01T14:00:00+00:00"
+    assert review["entry_timestamp_source"] == "BROKER_FILLED_PARENT"
+    assert review["post_entry_price_observation_count"] == 1
+    assert review["peak_return_percent"] == 5
+    assert review["trailing_activation_reached"] is False
+    assert review["proposed_protective_stop_price"] is None
+    assert review["trailing_action"] == "NOT_ACTIVATED"
+
+
+def test_live_exit_shadow_uses_post_entry_lows_for_short_position_peak():
+    reviews = module.build_live_exit_shadow_reviews(
+        {
+            "NVDA": {
+                "qty": "-2",
+                "avg_entry_price": "100",
+                "current_price": "92",
+            }
+        },
+        {
+            "submissions": [
+                recorded_submission(
+                    strategy_id="stock_bearish_trend_v2",
+                    quantity=2,
+                    stop_price=104,
+                    target_price=88,
+                )
+            ],
+            "price_paths": {
+                "NVDA": [
+                    {
+                        "timestamp": "2026-09-30T15:00:00+00:00",
+                        "high": 120,
+                        "low": 90,
+                    }
+                ]
+            },
+        },
+        observed_at=datetime(2026, 10, 1, 15, tzinfo=timezone.utc),
+        settings=armed(),
+        open_orders=broker_bracket_legs(
+            quantity=2,
+            stop_price=104,
+            target_price=88,
+            side="buy",
+        ),
+        order_history=[filled_parent_order(quantity=2, side="sell")],
+    )
+
+    review = reviews[0]
+    assert review["peak_return_percent"] == 10
+    assert review["proposed_protective_stop_price"] == 93
+    assert review["would_tighten_protective_stop"] is True
+    assert review["would_raise_protective_stop"] is False
+    assert review["would_trigger_exit_now"] is False
+    assert review["trailing_action"] == "RATCHET_STOP_DOWN"
+
+
+def test_live_exit_shadow_uses_verified_broker_stop_instead_of_recorded_submission_stop():
+    reviews = module.build_live_exit_shadow_reviews(
+        {
+            "NVDA": {
+                "qty": "1",
+                "avg_entry_price": "100",
+                "current_price": "108",
+            }
+        },
+        {
+            "submissions": [recorded_submission(stop_price=95)],
+            "price_paths": {
+                "NVDA": [{"timestamp": "2026-09-30T15:00:00+00:00", "high": 110}]
+            },
+        },
+        observed_at=datetime(2026, 10, 1, 15, tzinfo=timezone.utc),
+        settings=armed(),
+        open_orders=broker_bracket_legs(stop_price=96),
+        order_history=[filled_parent_order()],
+    )
+
+    review = reviews[0]
+    assert review["attribution_validation_reason"] == "confirmed_bot_position_and_bracket"
+    assert review["protective_stop_source"] == "BROKER_OPEN_STOP_LEG"
+    assert review["current_protective_stop_price"] == 96
+    assert review["proposed_protective_stop_price"] == 107
+    assert review["would_raise_protective_stop"] is True
+    assert review["trailing_action"] == "RATCHET_STOP_UP"
+
+
+def test_live_exit_shadow_fails_closed_when_filled_parent_is_missing():
+    reviews = module.build_live_exit_shadow_reviews(
+        {
+            "NVDA": {
+                "qty": "1",
+                "avg_entry_price": "100",
+                "current_price": "108",
+            }
+        },
+        {
+            "submissions": [recorded_submission()],
+            "price_paths": {
+                "NVDA": [{"timestamp": "2026-09-30T15:00:00+00:00", "high": 110}]
+            },
+        },
+        observed_at=datetime(2026, 10, 1, 15, tzinfo=timezone.utc),
+        settings=armed(),
+        open_orders=broker_bracket_legs(),
+        order_history=[],
+    )
+
+    review = reviews[0]
+    assert review["attribution_validation_reason"] == "filled_parent_missing"
+    assert review["entry_fill_timestamp"] is None
+    assert review["entry_timestamp_source"] == "UNVERIFIED"
+    assert review["protective_stop_source"] == "UNVERIFIED"
+    assert review["proposed_protective_stop_price"] is None
+    assert review["would_tighten_protective_stop"] is False
+    assert review["would_raise_protective_stop"] is False
+    assert review["would_trigger_exit_now"] is False
+    assert review["trailing_action"] == "POSITION_ATTRIBUTION_UNVERIFIED"
+
+
+def test_live_exit_shadow_fails_closed_when_filled_parent_is_ambiguous():
+    parent = filled_parent_order()
+    reviews = module.build_live_exit_shadow_reviews(
+        {
+            "NVDA": {
+                "qty": "1",
+                "avg_entry_price": "100",
+                "current_price": "108",
+            }
+        },
+        {
+            "submissions": [recorded_submission()],
+            "price_paths": {
+                "NVDA": [{"timestamp": "2026-09-30T15:00:00+00:00", "high": 110}]
+            },
+        },
+        observed_at=datetime(2026, 10, 1, 15, tzinfo=timezone.utc),
+        settings=armed(),
+        open_orders=broker_bracket_legs(),
+        order_history=[parent, dict(parent)],
+    )
+
+    review = reviews[0]
+    assert review["attribution_validation_reason"] == "filled_parent_ambiguous"
+    assert review["entry_timestamp_source"] == "UNVERIFIED"
+    assert review["protective_stop_source"] == "UNVERIFIED"
+    assert review["proposed_protective_stop_price"] is None
+    assert review["would_raise_protective_stop"] is False
+    assert review["would_trigger_exit_now"] is False
+    assert review["trailing_action"] == "POSITION_ATTRIBUTION_UNVERIFIED"
+
+
+def test_live_exit_shadow_fails_closed_when_position_quantity_does_not_match_submission():
+    reviews = module.build_live_exit_shadow_reviews(
+        {
+            "NVDA": {
+                "qty": "2",
+                "avg_entry_price": "100",
+                "current_price": "108",
+            }
+        },
+        {
+            "submissions": [recorded_submission(quantity=1)],
+            "price_paths": {
+                "NVDA": [{"timestamp": "2026-09-30T15:00:00+00:00", "high": 110}]
+            },
+        },
+        observed_at=datetime(2026, 10, 1, 15, tzinfo=timezone.utc),
+        settings=armed(),
+        open_orders=broker_bracket_legs(quantity=2),
+        order_history=[filled_parent_order()],
+    )
+
+    review = reviews[0]
+    assert review["attribution_validation_reason"] == "position_quantity_mismatch"
+    assert review["protective_stop_source"] == "UNVERIFIED"
+    assert review["proposed_protective_stop_price"] is None
+    assert review["would_tighten_protective_stop"] is False
+    assert review["would_raise_protective_stop"] is False
+    assert review["would_trigger_exit_now"] is False
+    assert review["trailing_action"] == "POSITION_ATTRIBUTION_UNVERIFIED"
+
+
+def test_live_exit_shadow_fails_closed_when_broker_stop_leg_is_missing():
+    reviews = module.build_live_exit_shadow_reviews(
+        {
+            "NVDA": {
+                "qty": "1",
+                "avg_entry_price": "100",
+                "current_price": "108",
+            }
+        },
+        {
+            "submissions": [recorded_submission()],
+            "price_paths": {
+                "NVDA": [{"timestamp": "2026-09-30T15:00:00+00:00", "high": 110}]
+            },
+        },
+        observed_at=datetime(2026, 10, 1, 15, tzinfo=timezone.utc),
+        settings=armed(),
+        open_orders=broker_bracket_legs()[:1],
+        order_history=[filled_parent_order()],
+    )
+
+    review = reviews[0]
+    assert review["attribution_validation_reason"] == "broker_protection_missing"
+    assert review["protective_stop_source"] == "UNVERIFIED"
+    assert review["proposed_protective_stop_price"] is None
+    assert review["would_tighten_protective_stop"] is False
+    assert review["would_raise_protective_stop"] is False
+    assert review["would_trigger_exit_now"] is False
+    assert review["trailing_action"] == "BROKER_PROTECTION_UNVERIFIED"
+
+
+def test_live_exit_shadow_fails_closed_when_broker_stop_leg_is_ambiguous():
+    open_orders = broker_bracket_legs()
+    open_orders.append({**open_orders[1], "order_id": "duplicate-stop"})
+
+    reviews = module.build_live_exit_shadow_reviews(
+        {
+            "NVDA": {
+                "qty": "1",
+                "avg_entry_price": "100",
+                "current_price": "108",
+            }
+        },
+        {
+            "submissions": [recorded_submission()],
+            "price_paths": {
+                "NVDA": [{"timestamp": "2026-09-30T15:00:00+00:00", "high": 110}]
+            },
+        },
+        observed_at=datetime(2026, 10, 1, 15, tzinfo=timezone.utc),
+        settings=armed(),
+        open_orders=open_orders,
+        order_history=[filled_parent_order()],
+    )
+
+    review = reviews[0]
+    assert review["attribution_validation_reason"] == "broker_protection_ambiguous"
+    assert review["protective_stop_source"] == "UNVERIFIED"
+    assert review["proposed_protective_stop_price"] is None
+    assert review["would_tighten_protective_stop"] is False
+    assert review["would_raise_protective_stop"] is False
+    assert review["would_trigger_exit_now"] is False
+    assert review["trailing_action"] == "BROKER_PROTECTION_UNVERIFIED"
 
 
 def test_full_universe_replaces_short_allowlist_for_scanning(tmp_path, monkeypatch):

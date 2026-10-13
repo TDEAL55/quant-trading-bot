@@ -4960,7 +4960,10 @@ def render_scanner_candidate_panel(payload):
 
     if exit_shadow:
         st.markdown("#### Exit Monitor (Shadow Only)")
-        st.caption("These recommendations are diagnostic only. Broker-hosted protective orders remain in control.")
+        st.caption(
+            "These recommendations are diagnostic only. Proposed trailing stops are measured, not sent; "
+            "broker-hosted protective orders remain unchanged and in control."
+        )
         st.dataframe(exit_shadow)
 
     if sector_rows:

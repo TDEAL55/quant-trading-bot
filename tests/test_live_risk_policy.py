@@ -40,6 +40,12 @@ def test_live_environment_uses_same_uncapped_entry_policy_as_paper():
     settings = settings_from_environment({})
     assert settings.entry_limits_enabled is False
     assert settings.entry_cash_allocation_percent == 25.0
+    assert settings.trailing_stop_ratchet_shadow_enabled is True
+
+
+def test_trailing_stop_ratchet_shadow_can_be_disabled_without_enabling_execution():
+    settings = settings_from_environment({"LIVE_TRAILING_STOP_RATCHET_SHADOW_ENABLED": "false"})
+    assert settings.trailing_stop_ratchet_shadow_enabled is False
 
 
 def test_healthy_micro_account_is_approved_and_caps_entry_at_30():

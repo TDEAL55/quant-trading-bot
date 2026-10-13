@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 import re
 from typing import Any
 
@@ -90,6 +91,17 @@ def _as_datetime(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _trailing_stop_price(*, entry_price: float, position_side: str, locked_return_percent: float) -> float:
+    """Return a broker-valid shadow stop rounded conservatively to the price tick."""
+    entry = Decimal(str(max(float(entry_price), 0.0)))
+    locked_return = Decimal(str(float(locked_return_percent))) / Decimal("100")
+    side = str(position_side or "").strip().upper()
+    raw_price = entry * (Decimal("1") - locked_return if side == "SHORT" else Decimal("1") + locked_return)
+    tick = Decimal("0.0001") if raw_price < Decimal("1") else Decimal("0.01")
+    rounding = ROUND_CEILING if side == "SHORT" else ROUND_FLOOR
+    return float(raw_price.quantize(tick, rounding=rounding))
 
 
 def business_sessions_elapsed(entry_timestamp: Any, current_timestamp: Any) -> int:
@@ -248,6 +260,11 @@ def evaluate_stock_exit(
         "trailing_distance_percent": profile.trailing_distance_percent,
         "peak_return_percent": round(peak_return, 6),
         "trailing_state_status": "available" if has_trusted_peak else "unavailable",
+        "trailing_eligible": False,
+        "trailing_activation_reached": False,
+        "trailing_stop_return_percent": None,
+        "trailing_stop_price": None,
+        "trailing_stop_triggered": False,
         "holding_sessions": holding_sessions,
         "maximum_holding_sessions": profile.maximum_holding_sessions,
         "mean_target_price": None,
@@ -271,6 +288,28 @@ def evaluate_stock_exit(
             attribution_reason="no_confirmed_bot_entry",
         )
         return decision
+
+    trailing_activation = profile.trailing_activation_percent
+    trailing_distance = profile.trailing_distance_percent
+    trailing_eligible = bool(
+        profile_applied
+        and has_trusted_peak
+        and trailing_activation is not None
+        and trailing_distance is not None
+    )
+    decision["trailing_eligible"] = trailing_eligible
+    if trailing_eligible and peak_return >= float(trailing_activation):
+        locked_return = peak_return - float(trailing_distance)
+        decision.update(
+            trailing_activation_reached=True,
+            trailing_stop_return_percent=round(locked_return, 6),
+            trailing_stop_price=_trailing_stop_price(
+                entry_price=entry_price,
+                position_side=position_side,
+                locked_return_percent=locked_return,
+            ),
+            trailing_stop_triggered=(peak_return - current_return) >= float(trailing_distance),
+        )
 
     if current_return <= -abs(profile.stop_loss_percent):
         decision.update(
@@ -302,16 +341,7 @@ def evaluate_stock_exit(
         )
         return decision
 
-    trailing_activation = profile.trailing_activation_percent
-    trailing_distance = profile.trailing_distance_percent
-    if (
-        profile_applied
-        and has_trusted_peak
-        and trailing_activation is not None
-        and trailing_distance is not None
-        and peak_return >= float(trailing_activation)
-        and (peak_return - current_return) >= float(trailing_distance)
-    ):
+    if bool(decision.get("trailing_stop_triggered")):
         decision.update(
             recommendation="CLOSE_TAKE_PROFIT",
             exit_reason=(

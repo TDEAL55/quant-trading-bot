@@ -41,6 +41,35 @@ def test_trend_profile_allows_wider_fallback_stop_and_trails_a_winner():
     assert trailing["exit_reason"] == "trend_trailing_stop_reached"
 
 
+def test_trend_trailing_shadow_calculates_locked_profit_stop_before_exit_trigger():
+    decision = _evaluate(
+        "stock_trend_pullback_v3",
+        return_percent=8,
+        price=108,
+        peak=10,
+    )
+
+    assert decision["trailing_activation_reached"] is True
+    assert decision["trailing_stop_return_percent"] == 7
+    assert decision["trailing_stop_price"] == 107
+    assert decision["trailing_stop_triggered"] is False
+    assert decision["recommendation"] == "HOLD"
+
+
+def test_trend_trailing_shadow_does_not_activate_at_nvda_like_peak_below_six_percent():
+    decision = _evaluate(
+        "stock_trend_pullback_v3",
+        return_percent=-3.0,
+        price=97,
+        peak=5.42,
+    )
+
+    assert decision["trailing_activation_reached"] is False
+    assert decision["trailing_stop_return_percent"] is None
+    assert decision["trailing_stop_price"] is None
+    assert decision["trailing_stop_triggered"] is False
+
+
 def test_trend_profile_honors_recorded_entry_stop_and_target():
     context = _context(
         "stock_trend_ensemble_v2",

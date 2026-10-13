@@ -34,14 +34,15 @@ class NestedOrderClient(Client):
         take_profit = SimpleNamespace(id="take-profit", client_order_id="take-profit-cid", symbol="F", side="sell", qty="2",
             filled_qty="0", order_type="limit", time_in_force="gtc", submitted_at="2026-09-14T14:00:00+00:00",
             updated_at="2026-09-15T14:00:00+00:00", status="new", filled_avg_price=None, failed_at=None,
-            asset_class="us_equity", position_intent="sell_to_close")
+            asset_class="us_equity", position_intent="sell_to_close", limit_price="13.2", stop_price=None)
         stop_loss = SimpleNamespace(id="stop-loss", client_order_id="stop-loss-cid", symbol="F", side="sell", qty="2",
             filled_qty="0", order_type="stop", time_in_force="gtc", submitted_at="2026-09-14T14:00:00+00:00",
             updated_at="2026-09-15T14:00:01+00:00", status="held", filled_avg_price=None, failed_at=None,
-            asset_class="us_equity", position_intent="sell_to_close")
+            asset_class="us_equity", position_intent="sell_to_close", limit_price=None, stop_price="11.4")
         parent = SimpleNamespace(id="parent", client_order_id="qtb-parent-cid", symbol="F", side="buy", qty="2",
             filled_qty="2", order_type="market", time_in_force="gtc", submitted_at="now", updated_at="now",
-            status="filled", filled_avg_price="12", failed_at=None, legs=[take_profit, stop_loss],
+            filled_at="2026-09-14T14:00:10+00:00", status="filled", filled_avg_price="12",
+            failed_at=None, legs=[take_profit, stop_loss],
             asset_class="us_equity", position_intent="buy_to_open")
         return [parent]
 
@@ -113,6 +114,7 @@ def test_open_orders_flattens_protective_bracket_legs():
     orders = broker.get_open_orders()
     assert len(orders) == 2
     assert all(order["side"] == "sell" for order in orders)
+    assert next(order for order in orders if order["order_type"] == "stop")["stop_price"] == 11.4
     assert client.order_filter.status == module.QueryOrderStatus.ALL
     assert client.order_filter.nested is True
     assert client.order_filter.limit == 500
@@ -126,6 +128,9 @@ def test_order_history_flattens_bracket_legs_for_realized_pnl():
     assert len(sell_orders) == 2
     assert all(order["parent_order_id"] == "parent" for order in sell_orders)
     assert all(order["parent_client_order_id"] == "qtb-parent-cid" for order in sell_orders)
+    assert next(order for order in orders if order["order_id"] == "parent")["filled_at"] == (
+        "2026-09-14T14:00:10+00:00"
+    )
 
 
 def test_live_broker_returns_broad_active_stock_universe_without_etfs():

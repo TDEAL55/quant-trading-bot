@@ -26,7 +26,15 @@ from stock_exit_policy import evaluate_stock_exit
 from strategies.paper_strategy_plugins import evaluate_all_strategies
 
 
-FINAL_ORDER_STATUSES = {"filled", "canceled", "cancelled", "expired", "rejected", "done_for_day"}
+FINAL_ORDER_STATUSES = {
+    "filled",
+    "canceled",
+    "cancelled",
+    "expired",
+    "rejected",
+    "done_for_day",
+    "replaced",
+}
 ACCEPTED_ORDER_STATUSES = {"accepted", "new", "pending", "pending_new", "partially_filled", "filled"}
 REGIME_STRATEGY_ROUTES = {
     "bull": ("stock_trend_pullback_v3", "stock_trend_ensemble_v2"),
@@ -44,6 +52,16 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _as_datetime(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _is_true(value: Any) -> bool:
@@ -273,6 +291,8 @@ def build_live_exit_shadow_reviews(
     *,
     observed_at: datetime,
     settings: LiveRiskSettings,
+    open_orders: list[Mapping[str, Any]] | None = None,
+    order_history: list[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Evaluate richer exits for visibility only; never submit or alter orders."""
     submissions = list(state.get("submissions") or [])
@@ -283,7 +303,12 @@ def build_live_exit_shadow_reviews(
         position = dict(raw_position or {})
         quantity = _as_float(position.get("quantity") or position.get("qty"), 0.0)
         side = "SHORT" if quantity < 0 else "LONG"
-        entry_price = _as_float(position.get("avg_entry_price") or position.get("average_entry_price"), 0.0)
+        entry_price = _as_float(
+            position.get("avg_entry_price")
+            or position.get("average_entry_price")
+            or position.get("avg_price"),
+            0.0,
+        )
         current_price = _as_float(position.get("current_price") or position.get("market_price"), 0.0)
         if not symbol or entry_price <= 0 or current_price <= 0:
             continue
@@ -291,12 +316,165 @@ def build_live_exit_shadow_reviews(
             (dict(row or {}) for row in reversed(submissions) if str(dict(row or {}).get("symbol") or "").upper() == symbol),
             {},
         )
-        path_prices = [
-            _as_float(dict(row or {}).get("high"), 0.0)
-            for row in list(price_paths.get(symbol) or [])
-            if isinstance(row, dict)
-        ]
+        recorded_quantity = abs(_as_float(submission.get("quantity"), 0.0))
+        recorded_reference_price = _as_float(submission.get("reference_price"), 0.0)
+        recorded_stop_price = _as_float(submission.get("stop_price"), 0.0)
+        submission_order_id = str(submission.get("order_id") or "").strip()
+        submission_client_order_id = str(submission.get("client_order_id") or "").strip()
+        submission_timestamp = _as_datetime(submission.get("recorded_at"))
+        entry_timestamp: datetime | None = None
+        entry_timestamp_source = "UNVERIFIED"
+        absolute_quantity = abs(quantity)
+        quantity_tolerance = max(1e-6, absolute_quantity * 1e-6)
+
+        position_attributed = True
+        attribution_validation_reason = "confirmed_bot_position_and_bracket"
+        if not submission:
+            position_attributed = False
+            attribution_validation_reason = "bot_submission_missing"
+        elif not submission_order_id or not submission_client_order_id:
+            position_attributed = False
+            attribution_validation_reason = "bot_submission_identity_missing"
+        elif submission_timestamp is None or submission_timestamp > observed_at:
+            position_attributed = False
+            attribution_validation_reason = "bot_submission_timestamp_invalid"
+        elif recorded_quantity <= 0 or abs(recorded_quantity - absolute_quantity) > quantity_tolerance:
+            position_attributed = False
+            attribution_validation_reason = "position_quantity_mismatch"
+        elif recorded_reference_price <= 0:
+            position_attributed = False
+            attribution_validation_reason = "bot_submission_reference_missing"
+
+        expected_entry_side = "sell" if side == "SHORT" else "buy"
+        if position_attributed:
+            filled_parents = []
+            for raw_order in list(order_history or []):
+                order = dict(raw_order or {})
+                if str(order.get("order_id") or "").strip() != submission_order_id:
+                    continue
+                if str(order.get("client_order_id") or "").strip() != submission_client_order_id:
+                    continue
+                if str(order.get("symbol") or "").strip().upper() != symbol:
+                    continue
+                if str(order.get("status") or "").strip().lower() != "filled":
+                    continue
+                if str(order.get("side") or "").strip().lower() != expected_entry_side:
+                    continue
+                filled_parents.append(order)
+
+            if not filled_parents:
+                position_attributed = False
+                attribution_validation_reason = "filled_parent_missing"
+            elif len(filled_parents) != 1:
+                position_attributed = False
+                attribution_validation_reason = "filled_parent_ambiguous"
+            else:
+                parent = filled_parents[0]
+                parent_quantity = _as_float(parent.get("filled_quantity"), 0.0)
+                parent_fill_price = _as_float(parent.get("average_fill_price"), 0.0)
+                parent_fill_timestamp = _as_datetime(parent.get("filled_at"))
+                fill_price_tolerance = max(0.01, parent_fill_price * 0.0001)
+                if (
+                    parent_quantity <= 0
+                    or abs(parent_quantity - absolute_quantity) > quantity_tolerance
+                    or abs(parent_quantity - recorded_quantity) > quantity_tolerance
+                ):
+                    position_attributed = False
+                    attribution_validation_reason = "filled_parent_quantity_mismatch"
+                elif (
+                    parent_fill_price <= 0
+                    or abs(parent_fill_price - entry_price) > fill_price_tolerance
+                ):
+                    position_attributed = False
+                    attribution_validation_reason = "position_entry_price_mismatch"
+                elif parent_fill_timestamp is None or parent_fill_timestamp > observed_at:
+                    position_attributed = False
+                    attribution_validation_reason = "filled_parent_timestamp_invalid"
+                else:
+                    entry_timestamp = parent_fill_timestamp
+                    entry_timestamp_source = "BROKER_FILLED_PARENT"
+
+        current_protective_stop = 0.0
+        protective_stop_source = "UNVERIFIED"
+        protective_stop_order_id = ""
+        bracket_verified = False
+        if position_attributed:
+            expected_side = "buy" if side == "SHORT" else "sell"
+            expected_intent = "buy_to_close" if side == "SHORT" else "sell_to_close"
+            stable_statuses = {"accepted", "new", "held", "pending_new", "partially_filled"}
+            exact_legs = []
+            for raw_order in list(open_orders or []):
+                order = dict(raw_order or {})
+                if str(order.get("status") or "").strip().lower() not in stable_statuses:
+                    continue
+                if str(order.get("symbol") or "").strip().upper() != symbol:
+                    continue
+                if str(order.get("parent_order_id") or "").strip() != submission_order_id:
+                    continue
+                if (
+                    str(order.get("parent_client_order_id") or "").strip()
+                    != submission_client_order_id
+                ):
+                    continue
+                if str(order.get("side") or "").strip().lower() != expected_side:
+                    continue
+                position_intent = str(order.get("position_intent") or "").strip().lower()
+                if position_intent and position_intent != expected_intent:
+                    continue
+                exact_legs.append(order)
+
+            stop_legs = [
+                order
+                for order in exact_legs
+                if str(order.get("order_type") or "").strip().lower() == "stop"
+                and _as_float(order.get("stop_price"), 0.0) > 0
+                and _as_float(order.get("filled_quantity"), 0.0) <= quantity_tolerance
+            ]
+            target_legs = [
+                order
+                for order in exact_legs
+                if str(order.get("order_type") or "").strip().lower() == "limit"
+                and _as_float(order.get("limit_price"), 0.0) > 0
+            ]
+
+            def remaining_quantity(order: Mapping[str, Any]) -> float:
+                return max(
+                    _as_float(order.get("requested_quantity"), 0.0)
+                    - _as_float(order.get("filled_quantity"), 0.0),
+                    0.0,
+                )
+
+            if not exact_legs or not stop_legs or not target_legs:
+                position_attributed = False
+                attribution_validation_reason = "broker_protection_missing"
+            elif len(stop_legs) != 1 or len(target_legs) != 1:
+                position_attributed = False
+                attribution_validation_reason = "broker_protection_ambiguous"
+            elif (
+                abs(remaining_quantity(stop_legs[0]) - absolute_quantity) > quantity_tolerance
+                or abs(remaining_quantity(target_legs[0]) - absolute_quantity) > quantity_tolerance
+            ):
+                position_attributed = False
+                attribution_validation_reason = "broker_protection_quantity_mismatch"
+            else:
+                bracket_verified = True
+                current_protective_stop = _as_float(stop_legs[0].get("stop_price"), 0.0)
+                protective_stop_source = "BROKER_OPEN_STOP_LEG"
+                protective_stop_order_id = str(stop_legs[0].get("order_id") or "")
+
+        path_rows = []
+        for raw_row in list(price_paths.get(symbol) or []):
+            if not isinstance(raw_row, dict):
+                continue
+            row = dict(raw_row)
+            observation_timestamp = _as_datetime(row.get("timestamp") or row.get("date"))
+            if entry_timestamp is None:
+                continue
+            if observation_timestamp is None or observation_timestamp < entry_timestamp:
+                continue
+            path_rows.append(row)
         if side == "SHORT":
+            path_prices = [_as_float(row.get("low"), 0.0) for row in path_rows]
             return_percent = ((entry_price - current_price) / entry_price) * 100.0
             positive_prices = [price for price in path_prices if price > 0]
             peak_return = max(
@@ -304,16 +482,17 @@ def build_live_exit_shadow_reviews(
                 + [((entry_price - price) / entry_price) * 100.0 for price in positive_prices]
             )
         else:
+            path_prices = [_as_float(row.get("high"), 0.0) for row in path_rows]
             return_percent = ((current_price - entry_price) / entry_price) * 100.0
             peak_return = max(
                 [return_percent]
                 + [((price - entry_price) / entry_price) * 100.0 for price in path_prices if price > 0]
             )
         context = {
-            "bot_entry_confirmed": bool(submission),
-            "bot_entry_attributed": bool(submission),
+            "bot_entry_confirmed": position_attributed,
+            "bot_entry_attributed": position_attributed,
             "attribution_checked": True,
-            "entry_timestamp": submission.get("recorded_at"),
+            "entry_timestamp": entry_timestamp.isoformat() if entry_timestamp is not None else None,
             "stop_price": submission.get("stop_price"),
             "target_price": submission.get("target_price"),
             "strategy": submission,
@@ -333,6 +512,38 @@ def build_live_exit_shadow_reviews(
             # explicitly quarantined as shadow-only below.
             trading_mode="PAPER",
         )
+        trailing_shadow_enabled = bool(settings.trailing_stop_ratchet_shadow_enabled)
+        proposed_protective_stop = _as_float(decision.get("trailing_stop_price"), 0.0)
+        trailing_activation_reached = bool(decision.get("trailing_activation_reached"))
+        would_trigger_exit_now = bool(decision.get("trailing_stop_triggered"))
+        would_tighten_protective_stop = False
+        trailing_action = "INELIGIBLE"
+        if not trailing_shadow_enabled:
+            trailing_action = "DISABLED"
+        elif not position_attributed:
+            trailing_action = (
+                "BROKER_PROTECTION_UNVERIFIED"
+                if attribution_validation_reason.startswith("broker_protection_")
+                else "POSITION_ATTRIBUTION_UNVERIFIED"
+            )
+        elif not bool(decision.get("trailing_eligible")):
+            trailing_action = "INELIGIBLE"
+        elif not trailing_activation_reached:
+            trailing_action = "NOT_ACTIVATED"
+        elif would_trigger_exit_now:
+            trailing_action = "EXIT_THRESHOLD_CROSSED"
+        elif current_protective_stop <= 0:
+            trailing_action = "MISSING_PROTECTIVE_STOP_REFERENCE"
+        elif side == "SHORT":
+            would_tighten_protective_stop = bool(
+                0 < current_price < proposed_protective_stop < current_protective_stop
+            )
+            trailing_action = "RATCHET_STOP_DOWN" if would_tighten_protective_stop else "NO_STOP_IMPROVEMENT"
+        else:
+            would_tighten_protective_stop = bool(
+                current_protective_stop < proposed_protective_stop < current_price
+            )
+            trailing_action = "RATCHET_STOP_UP" if would_tighten_protective_stop else "NO_STOP_IMPROVEMENT"
         reviews.append(
             {
                 "symbol": symbol,
@@ -340,11 +551,49 @@ def build_live_exit_shadow_reviews(
                 "actionable": False,
                 "orders_changed": False,
                 "return_percent": round(return_percent, 6),
+                "peak_return_percent": decision.get("peak_return_percent"),
+                "post_entry_price_observation_count": len(path_rows),
                 "recommendation": decision.get("recommendation"),
                 "exit_reason": decision.get("exit_reason"),
                 "profile_id": decision.get("profile_id"),
                 "strategy_id": decision.get("strategy_id"),
                 "attribution_reason": decision.get("attribution_reason"),
+                "attribution_validation_reason": attribution_validation_reason,
+                "bot_position_attributed": position_attributed,
+                "broker_bracket_verified": bracket_verified,
+                "entry_fill_timestamp": (
+                    entry_timestamp.isoformat() if entry_timestamp is not None else None
+                ),
+                "entry_timestamp_source": entry_timestamp_source,
+                "trailing_shadow_enabled": trailing_shadow_enabled,
+                "trailing_activation_percent": decision.get("trailing_activation_percent"),
+                "trailing_distance_percent": decision.get("trailing_distance_percent"),
+                "trailing_activation_reached": trailing_activation_reached,
+                "locked_profit_percent": decision.get("trailing_stop_return_percent"),
+                "recorded_entry_stop_price": (
+                    round(recorded_stop_price, 8) if recorded_stop_price > 0 else None
+                ),
+                "protective_stop_source": protective_stop_source,
+                "protective_stop_order_id": protective_stop_order_id or None,
+                "current_protective_stop_price": (
+                    round(current_protective_stop, 8) if current_protective_stop > 0 else None
+                ),
+                "proposed_protective_stop_price": (
+                    round(proposed_protective_stop, 8)
+                    if trailing_shadow_enabled and proposed_protective_stop > 0
+                    else None
+                ),
+                "would_tighten_protective_stop": (
+                    trailing_shadow_enabled and would_tighten_protective_stop
+                ),
+                "would_raise_protective_stop": (
+                    trailing_shadow_enabled and side == "LONG" and would_tighten_protective_stop
+                ),
+                "would_trigger_exit_now": (
+                    trailing_shadow_enabled and would_trigger_exit_now
+                ),
+                "trailing_action": trailing_action,
+                "validation_required_before_enforcement": True,
             }
         )
     return reviews
@@ -591,12 +840,24 @@ def run_controlled_live_cycle(
     _, unreconciled_orders, unprotected_positions = _protective_order_symbols(positions, open_orders)
     orders_submitted_today = store.orders_submitted_on(date_key)
     state = store.load()
+    history_limit = 500
+    order_history: list[dict[str, Any]] = []
+    history_error: Exception | None = None
+    try:
+        order_history = [
+            dict(item or {})
+            for item in list(live_broker.get_order_history(limit=history_limit) or [])
+        ]
+    except Exception as exc:
+        history_error = exc
     try:
         live_exit_shadow = build_live_exit_shadow_reviews(
             positions,
             state,
             observed_at=now,
             settings=policy,
+            open_orders=open_orders,
+            order_history=order_history,
         )
     except Exception as exc:
         # Shadow diagnostics must never interrupt broker protection or the
@@ -611,8 +872,8 @@ def run_controlled_live_cycle(
             }
         ]
     try:
-        history_limit = 500
-        order_history = [dict(item or {}) for item in list(live_broker.get_order_history(limit=history_limit) or [])]
+        if history_error is not None:
+            raise history_error
         strategy_metadata: dict[str, Any] = {}
         for row in list(state.get("submissions") or []):
             for key in ("order_id", "client_order_id"):
