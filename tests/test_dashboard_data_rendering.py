@@ -118,6 +118,13 @@ def test_live_dashboard_uses_live_read_only_account_and_service(tmp_path):
                     "near_misses": [{"symbol": "F", "reason": "position_size_below_one_share"}],
                 },
                 "live_exit_shadow": [{"symbol": "ECO", "mode": "SHADOW_ONLY"}],
+                "shadow_exit_trial_summary": {
+                    "status": "available",
+                    "mode": "SHADOW_ONLY",
+                    "trial_count": 4,
+                    "completed_count": 1,
+                    "orders_changed": False,
+                },
             }
         }),
         encoding="utf-8",
@@ -139,6 +146,8 @@ def test_live_dashboard_uses_live_read_only_account_and_service(tmp_path):
     assert payload["latest_scanner_run"]["symbol_count"] == 7819
     assert payload["scanner_rejections"][0]["reason"] == "position_size_below_one_share"
     assert payload["live_exit_shadow"][0]["mode"] == "SHADOW_ONLY"
+    assert payload["shadow_exit_trial_summary"]["trial_count"] == 4
+    assert payload["shadow_exit_trial_summary"]["orders_changed"] is False
 
 
 def test_live_broker_market_clock_overrides_stale_signal_state():

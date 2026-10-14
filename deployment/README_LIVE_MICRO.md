@@ -66,3 +66,15 @@ The live state file also records once-per-cycle price observations for MFE/MAE
 review. The dashboard reads optional backtest and paper JSON artifacts and
 compares them with live results on every refresh. Missing history is labeled
 unknown and never invented or used to justify more risk.
+
+When `LIVE_TRAILING_STOP_RATCHET_SHADOW_ENABLED=true`, the runner also writes
+counterfactual exit evidence to `SHADOW_EXIT_TRIAL_LEDGER_PATH`. The ledger is
+observation-only: it has no broker client and cannot submit, replace, cancel, or
+close orders. It records hypothetical ratchets and reconciles them with later
+verified broker fills so the dashboard can evaluate a meaningful completed
+sample before any separate enforcement change is considered.
+Only verified parent identities are admitted, gap-through-stop simulations use
+the worse of the stop and observed trigger price, and ledger writes are atomic
+and cross-process locked. The dashboard keeps non-comparable (censored) closes
+visible and never treats this monitoring checkpoint as authorization to change
+live exit behavior.

@@ -295,6 +295,7 @@ def fetch_live_dashboard_payload(
     last_scan_summary = dict(last_cycle.get("scan_summary") or {})
     candidate_funnel = dict(last_cycle.get("candidate_funnel") or {})
     live_exit_shadow = list(last_cycle.get("live_exit_shadow") or [])
+    shadow_exit_trial_summary = dict(last_cycle.get("shadow_exit_trial_summary") or {})
     scanner_rejections = list(candidate_funnel.get("near_misses") or [])
     scanner_rejections.extend(
         {
@@ -412,6 +413,7 @@ def fetch_live_dashboard_payload(
         "performance_comparison": performance_comparison,
         "live_readiness": dict(last_cycle.get("readiness") or {}),
         "live_exit_shadow": live_exit_shadow,
+        "shadow_exit_trial_summary": shadow_exit_trial_summary,
         "research": {"db_connected": False},
         "dashboard_data_profile": "live-micro-account",
     }

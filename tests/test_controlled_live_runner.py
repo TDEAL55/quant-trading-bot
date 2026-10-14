@@ -6,19 +6,21 @@ from datetime import datetime, timezone
 import controlled_live_runner as module
 from controlled_live_runner import LiveStateStore, run_controlled_live_cycle
 from live_risk_policy import LiveRiskSettings
+from shadow_exit_trial_ledger import ShadowExitTrialLedger
 
 
 class Broker:
-    def __init__(self, positions=None, orders=None):
+    def __init__(self, positions=None, orders=None, order_history=None):
         self.positions = positions or {}
         self.orders = orders or []
+        self.order_history = order_history or []
         self.submitted = []
     def get_account(self):
         return {"status":"ACTIVE", "equity":300, "last_equity":300, "day_pl":0, "cash":300,
             "multiplier":1, "trading_blocked":False, "account_blocked":False}
     def get_positions(self): return self.positions
     def get_open_orders(self): return self.orders
-    def get_order_history(self, limit=500): return []
+    def get_order_history(self, limit=500): return self.order_history[:limit]
     def get_market_clock(self): return {"is_open": True}
     def submit_bracket_entry(self, **kwargs):
         self.submitted.append(kwargs)
@@ -122,6 +124,71 @@ def filled_parent_order(
     }
 
 
+def verified_shadow_review(
+    *,
+    current_price=108,
+    proposed_stop=107,
+    peak_return_percent=10,
+    would_trigger=False,
+):
+    return {
+        "symbol": "NVDA",
+        "mode": "SHADOW_ONLY",
+        "actionable": False,
+        "orders_changed": False,
+        "parent_order_id": "parent-order",
+        "parent_client_order_id": "qtb-live-parent",
+        "filled_parent_verified": True,
+        "bot_position_attributed": True,
+        "broker_bracket_verified": True,
+        "entry_timestamp_source": "BROKER_FILLED_PARENT",
+        "position_side": "LONG",
+        "entry_price": 100,
+        "entry_quantity": 1,
+        "current_price": current_price,
+        "strategy_id": "stock_trend_pullback_v3",
+        "profile_id": "trend_pullback_atr_v3",
+        "return_percent": current_price - 100,
+        "peak_return_percent": peak_return_percent,
+        "trailing_activation_percent": 6,
+        "trailing_distance_percent": 3,
+        "trailing_activation_reached": True,
+        "proposed_protective_stop_price": proposed_stop,
+        "would_tighten_protective_stop": True,
+        "would_raise_protective_stop": True,
+        "would_trigger_exit_now": would_trigger,
+        "trailing_action": "EXIT_THRESHOLD_CROSSED" if would_trigger else "RATCHET_STOP_UP",
+    }
+
+
+def verified_shadow_cycle_dependencies(tmp_path):
+    store = LiveStateStore(tmp_path / "live.json")
+    store._save({
+        "orders_by_date": {},
+        "submissions": [recorded_submission(quantity=0.5)],
+        "price_paths": {
+            "NVDA": [
+                {"timestamp": "2026-09-30T15:00:00+00:00", "high": 110, "low": 104}
+            ]
+        },
+        "equity_history": [],
+    })
+    broker = Broker(
+        positions={
+            "NVDA": {
+                "qty": "0.5",
+                "avg_entry_price": "100",
+                "current_price": "108",
+                "market_value": "54",
+            }
+        },
+        orders=broker_bracket_legs(quantity=0.5),
+        order_history=[filled_parent_order(quantity=0.5)],
+    )
+    now = lambda: datetime(2026, 10, 1, 15, tzinfo=timezone.utc)
+    return store, broker, now
+
+
 def scanner(_records):
     return {"ranked_candidates": [{"symbol":"F", "latest_price":12}]}
 
@@ -209,10 +276,17 @@ def test_cycle_result_persists_funnel_and_shadow_review(tmp_path):
         "status": "no_trade",
         "candidate_funnel": {"rejection_counts": {"too_small": 1}},
         "live_exit_shadow": [{"symbol": "F", "mode": "SHADOW_ONLY"}],
+        "shadow_exit_trial_summary": {
+            "status": "available",
+            "trial_count": 1,
+            "actionable": False,
+            "orders_changed": False,
+        },
     })
     saved = store.load()["last_cycle"]
     assert saved["candidate_funnel"]["rejection_counts"] == {"too_small": 1}
     assert saved["live_exit_shadow"][0]["mode"] == "SHADOW_ONLY"
+    assert saved["shadow_exit_trial_summary"]["trial_count"] == 1
 
 
 def test_live_exit_shadow_reports_stop_ratchet_without_changing_orders():
@@ -553,6 +627,160 @@ def test_live_exit_shadow_fails_closed_when_broker_stop_leg_is_ambiguous():
     assert review["would_raise_protective_stop"] is False
     assert review["would_trigger_exit_now"] is False
     assert review["trailing_action"] == "BROKER_PROTECTION_UNVERIFIED"
+
+
+def test_verified_shadow_rows_update_injected_trial_ledger_and_expose_summary(tmp_path):
+    store, broker, now = verified_shadow_cycle_dependencies(tmp_path)
+    ledger = ShadowExitTrialLedger(tmp_path / "shadow-trials.json")
+
+    result = run_controlled_live_cycle(
+        environ={"TRADING_MODE": "LIVE", "LIVE_FULL_STOCK_UNIVERSE": "false"},
+        settings=armed(),
+        broker=broker,
+        scanner=scanner,
+        state_store=store,
+        shadow_trial_ledger=ledger,
+        now_provider=now,
+    )
+
+    summary = result["shadow_exit_trial_summary"]
+    assert summary["trial_count"] == 1
+    assert summary["open_trial_count"] == 1
+    assert summary["activated_count"] == 1
+    assert summary["triggered_count"] == 0
+    assert summary["verified_observation_count"] == 1
+    assert summary["unverified_observation_count"] == 0
+    assert summary["coverage_percent"] == 100
+    assert summary["by_strategy"]["stock_trend_pullback_v3"]["trial_count"] == 1
+    assert summary["actionable"] is False
+    assert summary["orders_changed"] is False
+
+    review = result["live_exit_shadow"][0]
+    assert review["actionable"] is False
+    assert review["orders_changed"] is False
+    trial = ledger.get_trial("parent-order", "qtb-live-parent")
+    assert trial is not None
+    assert trial["symbol"] == "NVDA"
+    assert trial["shadow_stop_price"] == 107
+    assert trial["reconciliation_status"] == "OPEN"
+
+
+def test_default_shadow_trial_ledger_path_is_used_by_live_cycle(tmp_path):
+    store, broker, now = verified_shadow_cycle_dependencies(tmp_path)
+    ledger_path = tmp_path / "configured-shadow-trials.json"
+
+    result = run_controlled_live_cycle(
+        environ={
+            "TRADING_MODE": "LIVE",
+            "LIVE_FULL_STOCK_UNIVERSE": "false",
+            "SHADOW_EXIT_TRIAL_LEDGER_PATH": str(ledger_path),
+        },
+        settings=armed(),
+        broker=broker,
+        scanner=scanner,
+        state_store=store,
+        now_provider=now,
+    )
+
+    assert ledger_path.exists()
+    assert result["shadow_exit_trial_summary"]["trial_count"] == 1
+    assert ShadowExitTrialLedger(ledger_path).summary()["verified_observation_count"] == 1
+
+
+def test_shadow_trial_ratchets_are_monotonic_and_first_trigger_is_frozen(tmp_path):
+    ledger = ShadowExitTrialLedger(tmp_path / "shadow-trials.json")
+    order_history = [filled_parent_order()]
+
+    def update(review, *, observed_at):
+        return ledger.update(
+            [review],
+            observed_at=observed_at,
+            positions={
+                "NVDA": {
+                    "qty": "1",
+                    "avg_entry_price": "100",
+                    "current_price": str(review["current_price"]),
+                }
+            },
+            order_history=order_history,
+        )
+
+    update(
+        verified_shadow_review(current_price=108, proposed_stop=107, peak_return_percent=10),
+        observed_at="2026-10-01T15:00:00+00:00",
+    )
+    update(
+        verified_shadow_review(current_price=111, proposed_stop=109, peak_return_percent=12),
+        observed_at="2026-10-01T15:01:00+00:00",
+    )
+    update(
+        verified_shadow_review(current_price=110.5, proposed_stop=108, peak_return_percent=11),
+        observed_at="2026-10-01T15:02:00+00:00",
+    )
+    assert ledger.get_trial("parent-order", "qtb-live-parent")["shadow_stop_price"] == 109
+
+    update(
+        verified_shadow_review(
+            current_price=108.5,
+            proposed_stop=109,
+            peak_return_percent=12,
+            would_trigger=True,
+        ),
+        observed_at="2026-10-01T15:03:00+00:00",
+    )
+    first_trigger = dict(
+        ledger.get_trial("parent-order", "qtb-live-parent")["first_hypothetical_trigger"]
+    )
+    assert first_trigger["triggered_at"] == "2026-10-01T15:03:00+00:00"
+    assert first_trigger["shadow_stop_price"] == 109
+    assert first_trigger["simulated_exit_price"] == 108.5
+    assert (
+        first_trigger["simulated_fill_model"]
+        == "CONSERVATIVE_STOP_OR_OBSERVED_TRIGGER_PRICE"
+    )
+
+    summary = update(
+        verified_shadow_review(
+            current_price=113,
+            proposed_stop=110,
+            peak_return_percent=13,
+            would_trigger=True,
+        ),
+        observed_at="2026-10-01T15:04:00+00:00",
+    )
+    frozen = ledger.get_trial("parent-order", "qtb-live-parent")["first_hypothetical_trigger"]
+    assert frozen == first_trigger
+    assert summary["trial_count"] == 1
+    assert summary["activated_count"] == 1
+    assert summary["triggered_count"] == 1
+    assert summary["verified_observation_count"] == 5
+    assert summary["coverage_percent"] == 100
+
+
+def test_shadow_trial_ledger_failure_does_not_block_live_order_submission(tmp_path, monkeypatch):
+    class FailingLedger:
+        def update(self, reviews, *, observed_at, positions, order_history):
+            raise RuntimeError("shadow ledger disk unavailable")
+
+    monkeypatch.setattr(module, "evaluate_all_strategies", signal)
+    broker = Broker()
+    result = run_controlled_live_cycle(
+        environ={"TRADING_MODE": "LIVE", "LIVE_FULL_STOCK_UNIVERSE": "false"},
+        settings=armed(),
+        broker=broker,
+        scanner=scanner,
+        state_store=LiveStateStore(tmp_path / "live.json"),
+        shadow_trial_ledger=FailingLedger(),
+        now_provider=lambda: datetime(2026, 10, 1, 15, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "submitted"
+    assert result["submitted"] is True
+    assert len(broker.submitted) == 1
+    assert result["shadow_exit_trial_summary"]["status"] == "unavailable"
+    assert result["shadow_exit_trial_summary"]["error_type"] == "RuntimeError"
+    assert result["shadow_exit_trial_summary"]["actionable"] is False
+    assert result["shadow_exit_trial_summary"]["orders_changed"] is False
 
 
 def test_full_universe_replaces_short_allowlist_for_scanning(tmp_path, monkeypatch):

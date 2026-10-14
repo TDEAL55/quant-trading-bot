@@ -1827,6 +1827,162 @@ def build_service_health_telemetry(payload, view):
     }
 
 
+def build_shadow_exit_trial_scorecard(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize the read-only shadow-exit evidence supplied by the live runner."""
+    raw_summary = payload.get("shadow_exit_trial_summary")
+    summary = dict(raw_summary) if isinstance(raw_summary, dict) else {}
+    raw_rows = [dict(row) for row in list(payload.get("live_exit_shadow") or []) if isinstance(row, dict)]
+
+    def _first_value(*keys: str, default=None):
+        for key in keys:
+            value = summary.get(key)
+            if value is not None and value != "":
+                return value
+        return default
+
+    summary_present = bool(summary)
+    status = _safe_text(summary.get("status"), "available" if summary_present else "unavailable").strip().lower()
+    unavailable_statuses = {"unavailable", "not_evaluated", "error", "failed"}
+    durable_evidence_available = summary_present and status not in unavailable_statuses
+
+    # The current-cycle live_exit_shadow rows are transient diagnostics. They
+    # must never be counted as durable trials when the ledger is unavailable.
+    trial_count = max(_safe_int(_first_value("trial_count", "total_trials", default=0), 0), 0)
+    open_trial_count = max(_safe_int(_first_value("open_trial_count", default=0), 0), 0)
+    activated_count = max(_safe_int(_first_value("activated_count", "activated_trials", default=0), 0), 0)
+    triggered_count = max(_safe_int(_first_value("triggered_count", "triggered_trials", default=0), 0), 0)
+    comparable_count = max(
+        _safe_int(_first_value("comparable_count", "completed_count", "completed_trials", default=0), 0),
+        0,
+    )
+    completed_count = max(
+        _safe_int(_first_value("completed_count", "completed_trials", default=comparable_count), comparable_count),
+        0,
+    )
+    actual_closed_count = max(
+        _safe_int(_first_value("actual_closed_count", default=comparable_count), comparable_count),
+        0,
+    )
+    censored_count_present = "censored_count" in summary
+    actual_closed_count_present = "actual_closed_count" in summary
+    censored_count = max(_safe_int(_first_value("censored_count", default=0), 0), 0)
+    censoring_accounted = actual_closed_count_present and censored_count_present
+    censoring_consistent = (
+        censoring_accounted and actual_closed_count == comparable_count + censored_count
+    )
+    censoring_rate_percent = (
+        (censored_count / actual_closed_count) * 100.0
+        if actual_closed_count > 0
+        else (0.0 if censoring_accounted else None)
+    )
+    verified_count = max(
+        _safe_int(_first_value("verified_observation_count", "verified_trials", default=0), 0),
+        0,
+    )
+    unverified_count = max(
+        _safe_int(_first_value("unverified_observation_count", "unverified_trials", default=0), 0),
+        0,
+    )
+    coverage_raw = _first_value("coverage_percent", "verified_coverage_percent")
+    coverage_percent = _as_float(coverage_raw, None)
+    if coverage_percent is None:
+        observation_count = verified_count + unverified_count
+        coverage_percent = (verified_count / observation_count) * 100.0 if observation_count else None
+    elif coverage_percent < 0:
+        coverage_percent = 0.0
+    elif coverage_percent > 100:
+        coverage_percent = 100.0
+
+    shadow_better_count = max(_safe_int(_first_value("shadow_better_count", default=0), 0), 0)
+    shadow_better_rate = _as_float(
+        _first_value("shadow_better_rate_percent", "shadow_better_rate"),
+        None,
+    )
+    raw_by_strategy = summary.get("by_strategy") or {}
+    if isinstance(raw_by_strategy, dict):
+        by_strategy = [
+            {**dict(row), "strategy_id": str(strategy_id)}
+            for strategy_id, row in sorted(raw_by_strategy.items(), key=lambda item: str(item[0]))
+            if isinstance(row, dict)
+        ]
+    else:
+        by_strategy = []
+        for raw_row in list(raw_by_strategy):
+            if not isinstance(raw_row, dict):
+                continue
+            row = dict(raw_row)
+            row["strategy_id"] = str(row.get("strategy_id") or row.get("strategy") or "UNSPECIFIED")
+            by_strategy.append(row)
+
+    minimum_comparable_trials = 30
+    minimum_verified_coverage_percent = 90.0
+    comparable_sample_sufficient = comparable_count >= minimum_comparable_trials
+    coverage_sufficient = coverage_percent is not None and coverage_percent >= minimum_verified_coverage_percent
+    # Censored closes are not decision-grade comparisons, but they do not make
+    # the comparable subset unusable when they are explicitly and consistently
+    # accounted for.  Keep the rate visible so the user can judge selection
+    # effects instead of creating a checkpoint that can never recover after one
+    # legitimately non-triggered close.
+    no_hidden_censoring = censoring_consistent
+    evidence_ready = (
+        durable_evidence_available
+        and comparable_sample_sufficient
+        and coverage_sufficient
+        and no_hidden_censoring
+    )
+
+    return {
+        "should_render": bool(summary_present or raw_rows),
+        "available": durable_evidence_available,
+        "status": status,
+        "error": _safe_text(summary.get("error") or summary.get("reason"), ""),
+        "trial_count": trial_count,
+        "open_trial_count": open_trial_count,
+        "activated_count": activated_count,
+        "triggered_count": triggered_count,
+        "completed_count": completed_count,
+        "actual_closed_count": actual_closed_count,
+        "comparable_count": comparable_count,
+        "censored_count": censored_count,
+        "censoring_rate_percent": censoring_rate_percent,
+        "censoring_accounted": censoring_accounted,
+        "censoring_consistent": censoring_consistent,
+        "verified_observation_count": verified_count,
+        "unverified_observation_count": unverified_count,
+        "coverage_percent": coverage_percent,
+        "shadow_better_count": shadow_better_count,
+        "shadow_better_rate_percent": shadow_better_rate,
+        "mean_delta_pnl": _as_float(_first_value("mean_delta_pnl", "mean_pnl_delta"), None),
+        "median_delta_pnl": _as_float(_first_value("median_delta_pnl", "median_pnl_delta"), None),
+        "avoided_drawdown": _as_float(_first_value("avoided_drawdown", "total_drawdown_avoided"), None),
+        "upside_forfeited": _as_float(_first_value("upside_forfeited", "total_upside_forfeited"), None),
+        "minimum_completed_trials": minimum_comparable_trials,
+        "minimum_comparable_trials": minimum_comparable_trials,
+        "minimum_verified_coverage_percent": minimum_verified_coverage_percent,
+        "comparable_sample_sufficient": comparable_sample_sufficient,
+        "coverage_sufficient": coverage_sufficient,
+        "no_hidden_censoring": no_hidden_censoring,
+        "sample_sufficient": evidence_ready,
+        "evidence_ready": evidence_ready,
+        "by_strategy": by_strategy,
+        "raw_rows": raw_rows,
+    }
+
+
+def build_public_shadow_exit_rows(rows: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Remove broker/order identifiers from public shadow diagnostics."""
+    private_fields = {
+        "parent_order_id",
+        "parent_client_order_id",
+        "protective_stop_order_id",
+    }
+    return [
+        {key: value for key, value in row.items() if key not in private_fields}
+        for row in list(rows or [])
+        if isinstance(row, dict)
+    ]
+
+
 def build_live_readiness_snapshot(payload, view):
     persisted = load_live_readiness_report()
     if persisted.get("gates"):
@@ -4897,6 +5053,148 @@ def render_architecture_page(payload, view):
     _metric_card(tcols2[3], "Recent Error Count", telemetry.get("recent_error_count"), "warning" if _safe_int(telemetry.get("recent_error_count"), 0) > 0 else "healthy")
 
 
+def render_shadow_exit_trial_scorecard(payload: dict[str, Any]) -> None:
+    scorecard = build_shadow_exit_trial_scorecard(payload)
+    if not scorecard.get("should_render"):
+        return
+
+    def _display_percent(value, default="—"):
+        number = _as_float(value, None)
+        return default if number is None else f"{number:.1f}%"
+
+    def _display_currency(value):
+        return format_currency(value, "—") if value is not None else "—"
+
+    st.markdown("#### Shadow Exit Trial Scorecard — SHADOW ONLY")
+    st.warning(
+        "SHADOW ONLY — this scorecard compares hypothetical exits with actual outcomes. "
+        "It is read-only, cannot place or modify orders, and does not change the live exit policy."
+    )
+
+    if not scorecard.get("available"):
+        status = str(scorecard.get("status") or "unavailable").replace("_", " ").upper()
+        detail = str(scorecard.get("error") or "").strip()
+        message = (
+            f"Durable shadow-exit ledger status: {status}. "
+            "No durable trial counts or outcome evidence are available from this cycle."
+        )
+        if detail:
+            message = f"{message} Ledger detail: {detail}"
+        if str(scorecard.get("status") or "").lower() in {"error", "failed", "unavailable"}:
+            st.error(message)
+        else:
+            st.warning(message)
+        if scorecard.get("raw_rows"):
+            st.caption(
+                "Current-cycle Exit Monitor rows are still shown separately below, but they are transient diagnostics "
+                "and are not counted as durable trials."
+            )
+        st.caption(
+            "This monitoring checkpoint is informational only and never authorizes live exit enforcement."
+        )
+        return
+
+    coverage = scorecard.get("coverage_percent")
+    mean_delta = scorecard.get("mean_delta_pnl")
+    better_rate = scorecard.get("shadow_better_rate_percent")
+    censoring_rate = scorecard.get("censoring_rate_percent")
+
+    count_columns = st.columns(7)
+    count_metrics = [
+        ("Trials", scorecard.get("trial_count", 0), "neutral"),
+        ("Open", scorecard.get("open_trial_count", 0), "neutral"),
+        ("Activated", scorecard.get("activated_count", 0), "neutral"),
+        ("Triggered", scorecard.get("triggered_count", 0), "warning"),
+        ("Actual Closed", scorecard.get("actual_closed_count", 0), "neutral"),
+        ("Comparable", scorecard.get("comparable_count", 0), "neutral"),
+        ("Censored", scorecard.get("censored_count", 0), "warning" if int(scorecard.get("censored_count") or 0) else "healthy"),
+    ]
+    for column, (label, value, style) in zip(count_columns, count_metrics):
+        _metric_card(column, label, value, style)
+
+    outcome_columns = st.columns(7)
+    verified_pair = (
+        f"{int(scorecard.get('verified_observation_count') or 0)} / "
+        f"{int(scorecard.get('unverified_observation_count') or 0)}"
+    )
+    better_value = f"{int(scorecard.get('shadow_better_count') or 0)} ({_display_percent(better_rate)})"
+    outcome_metrics = [
+        ("Verified / Unverified", verified_pair, "neutral"),
+        (
+            "Verified Coverage",
+            _display_percent(coverage),
+            "healthy" if coverage is not None and float(coverage) >= 90.0 else "warning",
+        ),
+        (
+            "Censoring Rate",
+            _display_percent(censoring_rate),
+            "healthy" if censoring_rate == 0.0 else "warning",
+        ),
+        ("Shadow Better", better_value, "healthy" if int(scorecard.get("shadow_better_count") or 0) > 0 else "neutral"),
+        ("Mean P/L Delta", _display_currency(mean_delta), "buy" if _as_float(mean_delta, 0.0) > 0 else "sell" if _as_float(mean_delta, 0.0) < 0 else "neutral"),
+        ("Avoided Drawdown", _display_currency(scorecard.get("avoided_drawdown")), "healthy"),
+        ("Upside Forfeited", _display_currency(scorecard.get("upside_forfeited")), "warning"),
+    ]
+    for column, (label, value, style) in zip(outcome_columns, outcome_metrics):
+        _metric_card(column, label, value, style)
+
+    comparable_count = int(scorecard.get("comparable_count") or 0)
+    minimum_count = int(scorecard.get("minimum_comparable_trials") or 30)
+    minimum_coverage = float(scorecard.get("minimum_verified_coverage_percent") or 90.0)
+    if not scorecard.get("evidence_ready"):
+        unmet = []
+        if not scorecard.get("comparable_sample_sufficient"):
+            unmet.append(f"{comparable_count}/{minimum_count} comparable completed trials")
+        if not scorecard.get("coverage_sufficient"):
+            unmet.append(f"{_display_percent(coverage)} verified coverage (minimum {minimum_coverage:.0f}%)")
+        if not scorecard.get("censoring_accounted"):
+            unmet.append("censoring totals are not explicitly accounted for")
+        elif not scorecard.get("censoring_consistent"):
+            unmet.append("actual-close, comparable, and censored totals are inconsistent")
+        elif not scorecard.get("no_hidden_censoring"):
+            unmet.append("censored closes are not fully accounted for")
+        st.warning(
+            "Evidence checkpoint not met: " + "; ".join(unmet) + "."
+        )
+    else:
+        st.caption(
+            f"Monitoring checkpoint reached ({comparable_count}/{minimum_count} comparable trials and "
+            f"{_display_percent(coverage)} verified coverage; censoring is explicitly accounted for)."
+        )
+    censored_count = int(scorecard.get("censored_count") or 0)
+    if censored_count:
+        st.caption(
+            f"{censored_count} censored closed trials are reported separately and are not included in "
+            "the hypothetical-versus-actual P/L comparison."
+        )
+    st.caption(
+        "Passing this monitoring checkpoint does not establish positive expectancy and never authorizes live exit enforcement; "
+        "any policy change still requires separate review and approval."
+    )
+
+    strategy_rows = []
+    for raw_row in list(scorecard.get("by_strategy") or []):
+        row = dict(raw_row or {})
+        strategy_coverage = row.get("coverage_percent", row.get("verified_coverage_percent"))
+        strategy_mean_delta = row.get("mean_delta_pnl", row.get("mean_pnl_delta"))
+        strategy_rows.append(
+            {
+                "Strategy": _safe_text(row.get("strategy_id") or row.get("strategy"), "Unattributed"),
+                "Trials": _safe_int(row.get("trial_count", row.get("total_trials")), 0),
+                "Actual Closed": _safe_int(row.get("actual_closed_count"), 0),
+                "Comparable": _safe_int(row.get("comparable_count", row.get("completed_count", row.get("completed_trials"))), 0),
+                "Censored": _safe_int(row.get("censored_count"), 0),
+                "Coverage": _display_percent(strategy_coverage),
+                "Shadow Better": _safe_int(row.get("shadow_better_count"), 0),
+                "Better Rate": _display_percent(row.get("shadow_better_rate_percent", row.get("shadow_better_rate"))),
+                "Mean P/L Delta": _display_currency(strategy_mean_delta),
+            }
+        )
+    if strategy_rows:
+        st.markdown("##### By Strategy — SHADOW ONLY")
+        st.dataframe(strategy_rows)
+
+
 def render_scanner_candidate_panel(payload):
     st.markdown("### Scanner / Candidate Panel")
     scanner = payload.get("latest_scanner_run") or {}
@@ -4958,13 +5256,15 @@ def render_scanner_candidate_panel(payload):
             f"selected {str(funnel.get('selected_symbol') or 'none')}"
         )
 
+    render_shadow_exit_trial_scorecard(payload)
+
     if exit_shadow:
         st.markdown("#### Exit Monitor (Shadow Only)")
         st.caption(
             "These recommendations are diagnostic only. Proposed trailing stops are measured, not sent; "
             "broker-hosted protective orders remain unchanged and in control."
         )
-        st.dataframe(exit_shadow)
+        st.dataframe(build_public_shadow_exit_rows(exit_shadow))
 
     if sector_rows:
         st.markdown("#### Sector Breakdown")

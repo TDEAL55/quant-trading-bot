@@ -21,6 +21,7 @@ from live_risk_policy import (
     stop_risk_position_size,
 )
 from scanner_runner import _symbol_records_from_list, run_scan
+from shadow_exit_trial_ledger import ShadowExitTrialLedger
 from stock_pnl_reconstruction import reconstruct_stock_realized_pnl
 from stock_exit_policy import evaluate_stock_exit
 from strategies.paper_strategy_plugins import evaluate_all_strategies
@@ -175,6 +176,7 @@ class LiveStateStore:
             "scan_summary": dict(payload.get("scan_summary") or {}),
             "candidate_funnel": dict(payload.get("candidate_funnel") or {}),
             "live_exit_shadow": list(payload.get("live_exit_shadow") or []),
+            "shadow_exit_trial_summary": dict(payload.get("shadow_exit_trial_summary") or {}),
         }
         self._save(state)
 
@@ -550,6 +552,15 @@ def build_live_exit_shadow_reviews(
                 "mode": "SHADOW_ONLY",
                 "actionable": False,
                 "orders_changed": False,
+                "parent_order_id": submission_order_id or None,
+                "parent_client_order_id": submission_client_order_id or None,
+                "filled_parent_verified": bool(
+                    position_attributed and entry_timestamp_source == "BROKER_FILLED_PARENT"
+                ),
+                "position_side": side,
+                "entry_price": round(entry_price, 8),
+                "entry_quantity": round(absolute_quantity, 10),
+                "current_price": round(current_price, 8),
                 "return_percent": round(return_percent, 6),
                 "peak_return_percent": decision.get("peak_return_percent"),
                 "post_entry_price_observation_count": len(path_rows),
@@ -800,6 +811,7 @@ def run_controlled_live_cycle(
     broker: Any | None = None,
     scanner: Callable[..., dict[str, Any]] = run_scan,
     state_store: LiveStateStore | None = None,
+    shadow_trial_ledger: Any | None = None,
     now_provider: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
     env = dict(os.environ if environ is None else environ)
@@ -809,6 +821,12 @@ def run_controlled_live_cycle(
     store = state_store or LiveStateStore(
         env.get("LIVE_STATE_PATH", "/var/lib/quant-bot/live-micro-state.json")
     )
+    shadow_summary_not_evaluated = {
+        "status": "not_evaluated",
+        "mode": "SHADOW_ONLY",
+        "actionable": False,
+        "orders_changed": False,
+    }
 
     preflight_reasons: list[str] = []
     if str(env.get("TRADING_MODE", "")).strip().upper() != "LIVE":
@@ -820,7 +838,12 @@ def run_controlled_live_cycle(
     if policy.kill_switch:
         preflight_reasons.append("live_kill_switch_active")
     if preflight_reasons:
-        return {"status": "blocked", "reasons": preflight_reasons, "submitted": False}
+        return {
+            "status": "blocked",
+            "reasons": preflight_reasons,
+            "shadow_exit_trial_summary": dict(shadow_summary_not_evaluated),
+            "submitted": False,
+        }
 
     live_broker = broker or AlpacaLiveBroker(mode="LIVE", environ=env)
     try:
@@ -829,6 +852,7 @@ def run_controlled_live_cycle(
         return {
             "status": "blocked",
             "reasons": [f"stock_universe_unavailable_{type(exc).__name__}"],
+            "shadow_exit_trial_summary": dict(shadow_summary_not_evaluated),
             "submitted": False,
         }
     account = dict(live_broker.get_account() or {})
@@ -871,6 +895,32 @@ def run_controlled_live_cycle(
                 "error_type": type(exc).__name__,
             }
         ]
+    try:
+        ledger = shadow_trial_ledger or ShadowExitTrialLedger.from_environment(env)
+        shadow_exit_trial_summary = dict(
+            ledger.update(
+                live_exit_shadow,
+                observed_at=now,
+                positions=positions,
+                order_history=order_history,
+            )
+            or {}
+        )
+        shadow_exit_trial_summary.setdefault("status", "available")
+        shadow_exit_trial_summary["mode"] = "SHADOW_ONLY"
+        shadow_exit_trial_summary["actionable"] = False
+        shadow_exit_trial_summary["orders_changed"] = False
+    except Exception as exc:
+        # The evidence ledger is deliberately non-authoritative. Persistence or
+        # reconciliation failures must never block protection, scanning, or an
+        # otherwise valid live order decision.
+        shadow_exit_trial_summary = {
+            "status": "unavailable",
+            "mode": "SHADOW_ONLY",
+            "actionable": False,
+            "orders_changed": False,
+            "error_type": type(exc).__name__,
+        }
     try:
         if history_error is not None:
             raise history_error
@@ -931,6 +981,7 @@ def run_controlled_live_cycle(
             "reasons": list(readiness.get("reasons") or []),
             "readiness": readiness,
             "live_exit_shadow": live_exit_shadow,
+            "shadow_exit_trial_summary": shadow_exit_trial_summary,
             "submitted": False,
         }
 
@@ -941,6 +992,7 @@ def run_controlled_live_cycle(
             "reasons": ["available_live_notional_below_one_dollar"],
             "readiness": readiness,
             "live_exit_shadow": live_exit_shadow,
+            "shadow_exit_trial_summary": shadow_exit_trial_summary,
             "submitted": False,
         }
 
@@ -966,6 +1018,7 @@ def run_controlled_live_cycle(
             "scan_summary": dict(scan_payload.get("summary") or {}),
             "candidate_funnel": candidate_funnel,
             "live_exit_shadow": live_exit_shadow,
+            "shadow_exit_trial_summary": shadow_exit_trial_summary,
             "submitted": False,
         }
 
@@ -993,6 +1046,7 @@ def run_controlled_live_cycle(
         "scan_summary": dict(scan_payload.get("summary") or {}),
         "candidate_funnel": candidate_funnel,
         "live_exit_shadow": live_exit_shadow,
+        "shadow_exit_trial_summary": shadow_exit_trial_summary,
         "order": order,
         "submitted": submitted,
     }

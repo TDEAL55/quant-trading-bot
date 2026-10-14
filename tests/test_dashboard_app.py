@@ -660,6 +660,269 @@ class _FakeStreamlit(_FakeContainer):
         return False
 
 
+def test_shadow_exit_trial_scorecard_normalizes_runner_summary_and_raw_fallback():
+    scorecard = dashboard_app.build_shadow_exit_trial_scorecard(
+        {
+            "shadow_exit_trial_summary": {
+                "trial_count": 12,
+                "open_trial_count": 4,
+                "activated_count": 7,
+                "triggered_count": 3,
+                "completed_count": 8,
+                "actual_closed_count": 10,
+                "comparable_count": 8,
+                "censored_count": 2,
+                "verified_observation_count": 10,
+                "unverified_observation_count": 2,
+                "coverage_percent": 83.33,
+                "shadow_better_count": 5,
+                "shadow_better_rate_percent": 62.5,
+                "mean_delta_pnl": 4.25,
+                "median_delta_pnl": 2.5,
+                "avoided_drawdown": 31.0,
+                "upside_forfeited": 7.5,
+                "by_strategy": [{"strategy_id": "stock_trend_pullback_v3", "trial_count": 12}],
+            },
+            "live_exit_shadow": [{"symbol": "NVDA", "mode": "SHADOW_ONLY"}],
+        }
+    )
+
+    assert scorecard["available"] is True
+    assert scorecard["trial_count"] == 12
+    assert scorecard["completed_count"] == 8
+    assert scorecard["actual_closed_count"] == 10
+    assert scorecard["comparable_count"] == 8
+    assert scorecard["censored_count"] == 2
+    assert scorecard["censoring_rate_percent"] == 20.0
+    assert scorecard["coverage_percent"] == 83.33
+    assert scorecard["mean_delta_pnl"] == 4.25
+    assert scorecard["sample_sufficient"] is False
+    assert scorecard["minimum_completed_trials"] == 30
+    assert scorecard["by_strategy"][0]["strategy_id"] == "stock_trend_pullback_v3"
+
+    raw_only = dashboard_app.build_shadow_exit_trial_scorecard(
+        {"live_exit_shadow": [{"symbol": "NVDA", "mode": "SHADOW_ONLY"}]}
+    )
+    assert raw_only["should_render"] is True
+    assert raw_only["available"] is False
+    assert raw_only["status"] == "unavailable"
+    assert raw_only["trial_count"] == 0
+    assert raw_only["open_trial_count"] == 0
+    assert raw_only["completed_count"] == 0
+
+
+def test_shadow_exit_trial_scorecard_normalizes_canonical_strategy_mapping():
+    scorecard = dashboard_app.build_shadow_exit_trial_scorecard(
+        {
+            "shadow_exit_trial_summary": {
+                "trial_count": 2,
+                "completed_count": 1,
+                "actual_closed_count": 2,
+                "comparable_count": 1,
+                "censored_count": 1,
+                "by_strategy": {
+                    "stock_trend_pullback_v3": {
+                        "trial_count": 2,
+                        "completed_count": 1,
+                        "actual_closed_count": 2,
+                        "comparable_count": 1,
+                        "censored_count": 1,
+                        "mean_delta_pnl": 1.25,
+                    }
+                },
+            }
+        }
+    )
+
+    assert scorecard["by_strategy"] == [
+        {
+            "strategy_id": "stock_trend_pullback_v3",
+            "trial_count": 2,
+            "completed_count": 1,
+            "actual_closed_count": 2,
+            "comparable_count": 1,
+            "censored_count": 1,
+            "mean_delta_pnl": 1.25,
+        }
+    ]
+
+
+def test_shadow_exit_trial_scorecard_requires_comparable_coverage_and_explicit_censoring():
+    base = {
+        "status": "available",
+        "trial_count": 35,
+        "actual_closed_count": 30,
+        "completed_count": 30,
+        "comparable_count": 30,
+        "censored_count": 0,
+        "verified_observation_count": 90,
+        "unverified_observation_count": 10,
+        "coverage_percent": 90.0,
+    }
+
+    ready = dashboard_app.build_shadow_exit_trial_scorecard({"shadow_exit_trial_summary": base})
+    assert ready["evidence_ready"] is True
+    assert ready["sample_sufficient"] is True
+    assert ready["censoring_rate_percent"] == 0.0
+
+    censored = dashboard_app.build_shadow_exit_trial_scorecard(
+        {"shadow_exit_trial_summary": {**base, "actual_closed_count": 31, "censored_count": 1}}
+    )
+    assert censored["evidence_ready"] is True
+    assert censored["no_hidden_censoring"] is True
+    assert censored["censoring_rate_percent"] == pytest.approx(100 / 31)
+
+    inconsistent = dashboard_app.build_shadow_exit_trial_scorecard(
+        {"shadow_exit_trial_summary": {**base, "actual_closed_count": 31, "censored_count": 0}}
+    )
+    assert inconsistent["evidence_ready"] is False
+    assert inconsistent["censoring_consistent"] is False
+    assert inconsistent["no_hidden_censoring"] is False
+
+    low_coverage = dashboard_app.build_shadow_exit_trial_scorecard(
+        {"shadow_exit_trial_summary": {**base, "coverage_percent": 89.9}}
+    )
+    assert low_coverage["evidence_ready"] is False
+    assert low_coverage["coverage_sufficient"] is False
+
+
+@pytest.mark.parametrize("status", ["unavailable", "not_evaluated"])
+def test_shadow_exit_trial_scorecard_unhealthy_status_never_uses_transient_rows(status):
+    scorecard = dashboard_app.build_shadow_exit_trial_scorecard(
+        {
+            "shadow_exit_trial_summary": {"status": status, "error": "ledger read failed"},
+            "live_exit_shadow": [{"symbol": "NVDA"}, {"symbol": "NWE"}],
+        }
+    )
+
+    assert scorecard["should_render"] is True
+    assert scorecard["available"] is False
+    assert scorecard["trial_count"] == 0
+    assert scorecard["open_trial_count"] == 0
+    assert scorecard["evidence_ready"] is False
+    assert scorecard["raw_rows"] == [{"symbol": "NVDA"}, {"symbol": "NWE"}]
+
+
+def test_scanner_panel_renders_shadow_only_scorecard_sample_warning_and_raw_rows(monkeypatch):
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+    raw_rows = [
+        {
+            "symbol": "NVDA",
+            "mode": "SHADOW_ONLY",
+            "trailing_action": "RATCHET_STOP_UP",
+            "orders_changed": False,
+        }
+    ]
+    dashboard_app.render_scanner_candidate_panel(
+        {
+            "latest_scanner_run": {},
+            "top_scanner_results": [],
+            "scanner_rejections": [],
+            "scanner_sector_distribution": [],
+            "live_exit_shadow": raw_rows,
+            "shadow_exit_trial_summary": {
+                "trial_count": 12,
+                "open_trial_count": 4,
+                "activated_count": 7,
+                "triggered_count": 3,
+                "completed_count": 8,
+                "actual_closed_count": 10,
+                "comparable_count": 8,
+                "censored_count": 2,
+                "verified_observation_count": 10,
+                "unverified_observation_count": 2,
+                "coverage_percent": 83.33,
+                "shadow_better_count": 5,
+                "shadow_better_rate_percent": 62.5,
+                "mean_delta_pnl": 4.25,
+                "median_delta_pnl": 2.5,
+                "avoided_drawdown": 31.0,
+                "upside_forfeited": 7.5,
+                "by_strategy": [
+                    {
+                        "strategy_id": "stock_trend_pullback_v3",
+                        "trial_count": 12,
+                        "completed_count": 8,
+                        "actual_closed_count": 10,
+                        "comparable_count": 8,
+                        "censored_count": 2,
+                        "coverage_percent": 83.33,
+                        "shadow_better_count": 5,
+                        "shadow_better_rate_percent": 62.5,
+                        "mean_delta_pnl": 4.25,
+                    }
+                ],
+            },
+        }
+    )
+
+    rendered_text = " ".join(str(call[1]) for call in fake_st._calls if call[0] in {"markdown", "warning", "caption"})
+    assert "Shadow Exit Trial Scorecard — SHADOW ONLY" in rendered_text
+    assert "read-only" in rendered_text
+    assert "Evidence checkpoint not met" in rendered_text
+    assert "8/30 comparable completed trials" in rendered_text
+    assert "2 censored closed trials" in rendered_text
+    assert "never authorizes live exit enforcement" in rendered_text
+    assert not any(call[0] == "button" for call in fake_st._calls)
+
+    dataframes = [call[1] for call in fake_st._calls if call[0] == "dataframe"]
+    assert any(rows and rows[0].get("Strategy") == "stock_trend_pullback_v3" for rows in dataframes)
+    assert raw_rows in dataframes
+
+
+def test_public_shadow_exit_rows_omit_internal_broker_identifiers():
+    rows = dashboard_app.build_public_shadow_exit_rows(
+        [
+            {
+                "symbol": "NVDA",
+                "recommendation": "HOLD",
+                "parent_order_id": "broker-parent-id",
+                "parent_client_order_id": "broker-client-id",
+                "protective_stop_order_id": "broker-stop-id",
+            }
+        ]
+    )
+
+    assert rows == [{"symbol": "NVDA", "recommendation": "HOLD"}]
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_fragment"),
+    [("unavailable", "Ledger detail: disk read failed"), ("not_evaluated", "NOT EVALUATED")],
+)
+def test_scanner_panel_warns_when_durable_shadow_ledger_is_unhealthy_and_keeps_raw_rows(
+    monkeypatch, status, expected_fragment
+):
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(dashboard_app, "st", fake_st)
+    raw_rows = [{"symbol": "NVDA", "mode": "SHADOW_ONLY"}]
+
+    dashboard_app.render_scanner_candidate_panel(
+        {
+            "latest_scanner_run": {},
+            "top_scanner_results": [],
+            "scanner_rejections": [],
+            "scanner_sector_distribution": [],
+            "live_exit_shadow": raw_rows,
+            "shadow_exit_trial_summary": {
+                "status": status,
+                "error": "disk read failed" if status == "unavailable" else "",
+            },
+        }
+    )
+
+    rendered_text = " ".join(
+        str(call[1]) for call in fake_st._calls if call[0] in {"markdown", "warning", "error", "caption"}
+    )
+    assert "No durable trial counts or outcome evidence" in rendered_text
+    assert expected_fragment in rendered_text
+    assert "transient diagnostics" in rendered_text
+    assert "never authorizes live exit enforcement" in rendered_text
+    dataframes = [call[1] for call in fake_st._calls if call[0] == "dataframe"]
+    assert raw_rows in dataframes
+
+
 class _FakeDatabase:
     def __init__(self, database_url=None):
         self.enabled = True
