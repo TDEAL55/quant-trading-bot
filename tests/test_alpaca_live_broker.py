@@ -22,6 +22,14 @@ class Client:
         return SimpleNamespace(id="oid", client_order_id="cid", symbol="F", side="buy", qty="2", filled_qty="0",
             order_type="market", time_in_force="gtc", submitted_at="now", updated_at="now", status="accepted",
             filled_avg_price=None, failed_at=None)
+    def replace_order_by_id(self, order_id, order_data):
+        self.replaced = (order_id, order_data)
+        return SimpleNamespace(
+            id="new-stop-id", client_order_id="stop-cid", symbol="F", side="sell", qty="2",
+            filled_qty="0", order_type="stop", time_in_force="gtc", submitted_at="now",
+            updated_at="now", status="new", filled_avg_price=None, failed_at=None,
+            stop_price=order_data["stop_price"], limit_price=None, position_intent="sell_to_close",
+        )
 
 
 class NestedOrderClient(Client):
@@ -90,6 +98,36 @@ def test_newly_funded_account_does_not_count_deposit_as_daily_profit():
     assert broker.get_account()["day_pl"] == 0.0
 
 
+def test_intraday_cash_adjustment_does_not_mask_trading_loss():
+    client = Client()
+    account = client.get_account()
+    account.equity = "1435.75"
+    account.last_equity = "1333.83"
+    account.intraday_adjustments = "105.70"
+    client.get_account = lambda: account
+
+    snapshot = AlpacaLiveBroker(trading_client=client, environ=env(), read_only=True).get_account()
+
+    assert snapshot["account_balance_change"] == pytest.approx(101.92)
+    assert snapshot["intraday_adjustments"] == pytest.approx(105.70)
+    assert snapshot["day_pl"] == pytest.approx(-3.78)
+
+
+def test_intraday_withdrawal_does_not_create_false_trading_loss():
+    client = Client()
+    account = client.get_account()
+    account.equity = "900"
+    account.last_equity = "1000"
+    account.intraday_adjustments = "-100"
+    client.get_account = lambda: account
+
+    snapshot = AlpacaLiveBroker(trading_client=client, environ=env(), read_only=True).get_account()
+
+    assert snapshot["account_balance_change"] == -100.0
+    assert snapshot["intraday_adjustments"] == -100.0
+    assert snapshot["day_pl"] == 0.0
+
+
 def test_bracket_order_is_whole_share_gtc(monkeypatch):
     monkeypatch.setattr(module, "MarketOrderRequest", lambda **kwargs: kwargs)
     monkeypatch.setattr(module, "TakeProfitRequest", lambda **kwargs: kwargs)
@@ -106,6 +144,33 @@ def test_bracket_order_is_whole_share_gtc(monkeypatch):
     assert client.submitted[0]["time_in_force"] == "gtc"
     with pytest.raises(RuntimeError):
         broker.get_tradable_crypto_assets()
+
+
+def test_live_broker_only_tightens_verified_stop_below_market(monkeypatch):
+    monkeypatch.setattr(module, "ReplaceOrderRequest", lambda **kwargs: kwargs)
+    client = Client()
+    broker = AlpacaLiveBroker(trading_client=client, environ=env())
+
+    result = broker.tighten_protective_stop(
+        symbol="F",
+        stop_order_id="old-stop-id",
+        current_stop_price=10,
+        proposed_stop_price=11,
+        current_market_price=12,
+    )
+
+    assert client.replaced == ("old-stop-id", {"stop_price": 11.0})
+    assert result["status"] == "new"
+    assert result["previous_stop_price"] == 10.0
+    assert result["requested_stop_price"] == 11.0
+    with pytest.raises(RuntimeError):
+        broker.tighten_protective_stop(
+            symbol="F",
+            stop_order_id="old-stop-id",
+            current_stop_price=10,
+            proposed_stop_price=9,
+            current_market_price=12,
+        )
 
 
 def test_open_orders_flattens_protective_bracket_legs():

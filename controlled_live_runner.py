@@ -157,6 +157,14 @@ class LiveStateStore:
                 "timestamp": observed_at.astimezone(timezone.utc).isoformat(),
                 "equity": _as_float(account.get("equity"), 0.0),
                 "cash": _as_float(account.get("cash"), 0.0),
+                "last_equity": _as_float(account.get("last_equity"), 0.0),
+                "account_balance_change": _as_float(
+                    account.get("account_balance_change"), 0.0
+                ),
+                "intraday_adjustments": _as_float(
+                    account.get("intraday_adjustments"), 0.0
+                ),
+                "adjusted_day_pl": _as_float(account.get("day_pl"), 0.0),
             }
         )
         state["equity_history"] = rows[-10000:]
@@ -176,6 +184,7 @@ class LiveStateStore:
             "scan_summary": dict(payload.get("scan_summary") or {}),
             "candidate_funnel": dict(payload.get("candidate_funnel") or {}),
             "live_exit_shadow": list(payload.get("live_exit_shadow") or []),
+            "live_exit_actions": list(payload.get("live_exit_actions") or []),
             "shadow_exit_trial_summary": dict(payload.get("shadow_exit_trial_summary") or {}),
         }
         self._save(state)
@@ -610,6 +619,99 @@ def build_live_exit_shadow_reviews(
     return reviews
 
 
+def apply_verified_live_stop_ratchets(
+    broker: Any,
+    reviews: list[Mapping[str, Any]],
+    *,
+    settings: LiveRiskSettings,
+    market_is_open: bool,
+) -> list[dict[str, Any]]:
+    """Tighten verified broker stops; never loosen, cancel, or directly close."""
+    if not settings.trailing_stop_ratchet_enabled:
+        return []
+    actions: list[dict[str, Any]] = []
+    if not market_is_open:
+        return [
+            {
+                "status": "deferred",
+                "reason": "regular_market_closed",
+                "orders_changed": False,
+            }
+        ]
+
+    for raw_review in list(reviews or []):
+        review = dict(raw_review or {})
+        if not (
+            review.get("bot_position_attributed") is True
+            and review.get("filled_parent_verified") is True
+            and review.get("broker_bracket_verified") is True
+            and str(review.get("protective_stop_source") or "").strip().upper()
+            == "BROKER_OPEN_STOP_LEG"
+            and str(review.get("position_side") or "").strip().upper() == "LONG"
+            and review.get("would_tighten_protective_stop") is True
+        ):
+            continue
+        symbol = str(review.get("symbol") or "").strip().upper()
+        stop_order_id = str(review.get("protective_stop_order_id") or "").strip()
+        current_stop = _as_float(review.get("current_protective_stop_price"), 0.0)
+        proposed_stop = _as_float(review.get("proposed_protective_stop_price"), 0.0)
+        current_price = _as_float(review.get("current_price"), 0.0)
+        if not symbol or not stop_order_id or not 0 < current_stop < proposed_stop < current_price:
+            actions.append(
+                {
+                    "symbol": symbol,
+                    "status": "skipped",
+                    "reason": "verified_stop_ratchet_inputs_invalid",
+                    "orders_changed": False,
+                }
+            )
+            continue
+        try:
+            broker_result = dict(
+                broker.tighten_protective_stop(
+                    symbol=symbol,
+                    stop_order_id=stop_order_id,
+                    current_stop_price=current_stop,
+                    proposed_stop_price=proposed_stop,
+                    current_market_price=current_price,
+                )
+                or {}
+            )
+            status = str(broker_result.get("status") or "unknown").strip().lower()
+            changed = status not in {
+                "",
+                "unknown",
+                "rejected",
+                "canceled",
+                "cancelled",
+                "expired",
+                "replacement_blocked_by_config",
+            }
+            actions.append(
+                {
+                    "symbol": symbol,
+                    "status": "ratcheted" if changed else "not_changed",
+                    "reason": "strategy_profit_trailing_stop",
+                    "previous_stop_price": round(current_stop, 8),
+                    "new_stop_price": round(proposed_stop, 8),
+                    "orders_changed": changed,
+                    "broker_order": broker_result,
+                }
+            )
+        except Exception as exc:
+            # The original broker stop remains in force if replacement fails.
+            actions.append(
+                {
+                    "symbol": symbol,
+                    "status": "failed_safe",
+                    "reason": "protective_stop_replacement_failed",
+                    "error_type": type(exc).__name__,
+                    "orders_changed": False,
+                }
+            )
+    return actions
+
+
 def select_live_candidate(
     scan_payload: Mapping[str, Any],
     *,
@@ -895,6 +997,12 @@ def run_controlled_live_cycle(
                 "error_type": type(exc).__name__,
             }
         ]
+    live_exit_actions = apply_verified_live_stop_ratchets(
+        live_broker,
+        live_exit_shadow,
+        settings=policy,
+        market_is_open=bool(clock.get("is_open")),
+    )
     try:
         ledger = shadow_trial_ledger or ShadowExitTrialLedger.from_environment(env)
         shadow_exit_trial_summary = dict(
@@ -981,6 +1089,7 @@ def run_controlled_live_cycle(
             "reasons": list(readiness.get("reasons") or []),
             "readiness": readiness,
             "live_exit_shadow": live_exit_shadow,
+            "live_exit_actions": live_exit_actions,
             "shadow_exit_trial_summary": shadow_exit_trial_summary,
             "submitted": False,
         }
@@ -992,6 +1101,7 @@ def run_controlled_live_cycle(
             "reasons": ["available_live_notional_below_one_dollar"],
             "readiness": readiness,
             "live_exit_shadow": live_exit_shadow,
+            "live_exit_actions": live_exit_actions,
             "shadow_exit_trial_summary": shadow_exit_trial_summary,
             "submitted": False,
         }
@@ -1018,6 +1128,7 @@ def run_controlled_live_cycle(
             "scan_summary": dict(scan_payload.get("summary") or {}),
             "candidate_funnel": candidate_funnel,
             "live_exit_shadow": live_exit_shadow,
+            "live_exit_actions": live_exit_actions,
             "shadow_exit_trial_summary": shadow_exit_trial_summary,
             "submitted": False,
         }
@@ -1046,6 +1157,7 @@ def run_controlled_live_cycle(
         "scan_summary": dict(scan_payload.get("summary") or {}),
         "candidate_funnel": candidate_funnel,
         "live_exit_shadow": live_exit_shadow,
+        "live_exit_actions": live_exit_actions,
         "shadow_exit_trial_summary": shadow_exit_trial_summary,
         "order": order,
         "submitted": submitted,

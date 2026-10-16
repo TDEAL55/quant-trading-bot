@@ -238,6 +238,8 @@ def _fetch_paper_account_snapshot(
         "portfolio_value": account.get("portfolio_value", account.get("equity", 0.0)),
         "equity": equity,
         "last_equity": last_equity,
+        "account_balance_change": float(account.get("account_balance_change") or equity - last_equity),
+        "intraday_adjustments": float(account.get("intraday_adjustments") or 0.0),
         "day_pl": float(account.get("day_pl") if account.get("day_pl") is not None else equity - last_equity),
         "cash": account.get("cash", 0.0),
         "buying_power": account.get("buying_power", 0.0),
@@ -295,6 +297,7 @@ def fetch_live_dashboard_payload(
     last_scan_summary = dict(last_cycle.get("scan_summary") or {})
     candidate_funnel = dict(last_cycle.get("candidate_funnel") or {})
     live_exit_shadow = list(last_cycle.get("live_exit_shadow") or [])
+    live_exit_actions = list(last_cycle.get("live_exit_actions") or [])
     shadow_exit_trial_summary = dict(last_cycle.get("shadow_exit_trial_summary") or {})
     scanner_rejections = list(candidate_funnel.get("near_misses") or [])
     scanner_rejections.extend(
@@ -413,6 +416,7 @@ def fetch_live_dashboard_payload(
         "performance_comparison": performance_comparison,
         "live_readiness": dict(last_cycle.get("readiness") or {}),
         "live_exit_shadow": live_exit_shadow,
+        "live_exit_actions": live_exit_actions,
         "shadow_exit_trial_summary": shadow_exit_trial_summary,
         "research": {"db_connected": False},
         "dashboard_data_profile": "live-micro-account",

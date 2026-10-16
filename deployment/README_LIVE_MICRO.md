@@ -72,7 +72,19 @@ counterfactual exit evidence to `SHADOW_EXIT_TRIAL_LEDGER_PATH`. The ledger is
 observation-only: it has no broker client and cannot submit, replace, cancel, or
 close orders. It records hypothetical ratchets and reconciles them with later
 verified broker fills so the dashboard can evaluate a meaningful completed
-sample before any separate enforcement change is considered.
+sample.
+
+`LIVE_TRAILING_STOP_RATCHET_ENABLED=false` is the safe default. When it is
+explicitly set to `true`, the runner may raise an existing, verified Alpaca
+bracket stop after that strategy's profit-trailing threshold has been reached.
+This is the pre-stop profit-protection plan: the original broker stop remains
+the emergency floor, while the raised stop can exit a profitable trade before
+it gives back the entire move. The runner cannot loosen a stop, remove bracket
+protection, act on an unattributed position, or make a stop executable above
+the current market price. A failed replacement leaves the original stop in
+force. Strategy invalidation and time-based exits remain observation-only until
+they have enough paper/shadow evidence for a separate, testable promotion.
+
 Only verified parent identities are admitted, gap-through-stop simulations use
 the worse of the stop and observed trigger price, and ledger writes are atomic
 and cross-process locked. The dashboard keeps non-comparable (censored) closes

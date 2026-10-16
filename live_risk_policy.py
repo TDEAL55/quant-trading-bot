@@ -64,6 +64,10 @@ class LiveRiskSettings:
     # Observation-only until the ratchet has been validated against paper and
     # live-shadow samples. This setting cannot submit or replace broker orders.
     trailing_stop_ratchet_shadow_enabled: bool = True
+    # Explicitly gated live protection.  When enabled, the runner may only
+    # tighten an already verified broker-held stop leg; it cannot loosen a stop,
+    # cancel the bracket, or open/close a position directly.
+    trailing_stop_ratchet_enabled: bool = False
     allowed_symbols: tuple[str, ...] = ()
 
     def validate(self) -> None:
@@ -107,6 +111,10 @@ class LiveRiskSettings:
             raise ValueError("LIVE_STOP_LOSS_PERCENT must be in (0, 5]")
         if not 5 <= self.take_profit_percent <= 15:
             raise ValueError("LIVE_TAKE_PROFIT_PERCENT must be in [5, 15]")
+        if self.trailing_stop_ratchet_enabled and not self.trailing_stop_ratchet_shadow_enabled:
+            raise ValueError(
+                "LIVE_TRAILING_STOP_RATCHET_ENABLED requires shadow telemetry to remain enabled"
+            )
 
 
 def settings_from_environment(environ: Mapping[str, str] | None = None) -> LiveRiskSettings:
@@ -149,6 +157,9 @@ def settings_from_environment(environ: Mapping[str, str] | None = None) -> LiveR
         take_profit_percent=_as_float(env.get("LIVE_TAKE_PROFIT_PERCENT"), 10.0),
         trailing_stop_ratchet_shadow_enabled=_is_true(
             env.get("LIVE_TRAILING_STOP_RATCHET_SHADOW_ENABLED", "true")
+        ),
+        trailing_stop_ratchet_enabled=_is_true(
+            env.get("LIVE_TRAILING_STOP_RATCHET_ENABLED", "false")
         ),
         allowed_symbols=symbols,
     )
@@ -225,6 +236,16 @@ def evaluate_live_readiness(
         "equity": round(equity, 2),
         "cash": round(cash, 2),
         "day_pl": round(day_pl, 2),
+        "account_balance_change": round(
+            _as_float(account.get("account_balance_change"), equity - last_equity), 2
+        ),
+        "intraday_adjustments": round(
+            _as_float(account.get("intraday_adjustments"), 0.0), 2
+        ),
+        "unrealized_pl": round(
+            sum(_as_float(row.get("unrealized_pl"), 0.0) for row in stock_positions.values()),
+            2,
+        ),
         "daily_loss_limit": round(daily_loss_limit, 2),
         "gross_exposure": round(gross_exposure, 2),
         "gross_exposure_percent": round(gross_percent, 4),
@@ -287,6 +308,9 @@ def evaluate_live_performance_controls(
         hour=0, minute=0, second=0, microsecond=0
     )
     week_start = week_start_local.astimezone(timezone.utc)
+    day_start = market_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
+        timezone.utc
+    )
     ordered: list[tuple[datetime, float]] = []
     for raw in closed_trades or []:
         row = dict(raw or {})
@@ -298,6 +322,16 @@ def evaluate_live_performance_controls(
 
     weekly_pnl = sum(pnl for at, pnl in ordered if week_start <= at <= now_utc)
     equity = _as_float(account.get("equity"), 0.0)
+    daily_realized_pnl = sum(pnl for at, pnl in ordered if day_start <= at <= now_utc)
+    daily_realized_loss_limit = min(
+        equity * settings.daily_loss_stop_percent / 100.0,
+        settings.daily_loss_stop_dollars,
+    )
+    if (
+        daily_realized_loss_limit > 0
+        and daily_realized_pnl <= -daily_realized_loss_limit
+    ):
+        reasons.append("daily_realized_loss_stop_active")
     approximate_week_start_equity = max(equity - weekly_pnl, equity, 0.0)
     weekly_loss_limit = approximate_week_start_equity * settings.weekly_drawdown_stop_percent / 100.0
     weekly_equities: list[float] = []
@@ -334,6 +368,9 @@ def evaluate_live_performance_controls(
         "approved": not reasons,
         "reasons": reasons,
         "weekly_realized_pnl": round(weekly_pnl, 6),
+        "daily_realized_pnl": round(daily_realized_pnl, 6),
+        "daily_realized_loss_limit": round(daily_realized_loss_limit, 6),
+        "day_start": day_start.isoformat(),
         "weekly_loss_limit": round(weekly_loss_limit, 6),
         "weekly_peak_equity": round(weekly_peak_equity, 6),
         "weekly_drawdown_dollars": round(weekly_drawdown_dollars, 6),

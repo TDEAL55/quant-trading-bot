@@ -41,11 +41,28 @@ def test_live_environment_uses_same_uncapped_entry_policy_as_paper():
     assert settings.entry_limits_enabled is False
     assert settings.entry_cash_allocation_percent == 25.0
     assert settings.trailing_stop_ratchet_shadow_enabled is True
+    assert settings.trailing_stop_ratchet_enabled is False
 
 
 def test_trailing_stop_ratchet_shadow_can_be_disabled_without_enabling_execution():
     settings = settings_from_environment({"LIVE_TRAILING_STOP_RATCHET_SHADOW_ENABLED": "false"})
     assert settings.trailing_stop_ratchet_shadow_enabled is False
+    assert settings.trailing_stop_ratchet_enabled is False
+
+
+def test_live_stop_ratchet_requires_explicit_opt_in():
+    settings = settings_from_environment({"LIVE_TRAILING_STOP_RATCHET_ENABLED": "true"})
+    assert settings.trailing_stop_ratchet_enabled is True
+
+
+def test_live_stop_ratchet_cannot_disable_its_evidence_stream():
+    with pytest.raises(ValueError):
+        settings_from_environment(
+            {
+                "LIVE_TRAILING_STOP_RATCHET_ENABLED": "true",
+                "LIVE_TRAILING_STOP_RATCHET_SHADOW_ENABLED": "false",
+            }
+        )
 
 
 def test_healthy_micro_account_is_approved_and_caps_entry_at_30():
@@ -177,6 +194,48 @@ def test_weekly_drawdown_and_consecutive_losses_block_new_entries():
     assert not result["approved"]
     assert "weekly_drawdown_stop_active" in result["reasons"]
     assert "consecutive_loss_cooldown_active" in result["reasons"]
+
+
+def test_realized_daily_loss_blocks_new_entries_even_if_account_delta_is_positive():
+    now = datetime(2026, 10, 15, 15, tzinfo=timezone.utc)
+    result = evaluate_live_performance_controls(
+        _account(equity=1435.75, day_pl=2.0),
+        [
+            {
+                "exit_timestamp": (now - timedelta(minutes=10)).isoformat(),
+                "realized_pnl": -15.45,
+            }
+        ],
+        settings=_armed(),
+        now=now,
+    )
+
+    assert not result["approved"]
+    assert "daily_realized_loss_stop_active" in result["reasons"]
+    assert result["daily_realized_pnl"] == -15.45
+    assert result["daily_realized_loss_limit"] == 3.0
+
+
+def test_readiness_reports_cash_flow_adjusted_pnl_components():
+    result = evaluate_live_readiness(
+        _account(
+            equity=1435.75,
+            last_equity=1333.83,
+            account_balance_change=101.92,
+            intraday_adjustments=105.70,
+            day_pl=-3.78,
+        ),
+        {"F": {"market_value": 100, "unrealized_pl": 1.25}},
+        [],
+        settings=_armed(),
+        market_is_open=True,
+        orders_submitted_today=0,
+    )
+
+    assert result["account_balance_change"] == 101.92
+    assert result["intraday_adjustments"] == 105.70
+    assert result["day_pl"] == -3.78
+    assert result["unrealized_pl"] == 1.25
 
 
 def test_missing_order_history_fails_closed():

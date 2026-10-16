@@ -7,7 +7,14 @@ from typing import Any, Mapping
 try:
     from alpaca.trading.client import TradingClient
     from alpaca.trading.enums import AssetClass, AssetStatus, OrderClass, OrderSide, QueryOrderStatus, TimeInForce
-    from alpaca.trading.requests import GetAssetsRequest, GetOrdersRequest, MarketOrderRequest, StopLossRequest, TakeProfitRequest
+    from alpaca.trading.requests import (
+        GetAssetsRequest,
+        GetOrdersRequest,
+        MarketOrderRequest,
+        ReplaceOrderRequest,
+        StopLossRequest,
+        TakeProfitRequest,
+    )
 except Exception:  # pragma: no cover - handled at runtime
     TradingClient = None
     AssetClass = None
@@ -19,6 +26,7 @@ except Exception:  # pragma: no cover - handled at runtime
     GetAssetsRequest = None
     GetOrdersRequest = None
     MarketOrderRequest = None
+    ReplaceOrderRequest = None
     StopLossRequest = None
     TakeProfitRequest = None
 
@@ -85,7 +93,12 @@ class AlpacaLiveBroker(AlpacaPaperBroker):
         account = self._fetch_account()
         equity = _to_float(getattr(account, "equity", 0.0), 0.0)
         last_equity = _to_float(getattr(account, "last_equity", equity), equity)
-        day_pl = equity - last_equity if last_equity > 0 else 0.0
+        # Alpaca's equity delta includes same-day cash adjustments.  Those are
+        # account flows, not trading performance, and must not mask a loss (or
+        # falsely trigger the loss stop after a withdrawal).
+        intraday_adjustments = _to_float(getattr(account, "intraday_adjustments", 0.0), 0.0)
+        account_balance_change = equity - last_equity if last_equity > 0 else 0.0
+        day_pl = account_balance_change - intraday_adjustments if last_equity > 0 else 0.0
         return {
             "status": _normalize_account_status(getattr(account, "status", "unknown")),
             "account_number": str(getattr(account, "account_number", "") or ""),
@@ -98,6 +111,8 @@ class AlpacaLiveBroker(AlpacaPaperBroker):
             "cash": _to_float(getattr(account, "cash", 0.0), 0.0),
             "equity": equity,
             "last_equity": last_equity,
+            "account_balance_change": account_balance_change,
+            "intraday_adjustments": intraday_adjustments,
             "day_pl": day_pl,
             "portfolio_value": _to_float(getattr(account, "portfolio_value", equity), equity),
             "multiplier": _to_float(getattr(account, "multiplier", 1.0), 1.0),
@@ -291,6 +306,60 @@ class AlpacaLiveBroker(AlpacaPaperBroker):
                 "stop_price": stop,
                 "target_price": target,
                 "protective_order_class": "bracket",
+                "broker_backend": self.backend,
+            }
+        )
+        return result
+
+    def tighten_protective_stop(
+        self,
+        *,
+        symbol: str,
+        stop_order_id: str,
+        current_stop_price: float,
+        proposed_stop_price: float,
+        current_market_price: float,
+    ) -> dict[str, Any]:
+        """Raise one verified long-position bracket stop without removing its OCO protection."""
+        normalized_symbol = str(symbol or "").strip().upper()
+        order_id = str(stop_order_id or "").strip()
+        current_stop = round(_to_float(current_stop_price, 0.0), 2)
+        proposed_stop = round(_to_float(proposed_stop_price, 0.0), 2)
+        market_price = _to_float(current_market_price, 0.0)
+        if not normalized_symbol or not order_id:
+            raise RuntimeError("symbol and stop_order_id are required")
+        if not 0 < current_stop < proposed_stop < market_price:
+            raise RuntimeError(
+                "protective stop replacement must strictly tighten below the current market price"
+            )
+        if not self.order_submission_enabled:
+            return {
+                "status": "replacement_blocked_by_config",
+                "symbol": normalized_symbol,
+                "order_id": order_id,
+                "current_stop_price": current_stop,
+                "proposed_stop_price": proposed_stop,
+                "broker_backend": self.backend,
+            }
+        if ReplaceOrderRequest is None:
+            raise RuntimeError("installed alpaca-py does not support order replacement")
+
+        request = ReplaceOrderRequest(stop_price=proposed_stop)
+        try:
+            replaced = self._trading_client.replace_order_by_id(order_id, request)
+            result = normalize_alpaca_order(replaced)
+        except Exception:
+            recovered = self.get_order_by_id(order_id)
+            if _to_float((recovered or {}).get("stop_price"), 0.0) + 1e-9 < proposed_stop:
+                raise
+            result = dict(recovered or {})
+            result["recovered_after_replace_error"] = True
+        result.update(
+            {
+                "symbol": normalized_symbol,
+                "replaced_order_id": order_id,
+                "previous_stop_price": current_stop,
+                "requested_stop_price": proposed_stop,
                 "broker_backend": self.backend,
             }
         )

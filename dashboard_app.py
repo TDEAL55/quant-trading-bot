@@ -1464,6 +1464,8 @@ def build_dashboard_view_model(payload):
         "dashboard_data_profile": _safe_text(payload.get("dashboard_data_profile"), "unspecified"),
         "short_positions": sum(1 for item in stock_position_rows if _as_float(item.get("quantity"), 0.0) < 0),
         "today_pl": daily_pl,
+        "account_balance_change": _as_float(latest_account.get("account_balance_change"), daily_pl),
+        "intraday_adjustments": _as_float(latest_account.get("intraday_adjustments"), 0.0),
         "total_pl": total_pl,
         "bot_net_pl": bot_net_pl,
         "bot_starting_value": bot_starting_value,
@@ -4227,11 +4229,18 @@ def render_command_center_page(payload, view):
 
     pnl_policy = dict(view.get("pnl_policy") or {})
     pnl_state = _safe_text(view.get("pnl_policy_status"), "ARMED")
+    cash_adjustment = _as_float(view.get("intraday_adjustments"), 0.0)
+    cash_adjustment_note = (
+        f" · cash adjustment {format_currency(cash_adjustment)} excluded"
+        if abs(cash_adjustment) >= 0.005
+        else ""
+    )
     st.markdown(
         f"<div class='dq-activity-line'><span>P&amp;L guard</span><strong>{pnl_state}</strong> · "
         f"today {format_currency(pnl_policy.get('day_pl'))} ({format_percent(_as_float(pnl_policy.get('day_return_percent'), 0.0) / 100.0)}) · "
         f"daily stop −{_safe_text(pnl_policy.get('daily_loss_stop_percent'), '2')}% · "
-        f"{int(pnl_policy.get('consecutive_losses') or 0)}/{int(pnl_policy.get('maximum_consecutive_losses') or 3)} consecutive losses</div>",
+        f"{int(pnl_policy.get('consecutive_losses') or 0)}/{int(pnl_policy.get('maximum_consecutive_losses') or 3)} consecutive losses"
+        f"{cash_adjustment_note}</div>",
         unsafe_allow_html=True,
     )
 
@@ -5203,6 +5212,7 @@ def render_scanner_candidate_panel(payload):
     sector_rows = payload.get("scanner_sector_distribution") or []
     funnel = dict(scanner.get("candidate_funnel") or {})
     exit_shadow = list(payload.get("live_exit_shadow") or [])
+    exit_actions = list(payload.get("live_exit_actions") or [])
 
     cols = st.columns(5)
     _metric_card(cols[0], "Last Scan", format_timestamp_eastern(scanner.get("completed_at")), "neutral")
@@ -5258,11 +5268,31 @@ def render_scanner_candidate_panel(payload):
 
     render_shadow_exit_trial_scorecard(payload)
 
+    if exit_actions:
+        st.markdown("#### Live Profit Protection Actions")
+        st.caption(
+            "Only verified Alpaca bracket stops may be tightened. The bot cannot loosen a stop "
+            "or remove the original broker protection."
+        )
+        st.dataframe(
+            [
+                {
+                    "Symbol": row.get("symbol") or "—",
+                    "Status": row.get("status") or "unknown",
+                    "Reason": friendly_action_reason(row.get("reason")),
+                    "Old Stop": row.get("previous_stop_price"),
+                    "New Stop": row.get("new_stop_price"),
+                    "Changed": bool(row.get("orders_changed")),
+                }
+                for row in exit_actions
+            ]
+        )
+
     if exit_shadow:
         st.markdown("#### Exit Monitor (Shadow Only)")
         st.caption(
-            "These recommendations are diagnostic only. Proposed trailing stops are measured, not sent; "
-            "broker-hosted protective orders remain unchanged and in control."
+            "These rows remain the diagnostic evidence stream. Any active stop change is shown separately "
+            "above; broker-hosted protective orders remain in control."
         )
         st.dataframe(build_public_shadow_exit_rows(exit_shadow))
 

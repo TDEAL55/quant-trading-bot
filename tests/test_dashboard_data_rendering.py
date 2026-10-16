@@ -118,6 +118,15 @@ def test_live_dashboard_uses_live_read_only_account_and_service(tmp_path):
                     "near_misses": [{"symbol": "F", "reason": "position_size_below_one_share"}],
                 },
                 "live_exit_shadow": [{"symbol": "ECO", "mode": "SHADOW_ONLY"}],
+                "live_exit_actions": [
+                    {
+                        "symbol": "ECO",
+                        "status": "ratcheted",
+                        "previous_stop_price": 70.0,
+                        "new_stop_price": 74.0,
+                        "orders_changed": True,
+                    }
+                ],
                 "shadow_exit_trial_summary": {
                     "status": "available",
                     "mode": "SHADOW_ONLY",
@@ -146,6 +155,7 @@ def test_live_dashboard_uses_live_read_only_account_and_service(tmp_path):
     assert payload["latest_scanner_run"]["symbol_count"] == 7819
     assert payload["scanner_rejections"][0]["reason"] == "position_size_below_one_share"
     assert payload["live_exit_shadow"][0]["mode"] == "SHADOW_ONLY"
+    assert payload["live_exit_actions"][0]["status"] == "ratcheted"
     assert payload["shadow_exit_trial_summary"]["trial_count"] == 4
     assert payload["shadow_exit_trial_summary"]["orders_changed"] is False
 
@@ -251,6 +261,37 @@ def test_broker_daily_pl_and_short_positions_render_clearly():
     assert summary["position_rows"][0]["Direction"] == "SHORT"
     assert summary["position_rows"][0]["Quantity"] == 18.0
     assert summary["short_position_count"] == 1
+
+
+def test_dashboard_exposes_cash_adjustment_separately_from_trading_pl():
+    payload = {
+        "latest_run": {},
+        "latest_success": {},
+        "latest_signal": {},
+        "latest_account": {
+            "account_status": "ACTIVE",
+            "portfolio_value": 1435.75,
+            "equity": 1435.75,
+            "last_equity": 1333.83,
+            "account_balance_change": 101.92,
+            "intraday_adjustments": 105.70,
+            "day_pl": -3.78,
+            "cash": 923.09,
+            "buying_power": 923.09,
+            "positions": [],
+        },
+        "recent_runs": [],
+        "recent_orders": [],
+        "portfolio_history": [],
+        "signal_history": [],
+        "order_count_by_day": [],
+    }
+
+    view = dashboard_app.build_dashboard_view_model(payload)
+
+    assert view["today_pl"] == -3.78
+    assert view["account_balance_change"] == 101.92
+    assert view["intraday_adjustments"] == 105.70
 
 
 def test_dashboard_queries_work_with_sample_sanitized_records(tmp_path):

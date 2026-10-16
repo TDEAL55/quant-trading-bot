@@ -15,6 +15,7 @@ class Broker:
         self.orders = orders or []
         self.order_history = order_history or []
         self.submitted = []
+        self.ratchets = []
     def get_account(self):
         return {"status":"ACTIVE", "equity":300, "last_equity":300, "day_pl":0, "cash":300,
             "multiplier":1, "trading_blocked":False, "account_blocked":False}
@@ -27,6 +28,13 @@ class Broker:
         return {"order_id":"oid", "client_order_id":kwargs["client_order_id"], "symbol":kwargs["symbol"],
             "requested_quantity":kwargs["quantity"], "reference_price":kwargs["reference_price"],
             "stop_price":kwargs["stop_price"], "target_price":kwargs["target_price"], "status":"accepted"}
+    def tighten_protective_stop(self, **kwargs):
+        self.ratchets.append(kwargs)
+        return {
+            "order_id": "replacement-stop",
+            "status": "new",
+            "stop_price": kwargs["proposed_stop_price"],
+        }
     def get_tradable_stock_assets(self, *, include_etfs=False):
         assert include_etfs is False
         return [
@@ -320,6 +328,68 @@ def test_live_exit_shadow_reports_stop_ratchet_without_changing_orders():
     assert review["trailing_action"] == "RATCHET_STOP_UP"
     assert review["actionable"] is False
     assert review["orders_changed"] is False
+
+
+def test_verified_live_stop_ratchet_is_active_only_after_explicit_opt_in():
+    broker = Broker()
+    review = verified_shadow_review()
+    review.update(
+        {
+            "protective_stop_source": "BROKER_OPEN_STOP_LEG",
+            "protective_stop_order_id": "parent-order-stop",
+            "current_protective_stop_price": 95,
+        }
+    )
+
+    disabled = module.apply_verified_live_stop_ratchets(
+        broker,
+        [review],
+        settings=armed(),
+        market_is_open=True,
+    )
+    assert disabled == []
+    assert broker.ratchets == []
+
+    actions = module.apply_verified_live_stop_ratchets(
+        broker,
+        [review],
+        settings=replace(armed(), trailing_stop_ratchet_enabled=True),
+        market_is_open=True,
+    )
+    assert actions[0]["status"] == "ratcheted"
+    assert actions[0]["orders_changed"] is True
+    assert broker.ratchets == [
+        {
+            "symbol": "NVDA",
+            "stop_order_id": "parent-order-stop",
+            "current_stop_price": 95.0,
+            "proposed_stop_price": 107.0,
+            "current_market_price": 108.0,
+        }
+    ]
+
+
+def test_live_stop_ratchet_never_runs_for_unverified_position():
+    broker = Broker()
+    review = verified_shadow_review()
+    review.update(
+        {
+            "bot_position_attributed": False,
+            "protective_stop_source": "UNVERIFIED",
+            "protective_stop_order_id": None,
+            "current_protective_stop_price": 95,
+        }
+    )
+
+    actions = module.apply_verified_live_stop_ratchets(
+        broker,
+        [review],
+        settings=replace(armed(), trailing_stop_ratchet_enabled=True),
+        market_is_open=True,
+    )
+
+    assert actions == []
+    assert broker.ratchets == []
 
 
 def test_live_exit_shadow_disabled_setting_suppresses_ratchet_recommendation():
