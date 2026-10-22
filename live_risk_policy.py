@@ -61,13 +61,13 @@ class LiveRiskSettings:
     minimum_confidence: float = 70.0
     stop_loss_percent: float = 5.0
     take_profit_percent: float = 10.0
-    # Observation-only until the ratchet has been validated against paper and
-    # live-shadow samples. This setting cannot submit or replace broker orders.
+    # Evidence remains on for every ratchet decision, including live actions.
+    # It cannot submit or replace broker orders by itself.
     trailing_stop_ratchet_shadow_enabled: bool = True
-    # Explicitly gated live protection.  When enabled, the runner may only
-    # tighten an already verified broker-held stop leg; it cannot loosen a stop,
-    # cancel the bracket, or open/close a position directly.
-    trailing_stop_ratchet_enabled: bool = False
+    # Verified protection is active by default. The runner may only tighten an
+    # already verified broker-held stop leg; it cannot loosen a stop, cancel the
+    # bracket, or open/close a position directly.
+    trailing_stop_ratchet_enabled: bool = True
     allowed_symbols: tuple[str, ...] = ()
 
     def validate(self) -> None:
@@ -113,7 +113,7 @@ class LiveRiskSettings:
             raise ValueError("LIVE_TAKE_PROFIT_PERCENT must be in [5, 15]")
         if self.trailing_stop_ratchet_enabled and not self.trailing_stop_ratchet_shadow_enabled:
             raise ValueError(
-                "LIVE_TRAILING_STOP_RATCHET_ENABLED requires shadow telemetry to remain enabled"
+                "Live trailing-stop ratchets require shadow telemetry to remain enabled"
             )
 
 
@@ -158,8 +158,11 @@ def settings_from_environment(environ: Mapping[str, str] | None = None) -> LiveR
         trailing_stop_ratchet_shadow_enabled=_is_true(
             env.get("LIVE_TRAILING_STOP_RATCHET_SHADOW_ENABLED", "true")
         ),
-        trailing_stop_ratchet_enabled=_is_true(
-            env.get("LIVE_TRAILING_STOP_RATCHET_ENABLED", "false")
+        # Use a negative emergency switch so a stale legacy
+        # LIVE_TRAILING_STOP_RATCHET_ENABLED=false cannot silently leave profitable
+        # positions on their original stops after this safety feature is deployed.
+        trailing_stop_ratchet_enabled=not _is_true(
+            env.get("LIVE_TRAILING_STOP_RATCHET_DISABLED", "false")
         ),
         allowed_symbols=symbols,
     )
