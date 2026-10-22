@@ -330,7 +330,7 @@ def test_live_exit_shadow_reports_stop_ratchet_without_changing_orders():
     assert review["orders_changed"] is False
 
 
-def test_verified_live_stop_ratchet_is_active_only_after_explicit_opt_in():
+def test_verified_live_stop_ratchet_respects_emergency_disable_and_acts_by_default():
     broker = Broker()
     review = verified_shadow_review()
     review.update(
@@ -344,7 +344,7 @@ def test_verified_live_stop_ratchet_is_active_only_after_explicit_opt_in():
     disabled = module.apply_verified_live_stop_ratchets(
         broker,
         [review],
-        settings=armed(),
+        settings=replace(armed(), trailing_stop_ratchet_enabled=False),
         market_is_open=True,
     )
     assert disabled == []
@@ -353,11 +353,49 @@ def test_verified_live_stop_ratchet_is_active_only_after_explicit_opt_in():
     actions = module.apply_verified_live_stop_ratchets(
         broker,
         [review],
-        settings=replace(armed(), trailing_stop_ratchet_enabled=True),
+        settings=armed(),
         market_is_open=True,
     )
     assert actions[0]["status"] == "ratcheted"
     assert actions[0]["orders_changed"] is True
+    assert broker.ratchets == [
+        {
+            "symbol": "NVDA",
+            "stop_order_id": "parent-order-stop",
+            "current_stop_price": 95.0,
+            "proposed_stop_price": 107.0,
+            "current_market_price": 108.0,
+        }
+    ]
+
+
+def test_live_stop_ratchet_runs_even_when_new_entries_are_blocked(tmp_path):
+    store, broker, now = verified_shadow_cycle_dependencies(tmp_path)
+    broker.get_account = lambda: {
+        "status": "ACTIVE",
+        "equity": 300,
+        "last_equity": 303,
+        "day_pl": -3,
+        "cash": 246,
+        "multiplier": 1,
+        "trading_blocked": False,
+        "account_blocked": False,
+    }
+
+    result = run_controlled_live_cycle(
+        environ={"TRADING_MODE": "LIVE", "LIVE_FULL_STOCK_UNIVERSE": "false"},
+        settings=armed(),
+        broker=broker,
+        scanner=scanner,
+        state_store=store,
+        shadow_trial_ledger=ShadowExitTrialLedger(tmp_path / "blocked-entry-shadow.json"),
+        now_provider=now,
+    )
+
+    assert result["status"] == "blocked"
+    assert "daily_loss_stop_active" in result["reasons"]
+    assert result["submitted"] is False
+    assert result["live_exit_actions"][0]["status"] == "ratcheted"
     assert broker.ratchets == [
         {
             "symbol": "NVDA",
