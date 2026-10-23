@@ -407,6 +407,40 @@ def test_live_stop_ratchet_runs_even_when_new_entries_are_blocked(tmp_path):
     ]
 
 
+def test_live_stop_ratchet_runs_before_stock_universe_failure(tmp_path):
+    store, broker, now = verified_shadow_cycle_dependencies(tmp_path)
+
+    def fail_universe(*, include_etfs=False):
+        del include_etfs
+        raise ValueError("sdk asset validation failed")
+
+    broker.get_tradable_stock_assets = fail_universe
+
+    result = run_controlled_live_cycle(
+        environ={"TRADING_MODE": "LIVE", "LIVE_FULL_STOCK_UNIVERSE": "true"},
+        settings=armed(),
+        broker=broker,
+        scanner=scanner,
+        state_store=store,
+        shadow_trial_ledger=ShadowExitTrialLedger(tmp_path / "universe-failure-shadow.json"),
+        now_provider=now,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["reasons"] == ["stock_universe_unavailable_ValueError"]
+    assert result["submitted"] is False
+    assert result["live_exit_actions"][0]["status"] == "ratcheted"
+    assert broker.ratchets == [
+        {
+            "symbol": "NVDA",
+            "stop_order_id": "parent-order-stop",
+            "current_stop_price": 95.0,
+            "proposed_stop_price": 107.0,
+            "current_market_price": 108.0,
+        }
+    ]
+
+
 def test_live_stop_ratchet_never_runs_for_unverified_position():
     broker = Broker()
     review = verified_shadow_review()

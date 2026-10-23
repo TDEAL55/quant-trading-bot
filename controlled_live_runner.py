@@ -948,15 +948,6 @@ def run_controlled_live_cycle(
         }
 
     live_broker = broker or AlpacaLiveBroker(mode="LIVE", environ=env)
-    try:
-        policy, records = _resolve_stock_universe(live_broker, policy, env)
-    except Exception as exc:
-        return {
-            "status": "blocked",
-            "reasons": [f"stock_universe_unavailable_{type(exc).__name__}"],
-            "shadow_exit_trial_summary": dict(shadow_summary_not_evaluated),
-            "submitted": False,
-        }
     account = dict(live_broker.get_account() or {})
     store.record_account_observation(account, observed_at=now)
     positions = dict(live_broker.get_positions() or {})
@@ -1067,6 +1058,23 @@ def run_controlled_live_cycle(
             history_complete=False,
         )
         performance_controls["history_error_type"] = type(exc).__name__
+
+    # Candidate discovery must never gate management of positions that already
+    # exist.  Resolve the stock universe only after account reconciliation and
+    # verified stop ratchets have run.  If the discovery endpoint is unhealthy,
+    # block new entries while preserving the exit-management evidence/actions.
+    try:
+        policy, records = _resolve_stock_universe(live_broker, policy, env)
+    except Exception as exc:
+        return {
+            "status": "blocked",
+            "reasons": [f"stock_universe_unavailable_{type(exc).__name__}"],
+            "live_exit_shadow": live_exit_shadow,
+            "live_exit_actions": live_exit_actions,
+            "shadow_exit_trial_summary": shadow_exit_trial_summary,
+            "performance_controls": performance_controls,
+            "submitted": False,
+        }
     readiness = evaluate_live_readiness(
         account,
         positions,

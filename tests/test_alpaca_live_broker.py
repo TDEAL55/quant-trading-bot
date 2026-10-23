@@ -66,6 +66,12 @@ class AssetClient(Client):
         ]
 
 
+class InvalidAssetModelClient(Client):
+    def get_all_assets(self, request=None):
+        del request
+        raise ValueError("unknown asset attribute")
+
+
 def env(**updates):
     payload = {"TRADING_MODE": "LIVE", "LIVE_TRADING_ENABLED": "true",
         "ALPACA_LIVE_ORDER_SUBMISSION_ENABLED": "true", "LIVE_TRADING_CONFIRMATION": "ENABLE_LIVE_MICRO_TRADING",
@@ -202,3 +208,40 @@ def test_live_broker_returns_broad_active_stock_universe_without_etfs():
     broker = AlpacaLiveBroker(trading_client=AssetClient(), environ=env(), read_only=True)
     assert [row["symbol"] for row in broker.get_tradable_stock_assets()] == ["F"]
     assert [row["symbol"] for row in broker.get_tradable_stock_assets(include_etfs=True)] == ["F", "SPY"]
+
+
+def test_live_broker_falls_back_to_raw_assets_when_sdk_validation_fails(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [
+                {
+                    "symbol": "PCOR",
+                    "name": "Procore Technologies",
+                    "asset_class": "us_equity",
+                    "status": "active",
+                    "exchange": "NYSE",
+                    "tradable": True,
+                    "attributes": ["future_sdk_value"],
+                }
+            ]
+
+    observed = {}
+
+    def fake_get(url, **kwargs):
+        observed.update({"url": url, **kwargs})
+        return Response()
+
+    monkeypatch.setattr(module.requests, "get", fake_get)
+    broker = AlpacaLiveBroker(
+        trading_client=InvalidAssetModelClient(),
+        environ=env(),
+        read_only=True,
+    )
+
+    assert [row["symbol"] for row in broker.get_tradable_stock_assets()] == ["PCOR"]
+    assert observed["url"] == "https://api.alpaca.markets/v2/assets"
+    assert observed["params"] == {"status": "active", "asset_class": "us_equity"}
+    assert observed["timeout"] == 20

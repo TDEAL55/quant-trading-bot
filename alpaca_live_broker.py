@@ -4,6 +4,8 @@ from decimal import Decimal
 import os
 from typing import Any, Mapping
 
+import requests
+
 try:
     from alpaca.trading.client import TradingClient
     from alpaca.trading.enums import AssetClass, AssetStatus, OrderClass, OrderSide, QueryOrderStatus, TimeInForce
@@ -133,22 +135,55 @@ class AlpacaLiveBroker(AlpacaPaperBroker):
             if AssetStatus is not None:
                 kwargs["status"] = AssetStatus.ACTIVE
             request = GetAssetsRequest(**kwargs)
-        rows = self._trading_client.get_all_assets(request) if request is not None else self._trading_client.get_all_assets()
+        try:
+            rows = (
+                self._trading_client.get_all_assets(request)
+                if request is not None
+                else self._trading_client.get_all_assets()
+            )
+        except Exception:
+            # Alpaca occasionally adds asset attributes before an installed
+            # alpaca-py release knows how to validate them.  That can make the
+            # SDK reject the entire otherwise-valid response.  Use the same
+            # authenticated endpoint as raw JSON so candidate discovery does
+            # not disappear because of a client-model version mismatch.
+            response = requests.get(
+                f"{self.base_url.rstrip('/')}/v2/assets",
+                headers={
+                    "APCA-API-KEY-ID": self.api_key,
+                    "APCA-API-SECRET-KEY": self.api_secret,
+                },
+                params={"status": "active", "asset_class": "us_equity"},
+                timeout=20,
+            )
+            response.raise_for_status()
+            rows = response.json()
+            if not isinstance(rows, list):
+                raise RuntimeError("alpaca_live_asset_response_invalid")
+
+        def asset_value(asset: Any, field: str, default: Any = "") -> Any:
+            if isinstance(asset, Mapping):
+                return asset.get(field, default)
+            return getattr(asset, field, default)
+
         records: list[dict[str, Any]] = []
         seen: set[str] = set()
         for asset in rows or []:
-            symbol = str(getattr(asset, "symbol", "") or "").strip().upper().replace(".", "-")
-            name = str(getattr(asset, "name", symbol) or symbol)
-            asset_class = str(getattr(getattr(asset, "asset_class", ""), "value", getattr(asset, "asset_class", ""))).upper()
-            status = str(getattr(getattr(asset, "status", ""), "value", getattr(asset, "status", ""))).upper()
-            exchange = str(getattr(getattr(asset, "exchange", ""), "value", getattr(asset, "exchange", ""))).upper()
+            raw_asset_class = asset_value(asset, "asset_class", "")
+            raw_status = asset_value(asset, "status", "")
+            raw_exchange = asset_value(asset, "exchange", "")
+            symbol = str(asset_value(asset, "symbol", "") or "").strip().upper().replace(".", "-")
+            name = str(asset_value(asset, "name", symbol) or symbol)
+            asset_class = str(getattr(raw_asset_class, "value", raw_asset_class)).upper()
+            status = str(getattr(raw_status, "value", raw_status)).upper()
+            exchange = str(getattr(raw_exchange, "value", raw_exchange)).upper()
             is_etf = symbol.endswith("ETF") or " ETF" in name.upper() or exchange in {"ARCA", "BATS"}
             if (
                 not symbol
                 or symbol in seen
                 or asset_class.replace("-", "_") != "US_EQUITY"
                 or status != "ACTIVE"
-                or not bool(getattr(asset, "tradable", False))
+                or not bool(asset_value(asset, "tradable", False))
                 or (is_etf and not include_etfs)
             ):
                 continue
