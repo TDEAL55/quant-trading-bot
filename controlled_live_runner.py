@@ -408,6 +408,7 @@ def build_live_exit_shadow_reviews(
         current_protective_stop = 0.0
         protective_stop_source = "UNVERIFIED"
         protective_stop_order_id = ""
+        protective_stop_submitted_at = ""
         bracket_verified = False
         if position_attributed:
             expected_side = "buy" if side == "SHORT" else "sell"
@@ -472,6 +473,11 @@ def build_live_exit_shadow_reviews(
                 current_protective_stop = _as_float(stop_legs[0].get("stop_price"), 0.0)
                 protective_stop_source = "BROKER_OPEN_STOP_LEG"
                 protective_stop_order_id = str(stop_legs[0].get("order_id") or "")
+                protective_stop_submitted_at = str(
+                    stop_legs[0].get("submitted_at")
+                    or stop_legs[0].get("updated_at")
+                    or ""
+                )
 
         path_rows = []
         for raw_row in list(price_paths.get(symbol) or []):
@@ -595,6 +601,7 @@ def build_live_exit_shadow_reviews(
                 ),
                 "protective_stop_source": protective_stop_source,
                 "protective_stop_order_id": protective_stop_order_id or None,
+                "protective_stop_submitted_at": protective_stop_submitted_at or None,
                 "current_protective_stop_price": (
                     round(current_protective_stop, 8) if current_protective_stop > 0 else None
                 ),
@@ -625,6 +632,7 @@ def apply_verified_live_stop_ratchets(
     *,
     settings: LiveRiskSettings,
     market_is_open: bool,
+    observed_at: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Tighten verified broker stops; never loosen, cancel, or directly close."""
     if not settings.trailing_stop_ratchet_enabled:
@@ -662,6 +670,50 @@ def apply_verified_live_stop_ratchets(
                     "symbol": symbol,
                     "status": "skipped",
                     "reason": "verified_stop_ratchet_inputs_invalid",
+                    "orders_changed": False,
+                }
+            )
+            continue
+        improvement = proposed_stop - current_stop
+        minimum_improvement = max(
+            float(settings.trailing_stop_ratchet_minimum_improvement_dollars),
+            current_stop
+            * float(settings.trailing_stop_ratchet_minimum_improvement_percent)
+            / 100.0,
+        )
+        if improvement + 1e-9 < minimum_improvement:
+            actions.append(
+                {
+                    "symbol": symbol,
+                    "status": "skipped",
+                    "reason": "stop_improvement_below_minimum",
+                    "previous_stop_price": round(current_stop, 8),
+                    "proposed_stop_price": round(proposed_stop, 8),
+                    "minimum_improvement": round(minimum_improvement, 8),
+                    "orders_changed": False,
+                }
+            )
+            continue
+        stop_submitted_at = _as_datetime(review.get("protective_stop_submitted_at"))
+        effective_observed_at = observed_at or datetime.now(timezone.utc)
+        if effective_observed_at.tzinfo is None:
+            effective_observed_at = effective_observed_at.replace(tzinfo=timezone.utc)
+        cooldown_seconds = float(settings.trailing_stop_ratchet_cooldown_minutes) * 60.0
+        urgent_improvement = improvement + 1e-9 >= current_stop * 0.01
+        if (
+            stop_submitted_at is not None
+            and stop_submitted_at <= effective_observed_at
+            and (effective_observed_at - stop_submitted_at).total_seconds() < cooldown_seconds
+            and not urgent_improvement
+        ):
+            actions.append(
+                {
+                    "symbol": symbol,
+                    "status": "deferred",
+                    "reason": "stop_ratchet_cooldown_active",
+                    "previous_stop_price": round(current_stop, 8),
+                    "proposed_stop_price": round(proposed_stop, 8),
+                    "cooldown_minutes": settings.trailing_stop_ratchet_cooldown_minutes,
                     "orders_changed": False,
                 }
             )
@@ -993,6 +1045,7 @@ def run_controlled_live_cycle(
         live_exit_shadow,
         settings=policy,
         market_is_open=bool(clock.get("is_open")),
+        observed_at=now,
     )
     try:
         ledger = shadow_trial_ledger or ShadowExitTrialLedger.from_environment(env)

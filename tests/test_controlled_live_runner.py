@@ -369,6 +369,73 @@ def test_verified_live_stop_ratchet_respects_emergency_disable_and_acts_by_defau
     ]
 
 
+def test_verified_live_stop_ratchet_skips_penny_level_order_churn():
+    broker = Broker()
+    review = verified_shadow_review()
+    review.update(
+        {
+            "protective_stop_source": "BROKER_OPEN_STOP_LEG",
+            "protective_stop_order_id": "parent-order-stop",
+            "current_protective_stop_price": 100.0,
+            "proposed_protective_stop_price": 100.10,
+            "current_price": 108.0,
+        }
+    )
+
+    actions = module.apply_verified_live_stop_ratchets(
+        broker,
+        [review],
+        settings=armed(),
+        market_is_open=True,
+        observed_at=datetime(2026, 10, 23, 15, 30, tzinfo=timezone.utc),
+    )
+
+    assert actions[0]["status"] == "skipped"
+    assert actions[0]["reason"] == "stop_improvement_below_minimum"
+    assert actions[0]["orders_changed"] is False
+    assert broker.ratchets == []
+
+
+def test_verified_live_stop_ratchet_cooldown_blocks_churn_but_not_urgent_improvement():
+    observed_at = datetime(2026, 10, 23, 15, 30, tzinfo=timezone.utc)
+    recent = verified_shadow_review()
+    recent.update(
+        {
+            "protective_stop_source": "BROKER_OPEN_STOP_LEG",
+            "protective_stop_order_id": "recent-stop",
+            "protective_stop_submitted_at": "2026-10-23T15:25:00+00:00",
+            "current_protective_stop_price": 100.0,
+            "proposed_protective_stop_price": 100.50,
+            "current_price": 108.0,
+        }
+    )
+    broker = Broker()
+
+    deferred = module.apply_verified_live_stop_ratchets(
+        broker,
+        [recent],
+        settings=armed(),
+        market_is_open=True,
+        observed_at=observed_at,
+    )
+
+    assert deferred[0]["status"] == "deferred"
+    assert deferred[0]["reason"] == "stop_ratchet_cooldown_active"
+    assert broker.ratchets == []
+
+    recent["proposed_protective_stop_price"] = 101.25
+    urgent = module.apply_verified_live_stop_ratchets(
+        broker,
+        [recent],
+        settings=armed(),
+        market_is_open=True,
+        observed_at=observed_at,
+    )
+
+    assert urgent[0]["status"] == "ratcheted"
+    assert broker.ratchets[0]["proposed_stop_price"] == 101.25
+
+
 def test_live_stop_ratchet_runs_even_when_new_entries_are_blocked(tmp_path):
     store, broker, now = verified_shadow_cycle_dependencies(tmp_path)
     broker.get_account = lambda: {

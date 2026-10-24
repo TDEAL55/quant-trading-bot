@@ -68,6 +68,13 @@ class LiveRiskSettings:
     # already verified broker-held stop leg; it cannot loosen a stop, cancel the
     # bracket, or open/close a position directly.
     trailing_stop_ratchet_enabled: bool = True
+    # Avoid replacing a broker stop for every one-minute price tick. A stop
+    # must improve by both a small meaningful amount and be outside the
+    # replacement cooldown. Improvements of at least 1% of the current stop
+    # bypass the cooldown so material protection is never delayed.
+    trailing_stop_ratchet_minimum_improvement_percent: float = 0.25
+    trailing_stop_ratchet_minimum_improvement_dollars: float = 0.10
+    trailing_stop_ratchet_cooldown_minutes: int = 15
     allowed_symbols: tuple[str, ...] = ()
 
     def validate(self) -> None:
@@ -115,6 +122,16 @@ class LiveRiskSettings:
             raise ValueError(
                 "Live trailing-stop ratchets require shadow telemetry to remain enabled"
             )
+        if not 0.05 <= self.trailing_stop_ratchet_minimum_improvement_percent <= 2.0:
+            raise ValueError(
+                "LIVE_TRAILING_STOP_MIN_IMPROVEMENT_PERCENT must be in [0.05, 2.0]"
+            )
+        if not 0.01 <= self.trailing_stop_ratchet_minimum_improvement_dollars <= 5.0:
+            raise ValueError(
+                "LIVE_TRAILING_STOP_MIN_IMPROVEMENT_DOLLARS must be in [0.01, 5.0]"
+            )
+        if not 1 <= self.trailing_stop_ratchet_cooldown_minutes <= 120:
+            raise ValueError("LIVE_TRAILING_STOP_RATCHET_COOLDOWN_MINUTES must be in [1, 120]")
 
 
 def settings_from_environment(environ: Mapping[str, str] | None = None) -> LiveRiskSettings:
@@ -163,6 +180,15 @@ def settings_from_environment(environ: Mapping[str, str] | None = None) -> LiveR
         # positions on their original stops after this safety feature is deployed.
         trailing_stop_ratchet_enabled=not _is_true(
             env.get("LIVE_TRAILING_STOP_RATCHET_DISABLED", "false")
+        ),
+        trailing_stop_ratchet_minimum_improvement_percent=_as_float(
+            env.get("LIVE_TRAILING_STOP_MIN_IMPROVEMENT_PERCENT"), 0.25
+        ),
+        trailing_stop_ratchet_minimum_improvement_dollars=_as_float(
+            env.get("LIVE_TRAILING_STOP_MIN_IMPROVEMENT_DOLLARS"), 0.10
+        ),
+        trailing_stop_ratchet_cooldown_minutes=_as_int(
+            env.get("LIVE_TRAILING_STOP_RATCHET_COOLDOWN_MINUTES"), 15
         ),
         allowed_symbols=symbols,
     )
