@@ -23,6 +23,11 @@ class Broker:
     def get_open_orders(self): return self.orders
     def get_order_history(self, limit=500): return self.order_history[:limit]
     def get_market_clock(self): return {"is_open": True}
+    def get_recent_news(self, symbols, *, lookback_hours=96, now=None):
+        del symbols, lookback_hours, now
+        return []
+    def get_latest_stock_prices(self, symbols):
+        return {str(symbol).upper(): 100.0 for symbol in symbols}
     def submit_bracket_entry(self, **kwargs):
         self.submitted.append(kwargs)
         return {"order_id":"oid", "client_order_id":kwargs["client_order_id"], "symbol":kwargs["symbol"],
@@ -234,12 +239,13 @@ def test_healthy_cycle_submits_once_then_daily_limit_blocks(tmp_path, monkeypatc
     second = run_controlled_live_cycle(environ=env, settings=armed(), broker=broker, scanner=scanner,
         state_store=store, now_provider=now)
     assert first["status"] == "submitted"
-    assert broker.submitted[0]["quantity"] == 2
+    assert broker.submitted[0]["quantity"] == 1
     saved = store.load()["submissions"][0]
     assert saved["market_regime"] == "bull"
     assert saved["confirmation_categories"] == ["trend", "volume"]
     assert saved["entry_reason"] == "trend and volume agree"
     assert saved["position_risk_dollars"] > 0
+    assert saved["overnight_gap_stress_percent"] == 10
     assert saved["rule_checks"]["regime_route"] is True
     assert second["status"] == "blocked"
     assert "daily_new_order_limit_reached" in second["reasons"]
@@ -284,6 +290,8 @@ def test_cycle_result_persists_funnel_and_shadow_review(tmp_path):
         "status": "no_trade",
         "candidate_funnel": {"rejection_counts": {"too_small": 1}},
         "live_exit_shadow": [{"symbol": "F", "mode": "SHADOW_ONLY"}],
+        "event_risk_reviews": [{"symbol": "PAGS", "mode": "ENTRY_BLOCK"}],
+        "premarket_gap_shadow": [{"symbol": "PAGS", "mode": "SHADOW_ONLY"}],
         "shadow_exit_trial_summary": {
             "status": "available",
             "trial_count": 1,
@@ -294,7 +302,79 @@ def test_cycle_result_persists_funnel_and_shadow_review(tmp_path):
     saved = store.load()["last_cycle"]
     assert saved["candidate_funnel"]["rejection_counts"] == {"too_small": 1}
     assert saved["live_exit_shadow"][0]["mode"] == "SHADOW_ONLY"
+    assert saved["event_risk_reviews"][0]["symbol"] == "PAGS"
+    assert saved["premarket_gap_shadow"][0]["mode"] == "SHADOW_ONLY"
     assert saved["shadow_exit_trial_summary"]["trial_count"] == 1
+
+
+def test_recent_binary_event_news_blocks_candidate_entry(tmp_path, monkeypatch):
+    monkeypatch.setattr(module, "evaluate_all_strategies", signal)
+    broker = Broker()
+    broker.get_recent_news = lambda symbols, **kwargs: [
+        {
+            "headline": "Ford faces major election policy shock",
+            "summary": "Election result changes the outlook.",
+            "symbols": ["F"],
+            "created_at": "2026-09-01T14:00:00Z",
+        }
+    ]
+
+    result = run_controlled_live_cycle(
+        environ={"TRADING_MODE": "LIVE", "LIVE_FULL_STOCK_UNIVERSE": "false"},
+        settings=armed(),
+        broker=broker,
+        scanner=scanner,
+        state_store=LiveStateStore(tmp_path / "live.json"),
+        now_provider=lambda: datetime(2026, 9, 1, 15, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "no_trade"
+    assert result["candidate_funnel"]["rejection_counts"] == {
+        "scheduled_or_binary_event_risk": 1
+    }
+    assert result["event_risk_reviews"][0]["symbol"] == "F"
+    assert broker.submitted == []
+
+
+def test_held_position_event_review_survives_closed_market_block(tmp_path):
+    broker = Broker(
+        positions={"PAGS": {"market_value": 75, "lastday_price": 11.20}},
+        orders=[
+            {
+                "symbol": "PAGS",
+                "side": "sell",
+                "order_type": "stop",
+                "stop_price": 10.38,
+                "status": "held",
+            }
+        ],
+    )
+    broker.get_market_clock = lambda: {"is_open": False}
+    broker.get_recent_news = lambda symbols, **kwargs: [
+        {
+            "headline": "Brazil election result moves shares",
+            "summary": "Policy repricing followed the vote.",
+            "symbols": ["PAGS"],
+            "created_at": "2026-10-26T12:00:00Z",
+        }
+    ]
+    broker.get_latest_stock_prices = lambda symbols: {"PAGS": 7.50}
+
+    result = run_controlled_live_cycle(
+        environ={"TRADING_MODE": "LIVE", "LIVE_FULL_STOCK_UNIVERSE": "false"},
+        settings=replace(armed(), allowed_symbols=("F", "PAGS")),
+        broker=broker,
+        scanner=scanner,
+        state_store=LiveStateStore(tmp_path / "live.json"),
+        now_provider=lambda: datetime(2026, 10, 26, 12, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "blocked"
+    assert "regular_market_closed" in result["reasons"]
+    review = next(row for row in result["event_risk_reviews"] if row.get("symbol") == "PAGS")
+    assert review["recommendation"] == "REVIEW_BEFORE_NEXT_CLOSE"
+    assert review["orders_changed"] is False
+    assert result["premarket_gap_shadow"][0]["below_protective_stop"] is True
 
 
 def test_live_exit_shadow_reports_stop_ratchet_without_changing_orders():

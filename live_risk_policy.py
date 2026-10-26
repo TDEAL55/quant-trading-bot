@@ -50,6 +50,20 @@ class LiveRiskSettings:
     daily_loss_stop_dollars: float = 3.0
     weekly_drawdown_stop_percent: float = 3.0
     maximum_risk_per_trade_percent: float = 0.5
+    # A broker stop cannot cap an overnight gap.  Size every new position
+    # against a conservative gap scenario as well as its normal stop distance.
+    overnight_gap_risk_enabled: bool = True
+    overnight_gap_stress_floor_percent: float = 10.0
+    overnight_gap_percentile: float = 95.0
+    overnight_gap_lookback_days: int = 90
+    overnight_gap_stress_multiplier: float = 1.25
+    # News/event evidence can block a new entry, but it never liquidates an
+    # existing live position without a separately validated execution rule.
+    event_risk_entry_block_enabled: bool = True
+    event_risk_news_lookback_hours: int = 96
+    event_risk_max_symbols: int = 25
+    premarket_gap_shadow_enabled: bool = True
+    premarket_gap_alert_percent: float = 5.0
     maximum_consecutive_losses: int = 3
     consecutive_loss_cooldown_minutes: int = 60
     maximum_correlated_exposure_percent: float = 20.0
@@ -100,6 +114,20 @@ class LiveRiskSettings:
             raise ValueError("LIVE_WEEKLY_DRAWDOWN_STOP_PERCENT must be in (0, 5]")
         if not 0 < self.maximum_risk_per_trade_percent <= 1:
             raise ValueError("LIVE_MAX_RISK_PER_TRADE_PERCENT must be in (0, 1]")
+        if not 5 <= self.overnight_gap_stress_floor_percent <= 30:
+            raise ValueError("LIVE_OVERNIGHT_GAP_STRESS_FLOOR_PERCENT must be in [5, 30]")
+        if not 90 <= self.overnight_gap_percentile <= 100:
+            raise ValueError("LIVE_OVERNIGHT_GAP_PERCENTILE must be in [90, 100]")
+        if not 20 <= self.overnight_gap_lookback_days <= 252:
+            raise ValueError("LIVE_OVERNIGHT_GAP_LOOKBACK_DAYS must be in [20, 252]")
+        if not 1 <= self.overnight_gap_stress_multiplier <= 3:
+            raise ValueError("LIVE_OVERNIGHT_GAP_STRESS_MULTIPLIER must be in [1, 3]")
+        if not 12 <= self.event_risk_news_lookback_hours <= 168:
+            raise ValueError("LIVE_EVENT_RISK_NEWS_LOOKBACK_HOURS must be in [12, 168]")
+        if not 1 <= self.event_risk_max_symbols <= 100:
+            raise ValueError("LIVE_EVENT_RISK_MAX_SYMBOLS must be in [1, 100]")
+        if not 2 <= self.premarket_gap_alert_percent <= 30:
+            raise ValueError("LIVE_PREMARKET_GAP_ALERT_PERCENT must be in [2, 30]")
         if not 1 <= self.maximum_consecutive_losses <= 5:
             raise ValueError("LIVE_MAX_CONSECUTIVE_LOSSES must be between 1 and 5")
         if not 15 <= self.consecutive_loss_cooldown_minutes <= 1440:
@@ -161,6 +189,34 @@ def settings_from_environment(environ: Mapping[str, str] | None = None) -> LiveR
         daily_loss_stop_dollars=_as_float(env.get("LIVE_DAILY_LOSS_STOP_DOLLARS"), 3.0),
         weekly_drawdown_stop_percent=_as_float(env.get("LIVE_WEEKLY_DRAWDOWN_STOP_PERCENT"), 3.0),
         maximum_risk_per_trade_percent=_as_float(env.get("LIVE_MAX_RISK_PER_TRADE_PERCENT"), 0.5),
+        overnight_gap_risk_enabled=_is_true(
+            env.get("LIVE_OVERNIGHT_GAP_RISK_ENABLED", "true")
+        ),
+        overnight_gap_stress_floor_percent=_as_float(
+            env.get("LIVE_OVERNIGHT_GAP_STRESS_FLOOR_PERCENT"), 10.0
+        ),
+        overnight_gap_percentile=_as_float(
+            env.get("LIVE_OVERNIGHT_GAP_PERCENTILE"), 95.0
+        ),
+        overnight_gap_lookback_days=_as_int(
+            env.get("LIVE_OVERNIGHT_GAP_LOOKBACK_DAYS"), 90
+        ),
+        overnight_gap_stress_multiplier=_as_float(
+            env.get("LIVE_OVERNIGHT_GAP_STRESS_MULTIPLIER"), 1.25
+        ),
+        event_risk_entry_block_enabled=_is_true(
+            env.get("LIVE_EVENT_RISK_ENTRY_BLOCK_ENABLED", "true")
+        ),
+        event_risk_news_lookback_hours=_as_int(
+            env.get("LIVE_EVENT_RISK_NEWS_LOOKBACK_HOURS"), 96
+        ),
+        event_risk_max_symbols=_as_int(env.get("LIVE_EVENT_RISK_MAX_SYMBOLS"), 25),
+        premarket_gap_shadow_enabled=_is_true(
+            env.get("LIVE_PREMARKET_GAP_SHADOW_ENABLED", "true")
+        ),
+        premarket_gap_alert_percent=_as_float(
+            env.get("LIVE_PREMARKET_GAP_ALERT_PERCENT"), 5.0
+        ),
         maximum_consecutive_losses=_as_int(env.get("LIVE_MAX_CONSECUTIVE_LOSSES"), 3),
         consecutive_loss_cooldown_minutes=_as_int(env.get("LIVE_CONSECUTIVE_LOSS_COOLDOWN_MINUTES"), 60),
         maximum_correlated_exposure_percent=_as_float(env.get("LIVE_MAX_CORRELATED_EXPOSURE_PERCENT"), 20.0),
@@ -417,15 +473,26 @@ def stop_risk_position_size(
     stop_price: float,
     maximum_notional: float,
     settings: LiveRiskSettings,
+    overnight_gap_percent: float = 0.0,
 ) -> dict[str, Any]:
-    """Size a whole-share entry from allowed dollar risk and stop distance."""
+    """Size a whole-share entry from stop risk and stressed overnight gap risk."""
     allowed_risk = max(float(equity), 0.0) * settings.maximum_risk_per_trade_percent / 100.0
-    risk_per_share = max(float(entry_price) - float(stop_price), 0.0)
+    stop_risk_per_share = max(float(entry_price) - float(stop_price), 0.0)
+    effective_gap_percent = (
+        max(float(overnight_gap_percent), settings.overnight_gap_stress_floor_percent)
+        if settings.overnight_gap_risk_enabled
+        else 0.0
+    )
+    overnight_gap_risk_per_share = max(float(entry_price), 0.0) * effective_gap_percent / 100.0
+    risk_per_share = max(stop_risk_per_share, overnight_gap_risk_per_share)
     if allowed_risk <= 0 or risk_per_share <= 0 or entry_price <= 0 or maximum_notional <= 0:
         return {
             "quantity": 0,
             "allowed_risk_dollars": round(allowed_risk, 6),
             "risk_per_share": round(risk_per_share, 6),
+            "stop_risk_per_share": round(stop_risk_per_share, 6),
+            "overnight_gap_risk_per_share": round(overnight_gap_risk_per_share, 6),
+            "overnight_gap_stress_percent": round(effective_gap_percent, 6),
             "planned_risk_dollars": 0.0,
         }
     risk_quantity = int(allowed_risk // risk_per_share)
@@ -435,5 +502,55 @@ def stop_risk_position_size(
         "quantity": quantity,
         "allowed_risk_dollars": round(allowed_risk, 6),
         "risk_per_share": round(risk_per_share, 6),
+        "stop_risk_per_share": round(stop_risk_per_share, 6),
+        "overnight_gap_risk_per_share": round(overnight_gap_risk_per_share, 6),
+        "overnight_gap_stress_percent": round(effective_gap_percent, 6),
         "planned_risk_dollars": round(quantity * risk_per_share, 6),
+    }
+
+
+def estimate_overnight_gap_stress_percent(
+    price_history: list[Mapping[str, Any]] | None,
+    *,
+    settings: LiveRiskSettings,
+) -> dict[str, Any]:
+    """Estimate adverse long-side opening gaps without pretending history is a guarantee."""
+    floor = float(settings.overnight_gap_stress_floor_percent)
+    if not settings.overnight_gap_risk_enabled:
+        return {
+            "stress_percent": 0.0,
+            "historical_percentile": None,
+            "sample_count": 0,
+            "source": "disabled",
+        }
+    rows = list(price_history or [])[-(settings.overnight_gap_lookback_days + 1) :]
+    adverse_gaps: list[float] = []
+    previous_close = 0.0
+    for raw in rows:
+        row = dict(raw or {})
+        opening = _as_float(row.get("open") or row.get("o"), 0.0)
+        close = _as_float(row.get("close") or row.get("c"), 0.0)
+        if previous_close > 0 and opening > 0:
+            adverse_gaps.append(max((previous_close - opening) / previous_close * 100.0, 0.0))
+        if close > 0:
+            previous_close = close
+    if not adverse_gaps:
+        return {
+            "stress_percent": round(floor, 6),
+            "historical_percentile": None,
+            "sample_count": 0,
+            "source": "conservative_floor_no_ohlc_history",
+        }
+    ordered = sorted(adverse_gaps)
+    rank = max(
+        min(int((settings.overnight_gap_percentile / 100.0) * len(ordered) + 0.999999), len(ordered)),
+        1,
+    )
+    historical = ordered[rank - 1]
+    stressed = max(floor, historical * settings.overnight_gap_stress_multiplier)
+    return {
+        "stress_percent": round(stressed, 6),
+        "historical_percentile": round(historical, 6),
+        "sample_count": len(adverse_gaps),
+        "source": "historical_adverse_opening_gaps_with_floor",
     }

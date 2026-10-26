@@ -266,6 +266,7 @@ class AlpacaPaperBroker:
                 "quantity": _to_float(getattr(position, "qty", 0.0), 0.0),
                 "avg_price": _to_float(getattr(position, "avg_entry_price", 0.0), 0.0),
                 "current_price": _to_float(getattr(position, "current_price", 0.0), 0.0),
+                "lastday_price": _to_float(getattr(position, "lastday_price", 0.0), 0.0),
                 "market_value": _to_float(getattr(position, "market_value", 0.0), 0.0),
                 "unrealized_pl": _to_float(getattr(position, "unrealized_pl", 0.0), 0.0),
                 "unrealized_plpc": _to_float(getattr(position, "unrealized_plpc", 0.0), 0.0),

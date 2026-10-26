@@ -14,11 +14,17 @@ from alpaca_live_broker import AlpacaLiveBroker
 from correlation_engine import CorrelationPolicy, assess_symbol_correlation
 from live_risk_policy import (
     LiveRiskSettings,
+    estimate_overnight_gap_stress_percent,
     evaluate_live_performance_controls,
     evaluate_live_readiness,
     live_entry_notional,
     settings_from_environment,
     stop_risk_position_size,
+)
+from live_event_risk import (
+    build_event_risk_reviews,
+    build_premarket_gap_shadow_reviews,
+    classify_news_event_risk,
 )
 from scanner_runner import _symbol_records_from_list, run_scan
 from shadow_exit_trial_ledger import ShadowExitTrialLedger
@@ -185,6 +191,8 @@ class LiveStateStore:
             "candidate_funnel": dict(payload.get("candidate_funnel") or {}),
             "live_exit_shadow": list(payload.get("live_exit_shadow") or []),
             "live_exit_actions": list(payload.get("live_exit_actions") or []),
+            "event_risk_reviews": list(payload.get("event_risk_reviews") or []),
+            "premarket_gap_shadow": list(payload.get("premarket_gap_shadow") or []),
             "shadow_exit_trial_summary": dict(payload.get("shadow_exit_trial_summary") or {}),
         }
         self._save(state)
@@ -234,6 +242,8 @@ class LiveStateStore:
         confirmations = dict(supporting.get("confirmations") or {})
         components = dict(supporting.get("components") or {})
         factor_values = dict(supporting.get("factor_values") or {})
+        risk_sizing = dict(strategy.get("risk_sizing") or {})
+        overnight_gap_model = dict(risk_sizing.get("overnight_gap_model") or {})
         confirmation_categories = sorted(str(name) for name, passed in confirmations.items() if passed)
         reference_price = _as_float(order.get("reference_price"), 0.0)
         stop_price = _as_float(order.get("stop_price"), 0.0)
@@ -266,6 +276,16 @@ class LiveStateStore:
                 "volume": components.get("volume") or factor_values.get("volume"),
                 "relative_strength": components.get("relative_strength") or factor_values.get("relative_strength"),
                 "position_risk_dollars": round(max(reference_price - stop_price, 0.0) * quantity, 6),
+                "risk_sized_dollars": _as_float(risk_sizing.get("planned_risk_dollars"), 0.0),
+                "overnight_gap_stress_percent": _as_float(
+                    risk_sizing.get("overnight_gap_stress_percent"), 0.0
+                ),
+                "overnight_gap_historical_percentile": overnight_gap_model.get(
+                    "historical_percentile"
+                ),
+                "overnight_gap_sample_count": int(
+                    overnight_gap_model.get("sample_count") or 0
+                ),
                 "rule_checks": dict(strategy.get("rule_checks") or {}),
             }
         )
@@ -771,6 +791,7 @@ def select_live_candidate(
     positions: Mapping[str, Mapping[str, Any]],
     maximum_notional: float,
     account_equity: float,
+    event_risk_by_symbol: Mapping[str, Mapping[str, Any]] | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     funnel = diagnostics if diagnostics is not None else {}
@@ -795,6 +816,10 @@ def select_live_candidate(
 
     held = {str(symbol).upper() for symbol in dict(positions or {})}
     allowed = set(settings.allowed_symbols)
+    event_risks = {
+        str(symbol or "").strip().upper(): dict(payload or {})
+        for symbol, payload in dict(event_risk_by_symbol or {}).items()
+    }
     for raw_candidate in list(scan_payload.get("ranked_candidates") or []):
         candidate = dict(raw_candidate or {})
         symbol = str(candidate.get("symbol") or "").upper()
@@ -808,6 +833,17 @@ def select_live_candidate(
             continue
         if symbol in held:
             reject(symbol, "position_already_held")
+            continue
+        if settings.event_risk_entry_block_enabled and bool(
+            dict(event_risks.get(symbol) or {}).get("entry_blocked")
+        ):
+            event_risk = dict(event_risks.get(symbol) or {})
+            reject(
+                symbol,
+                "scheduled_or_binary_event_risk",
+                event_categories=list(event_risk.get("categories") or []),
+                event_source=str(event_risk.get("source") or "unknown"),
+            )
             continue
         if price <= 0:
             reject(symbol, "invalid_latest_price", latest_price=price)
@@ -913,13 +949,19 @@ def select_live_candidate(
             0.0,
         )
         correlation_notional_cap = min(maximum_notional, correlated_room) if high_peers else maximum_notional
+        overnight_gap = estimate_overnight_gap_stress_percent(
+            list(dict(scan_payload.get("price_history_by_symbol") or {}).get(symbol) or []),
+            settings=settings,
+        )
         sizing = stop_risk_position_size(
             equity=account_equity,
             entry_price=price,
             stop_price=stop,
             maximum_notional=correlation_notional_cap,
             settings=settings,
+            overnight_gap_percent=_as_float(overnight_gap.get("stress_percent"), 0.0),
         )
+        sizing["overnight_gap_model"] = overnight_gap
         quantity = int(sizing.get("quantity") or 0)
         if quantity < 1:
             reject(
@@ -939,6 +981,7 @@ def select_live_candidate(
             ),
             "independent_confirmations": distinct_confirmation_count >= 2,
             "risk_limit": _as_float(sizing.get("planned_risk_dollars"), 0.0) <= _as_float(sizing.get("allowed_risk_dollars"), 0.0),
+            "overnight_gap_risk": _as_float(sizing.get("overnight_gap_stress_percent"), 0.0) > 0,
             "correlation_limit": not held or int(correlation.get("insufficient_pair_count") or 0) == 0,
             "protective_exit": settings.stop_loss_percent > 0 and settings.take_profit_percent > 0,
         }
@@ -1006,6 +1049,71 @@ def run_controlled_live_cycle(
     store.record_position_observations(positions, observed_at=now)
     open_orders = [dict(item or {}) for item in list(live_broker.get_open_orders() or [])]
     clock = dict(live_broker.get_market_clock() or {})
+    event_risk_by_symbol: dict[str, dict[str, Any]] = {}
+    event_risk_reviews: list[dict[str, Any]] = []
+    event_risk_feed_errors: list[dict[str, Any]] = []
+    if policy.event_risk_entry_block_enabled and positions:
+        try:
+            held_news = list(
+                live_broker.get_recent_news(
+                    sorted(str(symbol).upper() for symbol in positions)[
+                        : policy.event_risk_max_symbols
+                    ],
+                    lookback_hours=policy.event_risk_news_lookback_hours,
+                    now=now,
+                )
+                or []
+            )
+            event_risk_by_symbol.update(
+                classify_news_event_risk(
+                    held_news,
+                    now=now,
+                    lookback_hours=policy.event_risk_news_lookback_hours,
+                )
+            )
+            event_risk_reviews = build_event_risk_reviews(
+                event_risk_by_symbol,
+                held_symbols=positions,
+            )
+        except Exception as exc:
+            # Held-position event review is observation-only. Existing broker
+            # protection stays live even if the news feed is unavailable.
+            event_risk_feed_errors.append(
+                {
+                    "status": "unavailable",
+                    "source": "recent_broker_news_held_positions",
+                    "error_type": type(exc).__name__,
+                    "actionable": False,
+                    "orders_changed": False,
+                }
+            )
+            event_risk_reviews = list(event_risk_feed_errors)
+    premarket_gap_shadow: list[dict[str, Any]] = []
+    if policy.premarket_gap_shadow_enabled and not bool(clock.get("is_open")) and positions:
+        try:
+            latest_prices = dict(
+                live_broker.get_latest_stock_prices(sorted(str(symbol).upper() for symbol in positions))
+                or {}
+            )
+            premarket_gap_shadow = build_premarket_gap_shadow_reviews(
+                positions,
+                open_orders,
+                latest_prices,
+                observed_at=now,
+                alert_percent=policy.premarket_gap_alert_percent,
+            )
+        except Exception as exc:
+            # Observation failure must not touch broker protection or block
+            # normal live exits.  It remains visible for operations review.
+            premarket_gap_shadow = [
+                {
+                    "mode": "SHADOW_ONLY",
+                    "status": "unavailable",
+                    "error_type": type(exc).__name__,
+                    "actionable": False,
+                    "orders_changed": False,
+                }
+            ]
     _, unreconciled_orders, unprotected_positions = _protective_order_symbols(positions, open_orders)
     orders_submitted_today = store.orders_submitted_on(date_key)
     state = store.load()
@@ -1124,6 +1232,8 @@ def run_controlled_live_cycle(
             "reasons": [f"stock_universe_unavailable_{type(exc).__name__}"],
             "live_exit_shadow": live_exit_shadow,
             "live_exit_actions": live_exit_actions,
+            "event_risk_reviews": event_risk_reviews,
+            "premarket_gap_shadow": premarket_gap_shadow,
             "shadow_exit_trial_summary": shadow_exit_trial_summary,
             "performance_controls": performance_controls,
             "submitted": False,
@@ -1151,6 +1261,8 @@ def run_controlled_live_cycle(
             "readiness": readiness,
             "live_exit_shadow": live_exit_shadow,
             "live_exit_actions": live_exit_actions,
+            "event_risk_reviews": event_risk_reviews,
+            "premarket_gap_shadow": premarket_gap_shadow,
             "shadow_exit_trial_summary": shadow_exit_trial_summary,
             "submitted": False,
         }
@@ -1163,6 +1275,8 @@ def run_controlled_live_cycle(
             "readiness": readiness,
             "live_exit_shadow": live_exit_shadow,
             "live_exit_actions": live_exit_actions,
+            "event_risk_reviews": event_risk_reviews,
+            "premarket_gap_shadow": premarket_gap_shadow,
             "shadow_exit_trial_summary": shadow_exit_trial_summary,
             "submitted": False,
         }
@@ -1172,6 +1286,52 @@ def run_controlled_live_cycle(
         dict(scan_payload.get("price_history_by_symbol") or {}),
         symbols={str(symbol).upper() for symbol in positions},
     )
+    if policy.event_risk_entry_block_enabled:
+        ranked_symbols = [
+            str(dict(row or {}).get("symbol") or "").strip().upper()
+            for row in list(scan_payload.get("ranked_candidates") or [])
+        ]
+        news_symbols = [
+            symbol
+            for symbol in dict.fromkeys(ranked_symbols)
+            if symbol and symbol not in positions
+        ][: policy.event_risk_max_symbols]
+        try:
+            news_rows = list(
+                live_broker.get_recent_news(
+                    news_symbols,
+                    lookback_hours=policy.event_risk_news_lookback_hours,
+                    now=now,
+                )
+                or []
+            )
+            event_risk_by_symbol.update(
+                classify_news_event_risk(
+                    news_rows,
+                    now=now,
+                    lookback_hours=policy.event_risk_news_lookback_hours,
+                )
+            )
+            event_risk_reviews = build_event_risk_reviews(
+                event_risk_by_symbol,
+                held_symbols=positions,
+            ) + list(event_risk_feed_errors)
+        except Exception as exc:
+            # Event news is an additional entry safeguard.  An unavailable
+            # feed is reported, while the existing independent risk gates stay
+            # authoritative and current broker protection remains untouched.
+            event_risk_reviews = build_event_risk_reviews(
+                event_risk_by_symbol,
+                held_symbols=positions,
+            ) + list(event_risk_feed_errors) + [
+                {
+                    "status": "unavailable",
+                    "source": "recent_broker_news_candidates",
+                    "error_type": type(exc).__name__,
+                    "actionable": False,
+                    "orders_changed": False,
+                }
+            ]
     candidate_funnel: dict[str, Any] = {}
     candidate = select_live_candidate(
         scan_payload,
@@ -1179,6 +1339,7 @@ def run_controlled_live_cycle(
         positions=positions,
         maximum_notional=maximum_notional,
         account_equity=_as_float(account.get("equity"), 0.0),
+        event_risk_by_symbol=event_risk_by_symbol,
         diagnostics=candidate_funnel,
     )
     if candidate is None:
@@ -1190,6 +1351,8 @@ def run_controlled_live_cycle(
             "candidate_funnel": candidate_funnel,
             "live_exit_shadow": live_exit_shadow,
             "live_exit_actions": live_exit_actions,
+            "event_risk_reviews": event_risk_reviews,
+            "premarket_gap_shadow": premarket_gap_shadow,
             "shadow_exit_trial_summary": shadow_exit_trial_summary,
             "submitted": False,
         }
@@ -1219,6 +1382,8 @@ def run_controlled_live_cycle(
         "candidate_funnel": candidate_funnel,
         "live_exit_shadow": live_exit_shadow,
         "live_exit_actions": live_exit_actions,
+        "event_risk_reviews": event_risk_reviews,
+        "premarket_gap_shadow": premarket_gap_shadow,
         "shadow_exit_trial_summary": shadow_exit_trial_summary,
         "order": order,
         "submitted": submitted,

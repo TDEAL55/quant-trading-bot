@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import os
 from typing import Any, Mapping
@@ -201,6 +202,98 @@ class AlpacaLiveBroker(AlpacaPaperBroker):
                 }
             )
         return sorted(records, key=lambda item: str(item["symbol"]))
+
+    def get_recent_news(
+        self,
+        symbols: list[str],
+        *,
+        lookback_hours: int = 96,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch bounded recent headlines used only by the live entry-risk gate."""
+        normalized = list(
+            dict.fromkeys(
+                str(symbol or "").strip().upper()
+                for symbol in list(symbols or [])
+                if str(symbol or "").strip()
+            )
+        )
+        if not normalized:
+            return []
+        observed_at = now or datetime.now(timezone.utc)
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
+        observed_at = observed_at.astimezone(timezone.utc)
+        started_at = observed_at - timedelta(hours=max(int(lookback_hours), 1))
+        response = requests.get(
+            "https://data.alpaca.markets/v1beta1/news",
+            headers={
+                "APCA-API-KEY-ID": self.api_key,
+                "APCA-API-SECRET-KEY": self.api_secret,
+            },
+            params={
+                "symbols": ",".join(normalized),
+                "start": started_at.isoformat().replace("+00:00", "Z"),
+                "end": observed_at.isoformat().replace("+00:00", "Z"),
+                "sort": "desc",
+                "limit": 50,
+                "exclude_contentless": "true",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        rows = list(payload.get("news") or []) if isinstance(payload, Mapping) else []
+        return [
+            {
+                "headline": str(dict(row or {}).get("headline") or ""),
+                "summary": str(dict(row or {}).get("summary") or ""),
+                "symbols": [str(item or "").upper() for item in list(dict(row or {}).get("symbols") or [])],
+                "created_at": str(dict(row or {}).get("created_at") or ""),
+                "updated_at": str(dict(row or {}).get("updated_at") or ""),
+                "source": str(dict(row or {}).get("source") or ""),
+            }
+            for row in rows
+            if isinstance(row, Mapping)
+        ]
+
+    def get_latest_stock_prices(self, symbols: list[str]) -> dict[str, float]:
+        """Fetch latest prints for read-only premarket gap observation."""
+        normalized = list(
+            dict.fromkeys(
+                str(symbol or "").strip().upper()
+                for symbol in list(symbols or [])
+                if str(symbol or "").strip()
+            )
+        )
+        if not normalized:
+            return {}
+        response = requests.get(
+            "https://data.alpaca.markets/v2/stocks/snapshots",
+            headers={
+                "APCA-API-KEY-ID": self.api_key,
+                "APCA-API-SECRET-KEY": self.api_secret,
+            },
+            params={"symbols": ",".join(normalized), "feed": "sip"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        prices: dict[str, float] = {}
+        if not isinstance(payload, Mapping):
+            return prices
+        for raw_symbol, raw_snapshot in payload.items():
+            symbol = str(raw_symbol or "").strip().upper()
+            snapshot = dict(raw_snapshot or {}) if isinstance(raw_snapshot, Mapping) else {}
+            latest_trade = dict(snapshot.get("latestTrade") or snapshot.get("latest_trade") or {})
+            minute_bar = dict(snapshot.get("minuteBar") or snapshot.get("minute_bar") or {})
+            try:
+                price = float(latest_trade.get("p") or minute_bar.get("c") or 0.0)
+            except (TypeError, ValueError):
+                price = 0.0
+            if symbol and price > 0:
+                prices[symbol] = price
+        return prices
 
     def get_option_contracts(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         del args, kwargs

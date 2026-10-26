@@ -5,6 +5,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from stock_execution_cost_model import estimate_stock_round_trip_costs, settings_from_environment as cost_settings_from_environment
 from strategy_execution_policy import evaluate_strategy_execution_policy, settings_from_environment as strategy_policy_from_environment
@@ -306,6 +307,12 @@ def reconstruct_stock_realized_pnl(
                     "side": fill["side"],
                     "exit_timestamp": fill["timestamp"].isoformat(),
                     "average_exit_price": _float(fill["price"], 8),
+                    "exit_order_type": str(
+                        order.get("order_type") or order.get("type") or "market"
+                    ).strip().lower(),
+                    "planned_stop_price": _float(_decimal(order.get("stop_price")), 8),
+                    "planned_limit_price": _float(_decimal(order.get("limit_price")), 8),
+                    "exit_order_class": str(order.get("order_class") or "").strip().lower(),
                     "quantity_closed": Decimal("0"),
                     "matched_entry_notional": Decimal("0"),
                     "realized_pnl": Decimal("0"),
@@ -424,6 +431,46 @@ def reconstruct_stock_realized_pnl(
             settings=execution_cost_settings,
         )
         event["entry_notional"] = _float(entry_notional)
+        average_entry_price = (
+            entry_notional / _decimal(event.get("quantity_closed"))
+            if _decimal(event.get("quantity_closed")) > 0
+            else Decimal("0")
+        )
+        event["average_entry_price"] = _float(average_entry_price, 8)
+        exit_price = _decimal(event.get("average_exit_price"))
+        stop_price = _decimal(event.get("planned_stop_price"))
+        limit_price = _decimal(event.get("planned_limit_price"))
+        order_type = str(event.get("exit_order_type") or "").lower()
+        event["planned_stop_pnl"] = None
+        event["stop_execution_slippage_per_share"] = None
+        event["stop_execution_slippage_dollars"] = None
+        if direction == "long" and order_type in {"stop", "stop_limit"} and stop_price > 0:
+            quantity_closed = _decimal(event.get("quantity_closed"))
+            event["planned_stop_pnl"] = _float(
+                (stop_price - average_entry_price) * quantity_closed
+            )
+            event["stop_execution_slippage_per_share"] = _float(exit_price - stop_price)
+            event["stop_execution_slippage_dollars"] = _float(
+                (exit_price - stop_price) * quantity_closed
+            )
+            market_exit = (
+                exit_timestamp.astimezone(ZoneInfo("America/New_York"))
+                if exit_timestamp
+                else None
+            )
+            near_open = bool(
+                market_exit
+                and market_exit.hour == 9
+                and 30 <= market_exit.minute < 45
+            )
+            gap_through = exit_price < stop_price * Decimal("0.98")
+            event["exit_reason"] = (
+                "opening_gap_through_stop" if near_open and gap_through else "protective_stop_fill"
+            )
+        elif direction == "long" and order_type == "limit" and limit_price > 0:
+            event["exit_reason"] = "profit_target_fill"
+        else:
+            event["exit_reason"] = "broker_close_fill"
         event["holding_duration_hours"] = _float(holding_hours)
         event["estimated_slippage"] = float(costs["estimated_slippage"])
         event["estimated_regulatory_fees"] = float(costs["estimated_regulatory_fees"])

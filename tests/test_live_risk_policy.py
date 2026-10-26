@@ -8,6 +8,7 @@ from live_risk_policy import (
     LiveRiskSettings,
     evaluate_live_performance_controls,
     evaluate_live_readiness,
+    estimate_overnight_gap_stress_percent,
     live_entry_notional,
     settings_from_environment,
     stop_risk_position_size,
@@ -42,6 +43,10 @@ def test_live_environment_uses_same_uncapped_entry_policy_as_paper():
     assert settings.entry_cash_allocation_percent == 25.0
     assert settings.trailing_stop_ratchet_shadow_enabled is True
     assert settings.trailing_stop_ratchet_enabled is True
+    assert settings.overnight_gap_risk_enabled is True
+    assert settings.overnight_gap_stress_floor_percent == 10.0
+    assert settings.event_risk_entry_block_enabled is True
+    assert settings.premarket_gap_shadow_enabled is True
 
 
 def test_live_stop_ratchet_has_explicit_emergency_disable():
@@ -172,11 +177,48 @@ def test_stop_distance_sizing_uses_smaller_of_risk_and_notional_caps():
         entry_price=100,
         stop_price=95,
         maximum_notional=400,
-        settings=_armed(),
+        settings=replace(_armed(), overnight_gap_risk_enabled=False),
     )
     assert result["allowed_risk_dollars"] == 5
     assert result["quantity"] == 1
     assert result["planned_risk_dollars"] == 5
+
+
+def test_gap_stress_sizing_caps_pags_like_overnight_risk():
+    result = stop_risk_position_size(
+        equity=1550,
+        entry_price=11.2085,
+        stop_price=10.38,
+        maximum_notional=400,
+        settings=_armed(),
+        overnight_gap_percent=10,
+    )
+
+    assert result["allowed_risk_dollars"] == 7.75
+    assert result["overnight_gap_stress_percent"] == 10
+    assert result["quantity"] == 6
+    assert result["planned_risk_dollars"] <= result["allowed_risk_dollars"]
+
+
+def test_gap_estimator_uses_historical_adverse_opening_gaps_with_floor():
+    settings = replace(
+        _armed(),
+        overnight_gap_stress_floor_percent=5,
+        overnight_gap_percentile=95,
+        overnight_gap_stress_multiplier=1.25,
+    )
+    result = estimate_overnight_gap_stress_percent(
+        [
+            {"open": 100, "close": 100},
+            {"open": 99, "close": 102},
+            {"open": 80, "close": 85},
+        ],
+        settings=settings,
+    )
+
+    assert result["sample_count"] == 2
+    assert result["historical_percentile"] == pytest.approx(21.568627, abs=1e-6)
+    assert result["stress_percent"] == pytest.approx(26.960784, abs=1e-6)
 
 
 def test_weekly_drawdown_and_consecutive_losses_block_new_entries():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -245,3 +246,82 @@ def test_live_broker_falls_back_to_raw_assets_when_sdk_validation_fails(monkeypa
     assert observed["url"] == "https://api.alpaca.markets/v2/assets"
     assert observed["params"] == {"status": "active", "asset_class": "us_equity"}
     assert observed["timeout"] == 20
+
+
+def test_live_broker_fetches_bounded_recent_news_for_entry_gate(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "news": [
+                    {
+                        "headline": "Election result moves Brazil stocks",
+                        "summary": "Policy repricing followed.",
+                        "symbols": ["PAGS"],
+                        "created_at": "2026-10-26T12:00:00Z",
+                        "updated_at": "2026-10-26T12:05:00Z",
+                        "source": "wire",
+                        "content": "not returned by the adapter",
+                    }
+                ]
+            }
+
+    observed = {}
+
+    def fake_get(url, **kwargs):
+        observed.update({"url": url, **kwargs})
+        return Response()
+
+    monkeypatch.setattr(module.requests, "get", fake_get)
+    broker = AlpacaLiveBroker(trading_client=Client(), environ=env(), read_only=True)
+    rows = broker.get_recent_news(
+        ["PAGS", "PAGS"],
+        lookback_hours=96,
+        now=datetime(2026, 10, 26, 15, tzinfo=timezone.utc),
+    )
+
+    assert observed["url"] == "https://data.alpaca.markets/v1beta1/news"
+    assert observed["params"]["symbols"] == "PAGS"
+    assert observed["params"]["limit"] == 50
+    assert observed["timeout"] == 15
+    assert rows == [
+        {
+            "headline": "Election result moves Brazil stocks",
+            "summary": "Policy repricing followed.",
+            "symbols": ["PAGS"],
+            "created_at": "2026-10-26T12:00:00Z",
+            "updated_at": "2026-10-26T12:05:00Z",
+            "source": "wire",
+        }
+    ]
+
+
+def test_live_broker_fetches_latest_sip_prices_for_premarket_shadow(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "PAGS": {"latestTrade": {"p": 7.50}},
+                "NWE": {"minuteBar": {"c": 72.40}},
+            }
+
+    observed = {}
+
+    def fake_get(url, **kwargs):
+        observed.update({"url": url, **kwargs})
+        return Response()
+
+    monkeypatch.setattr(module.requests, "get", fake_get)
+    broker = AlpacaLiveBroker(trading_client=Client(), environ=env(), read_only=True)
+
+    assert broker.get_latest_stock_prices(["PAGS", "NWE"]) == {
+        "PAGS": 7.50,
+        "NWE": 72.40,
+    }
+    assert observed["url"] == "https://data.alpaca.markets/v2/stocks/snapshots"
+    assert observed["params"] == {"symbols": "PAGS,NWE", "feed": "sip"}
+    assert observed["timeout"] == 15

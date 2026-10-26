@@ -5213,6 +5213,8 @@ def render_scanner_candidate_panel(payload):
     funnel = dict(scanner.get("candidate_funnel") or {})
     exit_shadow = list(payload.get("live_exit_shadow") or [])
     exit_actions = list(payload.get("live_exit_actions") or [])
+    event_risk_reviews = list(payload.get("event_risk_reviews") or [])
+    premarket_gap_shadow = list(payload.get("premarket_gap_shadow") or [])
 
     cols = st.columns(5)
     _metric_card(cols[0], "Last Scan", format_timestamp_eastern(scanner.get("completed_at")), "neutral")
@@ -5295,6 +5297,48 @@ def render_scanner_candidate_panel(payload):
             "above; broker-hosted protective orders remain in control."
         )
         st.dataframe(build_public_shadow_exit_rows(exit_shadow))
+
+    if event_risk_reviews:
+        st.markdown("#### Event-Risk Gate")
+        st.caption(
+            "Recent objective event headlines can block a new entry. Held positions are review-only; "
+            "this panel never changes a broker order."
+        )
+        st.dataframe(
+            [
+                {
+                    "Symbol": row.get("symbol") or "—",
+                    "Mode": row.get("mode") or row.get("status") or "unknown",
+                    "Categories": ", ".join(row.get("categories") or []),
+                    "Recommendation": row.get("recommendation") or "feed unavailable",
+                    "Orders Changed": bool(row.get("orders_changed")),
+                }
+                for row in event_risk_reviews
+            ]
+        )
+
+    if premarket_gap_shadow:
+        st.markdown("#### Premarket Gap Monitor — SHADOW ONLY")
+        st.caption(
+            "Observation-only warning for held positions. Broker-hosted stops remain authoritative; "
+            "the monitor does not trade in extended hours."
+        )
+        st.dataframe(
+            [
+                {
+                    "Symbol": row.get("symbol") or "—",
+                    "Status": row.get("status") or "unknown",
+                    "Previous Close": row.get("previous_close"),
+                    "Premarket Price": row.get("latest_premarket_price"),
+                    "Gap %": row.get("gap_percent"),
+                    "Protective Stop": row.get("protective_stop_price"),
+                    "Below Stop": bool(row.get("below_protective_stop")),
+                    "Recommendation": row.get("recommendation") or "unavailable",
+                    "Orders Changed": bool(row.get("orders_changed")),
+                }
+                for row in premarket_gap_shadow
+            ]
+        )
 
     if sector_rows:
         st.markdown("#### Sector Breakdown")

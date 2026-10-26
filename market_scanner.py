@@ -169,7 +169,28 @@ def _frame_to_close_rows(history: pd.DataFrame, *, max_points: int = 260) -> lis
             date_key = pd.Timestamp(idx).date().isoformat()
         except Exception:
             date_key = str(idx)
-        rows.append({"date": date_key, "close": float(value)})
+        source_row = history.loc[idx]
+        if isinstance(source_row, pd.DataFrame):
+            source_row = source_row.iloc[-1]
+
+        def numeric(name: str, fallback: float = 0.0) -> float:
+            try:
+                parsed = float(source_row.get(name, fallback))
+            except (TypeError, ValueError):
+                return float(fallback)
+            return parsed if pd.notna(parsed) else float(fallback)
+
+        close = float(value)
+        rows.append(
+            {
+                "date": date_key,
+                "open": numeric("open", close),
+                "high": numeric("high", close),
+                "low": numeric("low", close),
+                "close": close,
+                "volume": numeric("volume", 0.0),
+            }
+        )
     return rows
 
 

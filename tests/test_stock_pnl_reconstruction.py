@@ -227,3 +227,28 @@ def test_bad_fill_rows_are_reported_instead_of_silently_guessed():
     assert result["realized_stock_pnl"] == 0.0
     assert result["database_mutated"] is False
     assert result["read_only"] is True
+
+
+def test_opening_gap_through_stop_reports_actual_slippage_not_a_missed_sell():
+    buy = _fill("pags-buy", "PAGS", "buy", 8, 11.2085, 1)
+    sell = _fill(
+        "pags-stop",
+        "PAGS",
+        "sell",
+        8,
+        7.74,
+        32,
+        client_order_id="qtb-exit-pags",
+        position_intent="sell_to_close",
+    )
+    sell["updated_at"] = "2026-10-26T13:32:42+00:00"
+    sell["order_type"] = "stop"
+    sell["stop_price"] = 10.38
+
+    event = reconstruct_stock_realized_pnl([buy, sell])["realized_events"][0]
+
+    assert event["exit_reason"] == "opening_gap_through_stop"
+    assert event["realized_pnl"] == -27.748
+    assert event["planned_stop_pnl"] == -6.628
+    assert event["stop_execution_slippage_per_share"] == -2.64
+    assert event["stop_execution_slippage_dollars"] == -21.12
