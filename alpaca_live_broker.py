@@ -130,12 +130,29 @@ class AlpacaLiveBroker(AlpacaPaperBroker):
 
     def get_tradable_stock_assets(self, *, include_etfs: bool = False) -> list[dict[str, Any]]:
         """Return every active tradable US stock exposed by this account endpoint."""
+        def raw_assets() -> list[Any]:
+            response = requests.get(
+                f"{self.base_url.rstrip('/')}/v2/assets",
+                headers={
+                    "APCA-API-KEY-ID": self.api_key,
+                    "APCA-API-SECRET-KEY": self.api_secret,
+                },
+                params={"status": "active", "asset_class": "us_equity"},
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise RuntimeError("alpaca_live_asset_response_invalid")
+            return payload
+
         request = None
         if GetAssetsRequest is not None and AssetClass is not None:
             kwargs: dict[str, Any] = {"asset_class": AssetClass.US_EQUITY}
             if AssetStatus is not None:
                 kwargs["status"] = AssetStatus.ACTIVE
             request = GetAssetsRequest(**kwargs)
+        used_raw = False
         try:
             rows = (
                 self._trading_client.get_all_assets(request)
@@ -148,59 +165,58 @@ class AlpacaLiveBroker(AlpacaPaperBroker):
             # SDK reject the entire otherwise-valid response.  Use the same
             # authenticated endpoint as raw JSON so candidate discovery does
             # not disappear because of a client-model version mismatch.
-            response = requests.get(
-                f"{self.base_url.rstrip('/')}/v2/assets",
-                headers={
-                    "APCA-API-KEY-ID": self.api_key,
-                    "APCA-API-SECRET-KEY": self.api_secret,
-                },
-                params={"status": "active", "asset_class": "us_equity"},
-                timeout=20,
-            )
-            response.raise_for_status()
-            rows = response.json()
-            if not isinstance(rows, list):
-                raise RuntimeError("alpaca_live_asset_response_invalid")
+            rows = raw_assets()
+            used_raw = True
 
         def asset_value(asset: Any, field: str, default: Any = "") -> Any:
             if isinstance(asset, Mapping):
                 return asset.get(field, default)
             return getattr(asset, field, default)
 
-        records: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for asset in rows or []:
-            raw_asset_class = asset_value(asset, "asset_class", "")
-            raw_status = asset_value(asset, "status", "")
-            raw_exchange = asset_value(asset, "exchange", "")
-            symbol = str(asset_value(asset, "symbol", "") or "").strip().upper().replace(".", "-")
-            name = str(asset_value(asset, "name", symbol) or symbol)
-            asset_class = str(getattr(raw_asset_class, "value", raw_asset_class)).upper()
-            status = str(getattr(raw_status, "value", raw_status)).upper()
-            exchange = str(getattr(raw_exchange, "value", raw_exchange)).upper()
-            is_etf = symbol.endswith("ETF") or " ETF" in name.upper() or exchange in {"ARCA", "BATS"}
-            if (
-                not symbol
-                or symbol in seen
-                or asset_class.replace("-", "_") != "US_EQUITY"
-                or status != "ACTIVE"
-                or not bool(asset_value(asset, "tradable", False))
-                or (is_etf and not include_etfs)
-            ):
-                continue
-            seen.add(symbol)
-            records.append(
-                {
-                    "symbol": symbol,
-                    "company_name": name,
-                    "sector": "Unknown",
-                    "industry": "Unknown",
-                    "asset_class": "US_EQUITY",
-                    "status": "ACTIVE",
-                    "tradable": True,
-                    "is_etf": is_etf,
-                }
-            )
+        def normalize_rows(assets: Any) -> list[dict[str, Any]]:
+            records: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for asset in assets or []:
+                raw_asset_class = asset_value(asset, "asset_class", "")
+                raw_status = asset_value(asset, "status", "")
+                raw_exchange = asset_value(asset, "exchange", "")
+                symbol = str(asset_value(asset, "symbol", "") or "").strip().upper().replace(".", "-")
+                name = str(asset_value(asset, "name", symbol) or symbol)
+                asset_class = str(getattr(raw_asset_class, "value", raw_asset_class)).upper()
+                status = str(getattr(raw_status, "value", raw_status)).upper()
+                exchange = str(getattr(raw_exchange, "value", raw_exchange)).upper()
+                is_etf = symbol.endswith("ETF") or " ETF" in name.upper() or exchange in {"ARCA", "BATS"}
+                if (
+                    not symbol
+                    or symbol in seen
+                    or asset_class.replace("-", "_") != "US_EQUITY"
+                    or status != "ACTIVE"
+                    or not bool(asset_value(asset, "tradable", False))
+                    or (is_etf and not include_etfs)
+                ):
+                    continue
+                seen.add(symbol)
+                records.append(
+                    {
+                        "symbol": symbol,
+                        "company_name": name,
+                        "sector": "Unknown",
+                        "industry": "Unknown",
+                        "asset_class": "US_EQUITY",
+                        "status": "ACTIVE",
+                        "tradable": True,
+                        "is_etf": is_etf,
+                    }
+                )
+            return records
+
+        records = normalize_rows(rows)
+        if not records and not used_raw:
+            # Some SDK versions silently return no usable asset models. Retry
+            # the authenticated endpoint before blocking all new entries.
+            records = normalize_rows(raw_assets())
+        if not records:
+            raise RuntimeError("alpaca_live_asset_universe_empty")
         return sorted(records, key=lambda item: str(item["symbol"]))
 
     def get_recent_news(

@@ -50,7 +50,12 @@ def _systemd_service_active(service_name: str) -> bool:
 def _broker_order_to_dashboard_event(order: dict[str, Any], closed_trade: dict[str, Any] | None = None) -> dict[str, Any]:
     status = str(order.get("status") or "unknown").strip().lower()
     side = str(order.get("side") or "").strip().upper()
-    timestamp = str(order.get("updated_at") or order.get("submitted_at") or "")
+    timestamp = str(
+        (order.get("filled_at") if status == "filled" else None)
+        or order.get("updated_at")
+        or order.get("submitted_at")
+        or ""
+    )
     requested_quantity = abs(float(order.get("requested_quantity") or 0.0))
     filled_quantity = abs(float(order.get("filled_quantity") or 0.0))
     fill_price = float(order.get("average_fill_price") or 0.0)

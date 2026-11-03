@@ -608,6 +608,18 @@ def test_broker_sell_order_displays_locked_in_profit_loss():
     assert summary["order_rows"][0]["Realized P/L"] == "$20.00"
 
 
+def test_filled_order_keeps_fill_time_after_bracket_is_updated():
+    event = dashboard_data._broker_order_to_dashboard_event(
+        {
+            "symbol": "NWE", "side": "buy", "status": "filled",
+            "submitted_at": "2026-10-12T14:00:00Z",
+            "filled_at": "2026-10-12T14:00:03Z",
+            "updated_at": "2026-11-02T20:41:31Z",
+        }
+    )
+    assert event["event_timestamp"] == "2026-10-12T14:00:03Z"
+
+
 def test_order_feed_hides_unfilled_bracket_children_but_keeps_filled_exit():
     orders = [
         {

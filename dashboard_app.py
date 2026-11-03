@@ -3602,6 +3602,14 @@ def render_loading_skeleton():
     st.markdown("<div class='dq-skeleton'></div><div class='dq-skeleton'></div><div class='dq-skeleton'></div>", unsafe_allow_html=True)
 
 
+def live_scan_blocked(payload):
+    latest_run = dict(payload.get("latest_run") or {})
+    return (
+        str(latest_run.get("trading_mode") or "").upper() == "LIVE"
+        and str(latest_run.get("stop_reason") or "").startswith("stock_universe_unavailable_")
+    )
+
+
 def render_header(payload, view):
     clock = build_market_clock()
     refresh_parts = format_compact_timestamp(st.session_state.get("dashboard_last_refresh"))
@@ -3611,6 +3619,8 @@ def render_header(payload, view):
     last_run_age = _seconds_since_iso((payload.get("latest_run") or {}).get("run_timestamp"))
     runner_recent = last_run_age is not None and last_run_age <= 60 * 30
     bot_state = "RUNNING" if service_active or runner_recent else "STOPPED"
+    if bot_state == "RUNNING" and live_scan_blocked(payload):
+        bot_state = "SCAN BLOCKED"
     market_is_open = bool(view.get("market_is_open"))
     market_label = "MARKET OPEN" if market_is_open else "MARKET CLOSED"
     bot_net_pl = _as_float(view.get("bot_net_pl"), 0.0)
@@ -4337,6 +4347,7 @@ def render_mobile_command_center(payload, view):
     summary = build_compact_dashboard_summary(payload, view)
     status = dict(summary.get("status") or {})
     service_active = status.get("bot_service") == "RUNNING"
+    scan_blocked = live_scan_blocked(payload)
     market_open = bool(view.get("market_is_open"))
     total_pl = _as_float(view.get("bot_net_pl"), 0.0)
     total_class = "positive" if total_pl > 0 else "negative" if total_pl < 0 else ""
@@ -4351,13 +4362,15 @@ def render_mobile_command_center(payload, view):
         status.get("kill_switch") != "ON"
         and status.get("entry_submission") == "ENABLED"
         and not bool(entry_policy.get("exit_only"))
+        and not scan_blocked
     )
 
     st.markdown(
         "<div class='dq-mobile-topbar'>"
         "<div class='dq-mobile-brand'><span class='dq-brand-mark'>DQ</span>"
         f"<div><div class='dq-mobile-title'>Deal Quant</div><div class='dq-mobile-subtitle'>{account_label} · STOCKS</div></div></div>"
-        f"<div class='dq-mobile-live {'' if service_active else 'off'}'><i></i>{'BOT ON' if service_active else 'BOT OFF'}</div>"
+        f"<div class='dq-mobile-live {'' if service_active and not scan_blocked else 'off'}'><i></i>"
+        f"{'SCAN BLOCKED' if scan_blocked else 'BOT ON' if service_active else 'BOT OFF'}</div>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -4371,6 +4384,8 @@ def render_mobile_command_center(payload, view):
         request_dashboard_refresh("Mobile dashboard data refreshed")
     if not view.get("account_data_available"):
         st.warning("Current account snapshot unavailable. Balance and position totals are temporarily hidden.")
+    if scan_blocked:
+        st.warning("Stock scanning could not load the tradable universe. New entries are blocked until it recovers; existing position exits continue to run.")
 
     st.markdown(
         "<div class='dq-mobile-balance'>"

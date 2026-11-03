@@ -1227,9 +1227,16 @@ def run_controlled_live_cycle(
     try:
         policy, records = _resolve_stock_universe(live_broker, policy, env)
     except Exception as exc:
+        reason = f"stock_universe_unavailable_{type(exc).__name__}"
+        if isinstance(exc, RuntimeError) and str(exc) in {
+            "alpaca_full_stock_universe_empty",
+            "alpaca_live_asset_universe_empty",
+            "alpaca_live_asset_response_invalid",
+        }:
+            reason = f"{reason}_{exc}"
         return {
             "status": "blocked",
-            "reasons": [f"stock_universe_unavailable_{type(exc).__name__}"],
+            "reasons": [reason],
             "live_exit_shadow": live_exit_shadow,
             "live_exit_actions": live_exit_actions,
             "event_risk_reviews": event_risk_reviews,

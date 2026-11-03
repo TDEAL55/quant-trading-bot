@@ -1166,6 +1166,17 @@ def test_initialize_session_state_preserves_existing_values(monkeypatch):
     assert fake_st.session_state["dashboard_timeframe"] == "1D"
 
 
+def test_live_scan_failure_is_visible_even_when_service_runs():
+    assert dashboard_app.live_scan_blocked({
+        "latest_run": {"trading_mode": "LIVE", "bot_status": "healthy",
+                       "stop_reason": "stock_universe_unavailable_RuntimeError"}
+    })
+    assert not dashboard_app.live_scan_blocked({
+        "latest_run": {"trading_mode": "LIVE", "bot_status": "healthy",
+                       "stop_reason": "regular_market_closed"}
+    })
+
+
 def test_refresh_button_sets_force_refresh_without_page_reset(monkeypatch):
     fake_st = _FakeStreamlit(button_return=True)
     fake_st.session_state["dashboard_page"] = "Strategy"

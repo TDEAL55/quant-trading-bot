@@ -248,6 +248,24 @@ def test_live_broker_falls_back_to_raw_assets_when_sdk_validation_fails(monkeypa
     assert observed["timeout"] == 20
 
 
+def test_live_broker_falls_back_when_sdk_silently_returns_no_assets(monkeypatch):
+    class EmptyAssetClient(Client):
+        def get_all_assets(self, request=None):
+            return []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{"symbol": "NWE", "name": "NorthWestern Energy", "asset_class": "us_equity",
+                     "status": "active", "exchange": "NASDAQ", "tradable": True}]
+
+    monkeypatch.setattr(module.requests, "get", lambda *args, **kwargs: Response())
+    broker = AlpacaLiveBroker(trading_client=EmptyAssetClient(), environ=env(), read_only=True)
+    assert [row["symbol"] for row in broker.get_tradable_stock_assets()] == ["NWE"]
+
+
 def test_live_broker_fetches_bounded_recent_news_for_entry_gate(monkeypatch):
     class Response:
         def raise_for_status(self):
