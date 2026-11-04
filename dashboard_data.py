@@ -52,6 +52,7 @@ def _broker_order_to_dashboard_event(order: dict[str, Any], closed_trade: dict[s
     side = str(order.get("side") or "").strip().upper()
     timestamp = str(
         (order.get("filled_at") if status == "filled" else None)
+        or (order.get("submitted_at") if status == "filled" else None)
         or order.get("updated_at")
         or order.get("submitted_at")
         or ""
@@ -215,13 +216,14 @@ def _fetch_paper_account_snapshot(
             }
         return closed_by_order_id.get(order_id)
 
-    recent_orders = [
-        _broker_order_to_dashboard_event(
-            order,
-            _closed_trade_for_order(order),
-        )
-        for order in broker_orders[:120]
-    ]
+    recent_orders = sorted(
+        (
+            _broker_order_to_dashboard_event(order, _closed_trade_for_order(order))
+            for order in broker_orders
+        ),
+        key=lambda event: str(event.get("event_timestamp") or ""),
+        reverse=True,
+    )[:120]
     if snapshot_source != "alpaca_paper_read_only":
         for event in recent_orders:
             event["source"] = snapshot_source
