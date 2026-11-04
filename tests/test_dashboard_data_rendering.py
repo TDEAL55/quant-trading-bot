@@ -620,6 +620,41 @@ def test_filled_order_keeps_fill_time_after_bracket_is_updated():
     assert event["event_timestamp"] == "2026-10-12T14:00:03Z"
 
 
+def test_filled_order_without_fill_time_prefers_submission_over_later_bracket_update():
+    event = dashboard_data._broker_order_to_dashboard_event(
+        {
+            "symbol": "NWE", "side": "buy", "status": "filled",
+            "submitted_at": "2026-10-12T17:08:24Z",
+            "updated_at": "2026-11-02T20:41:31Z",
+        }
+    )
+    assert event["event_timestamp"] == "2026-10-12T17:08:24Z"
+
+
+def test_order_feed_sorts_by_displayed_event_time():
+    class UpdatedBracketBroker(_ReadOnlyPaperBroker):
+        def get_order_history(self, limit=50):
+            return [
+                {
+                    "order_id": "older-fill", "client_order_id": "qtb-older-fill",
+                    "symbol": "NWE", "side": "buy", "status": "filled",
+                    "submitted_at": "2026-10-12T17:08:24Z",
+                    "filled_at": "2026-10-12T17:08:24Z",
+                    "updated_at": "2026-11-02T20:41:31Z",
+                },
+                {
+                    "order_id": "newer-fill", "client_order_id": "qtb-newer-fill",
+                    "symbol": "OXY", "side": "buy", "status": "filled",
+                    "submitted_at": "2026-10-27T14:58:51Z",
+                    "filled_at": "2026-10-27T14:58:51Z",
+                    "updated_at": "2026-10-27T14:58:51Z",
+                },
+            ]
+
+    snapshot = dashboard_data._fetch_paper_account_snapshot(UpdatedBracketBroker)
+    assert [order["symbol"] for order in snapshot["recent_orders"]] == ["OXY", "NWE"]
+
+
 def test_order_feed_hides_unfilled_bracket_children_but_keeps_filled_exit():
     orders = [
         {
