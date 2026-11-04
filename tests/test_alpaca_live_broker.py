@@ -221,7 +221,7 @@ def test_live_broker_falls_back_to_raw_assets_when_sdk_validation_fails(monkeypa
                 {
                     "symbol": "PCOR",
                     "name": "Procore Technologies",
-                    "asset_class": "us_equity",
+                    "class": "us_equity",
                     "status": "active",
                     "exchange": "NYSE",
                     "tradable": True,
@@ -258,7 +258,7 @@ def test_live_broker_falls_back_when_sdk_silently_returns_no_assets(monkeypatch)
             return None
 
         def json(self):
-            return [{"symbol": "NWE", "name": "NorthWestern Energy", "asset_class": "us_equity",
+            return [{"symbol": "NWE", "name": "NorthWestern Energy", "class": "us_equity",
                      "status": "active", "exchange": "NASDAQ", "tradable": True}]
 
     monkeypatch.setattr(module.requests, "get", lambda *args, **kwargs: Response())
