@@ -177,7 +177,11 @@ class AlpacaLiveBroker(AlpacaPaperBroker):
             records: list[dict[str, Any]] = []
             seen: set[str] = set()
             for asset in assets or []:
-                raw_asset_class = asset_value(asset, "asset_class", "")
+                # alpaca-py models expose asset_class; the REST payload uses
+                # "class" for the same field.
+                raw_asset_class = asset_value(asset, "asset_class", None)
+                if raw_asset_class is None:
+                    raw_asset_class = asset_value(asset, "class", "")
                 raw_status = asset_value(asset, "status", "")
                 raw_exchange = asset_value(asset, "exchange", "")
                 symbol = str(asset_value(asset, "symbol", "") or "").strip().upper().replace(".", "-")
