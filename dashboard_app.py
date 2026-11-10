@@ -4247,7 +4247,7 @@ def render_command_center_page(payload, view):
     )
     st.markdown(
         f"<div class='dq-activity-line'><span>P&amp;L guard</span><strong>{pnl_state}</strong> · "
-        f"today {format_currency(pnl_policy.get('day_pl'))} ({format_percent(_as_float(pnl_policy.get('day_return_percent'), 0.0) / 100.0)}) · "
+        f"today {format_currency(pnl_policy.get('day_pl'))} ({format_percent(_as_float(pnl_policy.get('day_return_percent'), 0.0))}) · "
         f"daily stop −{_safe_text(pnl_policy.get('daily_loss_stop_percent'), '2')}% · "
         f"{int(pnl_policy.get('consecutive_losses') or 0)}/{int(pnl_policy.get('maximum_consecutive_losses') or 3)} consecutive losses"
         f"{cash_adjustment_note}</div>",
