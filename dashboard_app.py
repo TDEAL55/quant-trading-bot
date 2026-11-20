@@ -444,7 +444,7 @@ def friendly_action_reason(value: Any, fallback="Waiting for the next cycle") ->
         "option_premium_exceeds_position_cap": "Contract premium exceeds the risk-adjusted position cap",
         "options_open_order_already_exists": "An entry order is already open for this contract",
         "options_close_order_already_open": "A closing order is already open for this contract",
-        "daily_loss_stop": "Daily account loss reached 2%; new entries are paused",
+        "daily_loss_stop": "Daily account loss reached the configured limit; new buys are paused while existing exits stay active",
         "consecutive_loss_cooldown": "Three consecutive losses triggered a 60-minute entry cooldown",
         "pnl_rules_clear": "P&L rules are armed and new entries are allowed",
     }
@@ -3787,8 +3787,17 @@ def render_alert_banner(payload, view):
         alert_messages.append("Market data appears stale")
     if "loss limit" in str(view.get("latest_stop_reason", "")).lower() or "loss" in str(view.get("daily_loss_stop_status", "")).lower():
         alert_messages.append("Daily loss stop condition detected")
-    if bool((view.get("pnl_policy") or {}).get("block_new_entries")):
-        alert_messages.append(f"P&L guard blocked new entries: {friendly_action_reason(view.get('pnl_policy_reason'))}")
+    pnl_policy = dict(view.get("pnl_policy") or {})
+    if bool(pnl_policy.get("block_new_entries")):
+        if view.get("pnl_policy_reason") == "daily_loss_stop":
+            alert_messages.append(
+                "New buys paused: today's account change "
+                f"{format_currency(pnl_policy.get('day_pl'))} reached the "
+                f"{format_currency(pnl_policy.get('daily_loss_limit'))} daily loss limit. "
+                "Existing broker exit orders are unaffected."
+            )
+        else:
+            alert_messages.append(f"P&L guard blocked new entries: {friendly_action_reason(view.get('pnl_policy_reason'))}")
 
     if alert_messages:
         st.markdown(
@@ -4193,7 +4202,14 @@ def render_command_center_page(payload, view):
     status = summary["status"]
     entry_policy = dict((payload.get("latest_account") or {}).get("portfolio_entry_policy") or {})
     stock_market = "Open" if bool(view.get("market_is_open")) else "Closed"
-    trading_enabled = status.get("kill_switch") != "ON" and status.get("entry_submission") == "ENABLED"
+    trading_enabled = (
+        status.get("kill_switch") != "ON"
+        and status.get("entry_submission") == "ENABLED"
+        and not bool(entry_policy.get("exit_only"))
+        and not bool((view.get("pnl_policy") or {}).get("block_new_entries"))
+        and not live_scan_blocked(payload)
+        and bool(view.get("market_is_open"))
+    )
     engine_items = [("EQ", "Stocks only", "Enabled" if trading_enabled else "Paused", stock_market, trading_enabled)]
     engine_html = "".join(
         "<div class='dq-engine-card'>"
@@ -4248,7 +4264,7 @@ def render_command_center_page(payload, view):
     st.markdown(
         f"<div class='dq-activity-line'><span>P&amp;L guard</span><strong>{pnl_state}</strong> · "
         f"today {format_currency(pnl_policy.get('day_pl'))} ({format_percent(_as_float(pnl_policy.get('day_return_percent'), 0.0))}) · "
-        f"daily stop −{_safe_text(pnl_policy.get('daily_loss_stop_percent'), '2')}% · "
+        f"daily entry stop {format_currency(pnl_policy.get('daily_loss_limit'))} · "
         f"{int(pnl_policy.get('consecutive_losses') or 0)}/{int(pnl_policy.get('maximum_consecutive_losses') or 3)} consecutive losses"
         f"{cash_adjustment_note}</div>",
         unsafe_allow_html=True,
@@ -4362,7 +4378,9 @@ def render_mobile_command_center(payload, view):
         status.get("kill_switch") != "ON"
         and status.get("entry_submission") == "ENABLED"
         and not bool(entry_policy.get("exit_only"))
+        and not bool((view.get("pnl_policy") or {}).get("block_new_entries"))
         and not scan_blocked
+        and market_open
     )
 
     st.markdown(
