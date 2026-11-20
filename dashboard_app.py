@@ -1576,12 +1576,27 @@ def build_monitor_status_snapshot(payload, view):
     for row in recent_orders:
         if str(row.get("market_date") or "") != current_market_date:
             continue
+        if trading_mode == "LIVE":
+            # Broker history also contains protective exits and canceled bracket legs.
+            # The live entry counter must describe bot buy submissions only.
+            if str(row.get("side") or row.get("signal") or "").strip().upper() != "BUY":
+                continue
+            if not str(row.get("client_order_id") or "").strip().lower().startswith("qtb-live-micro-"):
+                continue
         orders_requested_today += 1
         if int(row.get("submitted") or 0) == 1:
             orders_submitted_today += 1
         status = str(row.get("safe_order_status") or "").strip().lower()
         if status in {"filled", "partially_filled"}:
             orders_filled_today += 1
+    live_readiness = payload.get("live_readiness") or {}
+    if (
+        trading_mode == "LIVE"
+        and "orders_submitted_today" in live_readiness
+        and str(latest_run.get("run_timestamp") or "")[:10] == current_market_date
+    ):
+        # The runner's state covers the full day; broker history can be truncated.
+        orders_submitted_today = _safe_int(live_readiness.get("orders_submitted_today"), 0)
 
     latest_rejection_reason = "None"
     if scanner_rejections:
