@@ -469,7 +469,10 @@ def test_paper_tuning_scorecard_does_not_claim_results_without_closed_trades():
 def test_action_reasons_explain_why_signals_did_not_become_orders():
     assert "no held coin" in dashboard_app.friendly_action_reason("no_crypto_order_selected")
     assert "risk-adjusted position cap" in dashboard_app.friendly_action_reason("option_premium_exceeds_position_cap")
-    assert "Daily account loss" in dashboard_app.friendly_action_reason("daily_loss_stop")
+    daily_reason = dashboard_app.friendly_action_reason("daily_loss_stop")
+    assert "Daily account loss" in daily_reason
+    assert "2%" not in daily_reason
+    assert "existing exits stay active" in daily_reason
     assert "60-minute" in dashboard_app.friendly_action_reason("consecutive_loss_cooldown")
 
 
@@ -501,6 +504,38 @@ def test_dashboard_view_exposes_actual_account_pnl_guard_status():
     assert view["pnl_policy_reason"] == "daily_loss_stop"
     assert view["pnl_policy"]["day_return_percent"] == -2.5
     assert dashboard_app.friendly_action_reason("crypto_take_profit") == "Crypto Take Profit"
+
+
+def test_live_dashboard_guard_uses_effective_dollar_loss_limit(monkeypatch):
+    monkeypatch.setenv("LIVE_DAILY_LOSS_STOP_PERCENT", "1")
+    monkeypatch.setenv("LIVE_DAILY_LOSS_STOP_DOLLARS", "3")
+    view = dashboard_app.build_dashboard_view_model(
+        {
+            "dashboard_data_profile": "live-micro-account",
+            "latest_account": {
+                "equity": 1873.34,
+                "portfolio_value": 1873.34,
+                "last_equity": 1879.64,
+                "day_pl": -6.30,
+                "positions": [],
+            },
+            "latest_run": {},
+            "latest_success": {},
+            "latest_signal": {},
+            "starting_account": {},
+            "portfolio_history": [],
+            "signal_history": [],
+            "recent_orders": [],
+            "recent_runs": [],
+            "paper_tuning": {},
+            "crypto": {},
+            "options": {},
+        }
+    )
+
+    assert view["pnl_policy_status"] == "BLOCKED"
+    assert view["pnl_policy"]["daily_loss_limit"] == 3.0
+    assert view["pnl_policy"]["day_return_percent"] == pytest.approx(-0.33517, abs=0.001)
 
 
 def test_signal_strength_meter_boundaries():
