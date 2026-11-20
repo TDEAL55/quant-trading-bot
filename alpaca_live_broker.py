@@ -350,6 +350,7 @@ class AlpacaLiveBroker(AlpacaPaperBroker):
             "expired",
             "rejected",
             "done_for_day",
+            "replaced",
         }
         return [
             order
