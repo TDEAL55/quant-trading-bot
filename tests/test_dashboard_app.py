@@ -299,6 +299,27 @@ def test_monitor_status_reports_armed_live_submission_as_enabled(monkeypatch):
     assert snapshot["kill_switch"] == "OFF"
 
 
+def test_live_monitor_counts_entries_without_bracket_exit_legs(monkeypatch):
+    monkeypatch.setenv("TRADING_MODE", "LIVE")
+    snapshot = dashboard_app.build_monitor_status_snapshot(
+        {
+            "latest_run": {"trading_mode": "LIVE", "run_timestamp": "2026-11-20T20:00:00+00:00"},
+            "latest_signal": {"market_date": "2026-11-20", "market_open": True},
+            "latest_account": {},
+            "live_readiness": {"orders_submitted_today": 0},
+            "recent_orders": [
+                {"market_date": "2026-11-20", "side": "SELL", "client_order_id": "bracket-stop", "submitted": 1, "safe_order_status": "filled"},
+                {"market_date": "2026-11-20", "side": "SELL", "client_order_id": "bracket-target", "submitted": 1, "safe_order_status": "canceled"},
+                {"market_date": "2026-11-20", "side": "BUY", "client_order_id": "manual-buy", "submitted": 1, "safe_order_status": "filled"},
+            ],
+        },
+        {"bot_health": {"style": "healthy"}},
+    )
+    assert snapshot["orders_requested_today"] == 0
+    assert snapshot["orders_submitted_today"] == 0
+    assert snapshot["orders_filled_today"] == 0
+
+
 def test_monitor_status_uses_read_only_service_health_probe(monkeypatch):
     monkeypatch.setenv("TRADING_MODE", "PAPER")
     snapshot = dashboard_app.build_monitor_status_snapshot(
