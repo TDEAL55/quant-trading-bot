@@ -192,6 +192,25 @@ def test_open_orders_flattens_protective_bracket_legs():
     assert client.order_filter.limit == 500
 
 
+def test_open_orders_excludes_replaced_historical_stop():
+    client = NestedOrderClient()
+    original_get_orders = client.get_orders
+
+    def orders_with_replaced_stop(filter=None):
+        rows = original_get_orders(filter=filter)
+        old_stop = SimpleNamespace(**vars(rows[0].legs[1]))
+        old_stop.id = "old-replaced-stop"
+        old_stop.status = "replaced"
+        return rows + [old_stop]
+
+    client.get_orders = orders_with_replaced_stop
+    broker = AlpacaLiveBroker(trading_client=client, environ=env(), read_only=True)
+
+    orders = broker.get_open_orders()
+    assert {order["order_id"] for order in orders} == {"take-profit", "stop-loss"}
+    assert all(order["status"] != "replaced" for order in orders)
+
+
 def test_order_history_flattens_bracket_legs_for_realized_pnl():
     broker = AlpacaLiveBroker(trading_client=NestedOrderClient(), environ=env(), read_only=True)
     orders = broker.get_order_history(limit=50)
