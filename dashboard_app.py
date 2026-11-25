@@ -1701,7 +1701,19 @@ def build_compact_dashboard_summary(payload, view):
     if submitted > 0:
         outcome = f"{submitted} {order_mode} order{'s' if submitted != 1 else ''} submitted today."
     elif eligible > 0:
-        outcome = "Candidates passed the scanner; portfolio and risk checks did not submit an order."
+        funnel = dict(scanner.get("candidate_funnel") or {})
+        rejection_counts = dict(funnel.get("rejection_counts") or {})
+        if rejection_counts:
+            reason, count = max(
+                rejection_counts.items(),
+                key=lambda item: (_safe_int(item[1], 0), str(item[0])),
+            )
+            outcome = (
+                f"Risk selection evaluated {_safe_int(funnel.get('evaluated_count'), 0)} candidates; "
+                f"most common rejection: {str(reason).replace('_', ' ')} ({_safe_int(count, 0)})."
+            )
+        else:
+            outcome = "Candidates passed the scanner; portfolio and risk checks did not submit an order."
     elif _safe_int(scanner.get("symbol_count"), 0) > 0:
         outcome = "The scan completed, but no candidate passed every rule."
     else:
@@ -4743,7 +4755,7 @@ def render_performance_page(payload):
     st.info("This is the bot's locked-in result. Current gains or losses on positions it still owns are intentionally excluded.")
     st.caption(
         f"The estimated-live figure subtracts {format_currency(estimated_costs)} of modeled slippage, sell fees, and short borrow. "
-        "It is a conservative research estimate; the realized headline remains the exact PAPER fill-to-fill result."
+        "It is a conservative research estimate; the realized headline uses actual broker fills."
     )
 
     strategy_rows = []
@@ -4791,7 +4803,34 @@ def render_performance_page(payload):
         ]
         for column, (label, value) in zip(review_cards, review_values):
             _metric_card(column, label, value, "neutral")
-        st.dataframe(list(review.get("trades") or []))
+        trade_rows = list(review.get("trades") or [])
+        gap_rows = [
+            row for row in trade_rows
+            if _as_float((row or {}).get("stop_execution_slippage"), 0.0) < -0.01
+        ]
+        if gap_rows:
+            st.warning(
+                "Some stop exits filled below their planned stop price. A stop can limit when an order "
+                "triggers, but its final fill can be worse during a gap or fast market."
+            )
+            st.dataframe(
+                [
+                    {
+                        "Symbol": row.get("symbol"),
+                        "Exit time": row.get("exit_timestamp"),
+                        "Exit reason": row.get("exit_classification"),
+                        "Planned stop": row.get("planned_stop_price") or row.get("stop_loss"),
+                        "Actual exit": row.get("exit_price"),
+                        "Extra loss vs stop": format_currency(abs(_as_float(row.get("stop_execution_slippage"), 0.0))),
+                        "Actual P/L": format_currency(row.get("actual_profit_loss")),
+                    }
+                    for row in sorted(
+                        gap_rows,
+                        key=lambda item: _as_float(item.get("stop_execution_slippage"), 0.0),
+                    )[:10]
+                ]
+            )
+        st.dataframe(trade_rows)
         for title, key in (
             ("By Strategy", "by_strategy"),
             ("By Market Regime", "by_market_regime"),
@@ -5315,6 +5354,19 @@ def render_scanner_candidate_panel(payload):
             f"{int(funnel.get('evaluated_count') or 0)} evaluated · "
             f"selected {str(funnel.get('selected_symbol') or 'none')}"
         )
+        rejection_counts = dict(funnel.get("rejection_counts") or {})
+        if rejection_counts:
+            st.markdown("#### Live Selection Rejections")
+            st.dataframe(
+                [
+                    {"Reason": str(reason).replace("_", " "), "Candidates": _safe_int(count, 0)}
+                    for reason, count in sorted(
+                        rejection_counts.items(),
+                        key=lambda item: (-_safe_int(item[1], 0), str(item[0])),
+                    )
+                ]
+            )
+            st.caption("These are the runner's recorded reasons for passing on candidates; they do not change trade rules.")
 
     render_shadow_exit_trial_scorecard(payload)
 
