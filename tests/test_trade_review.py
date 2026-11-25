@@ -88,3 +88,22 @@ def test_submission_index_supports_broker_and_client_ids():
     index = index_submission_records([row])
     assert index["one"] == row
     assert index["two"] == row
+
+
+def test_stop_fill_review_retains_planned_stop_and_actual_slippage():
+    event = _event("PAGS", -27.75, 11.2085, 7.74)
+    event["quantity_closed"] = 8
+    event["matched_lots"][0]["quantity"] = 8
+    event.update({
+        "planned_stop_price": 10.38,
+        "planned_stop_pnl": -6.628,
+        "stop_execution_slippage_dollars": -21.12,
+        "stop_execution_slippage_per_share": -2.64,
+        "exit_reason": "opening_gap_through_stop",
+    })
+
+    trade = build_trade_review({"confidence": "exact", "realized_events": [event]})["trades"][0]
+
+    assert trade["planned_stop_price"] == 10.38
+    assert trade["stop_execution_slippage"] == -21.12
+    assert trade["exit_classification"] == "opening_gap_through_stop"
