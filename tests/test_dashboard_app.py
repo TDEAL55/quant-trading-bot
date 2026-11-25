@@ -385,6 +385,29 @@ def test_compact_dashboard_summary_prioritizes_scan_positions_and_orders(monkeyp
     assert summary["position_rows"][0]["Open P/L"] == "$4.00"
 
 
+
+def test_compact_dashboard_summary_explains_live_selection_rejection(monkeypatch):
+    monkeypatch.setenv("TRADING_MODE", "LIVE")
+    payload = {
+        "latest_scanner_run": {
+            "status": "no_trade",
+            "symbol_count": 7771,
+            "eligible_count": 1,
+            "candidate_funnel": {
+                "evaluated_count": 1,
+                "rejection_counts": {"no_eligible_strategy_signal": 1},
+            },
+        },
+        "latest_account": {"positions": []},
+        "recent_orders": [],
+    }
+
+    summary = dashboard_app.build_compact_dashboard_summary(payload, {})
+
+    assert "no eligible strategy signal (1)" in summary["scan"]["outcome"]
+    assert "evaluated 1 candidates" in summary["scan"]["outcome"]
+
+
 def test_stale_successful_run_does_not_report_running_service():
     payload = {
         "latest_run": {
