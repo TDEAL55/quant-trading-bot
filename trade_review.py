@@ -184,6 +184,7 @@ def build_trade_review(
             "reason_for_entry": str(evidence.get("entry_reason") or "not_recorded"),
             "reason_for_exit": str(event.get("exit_reason") or "broker_close_fill"),
             "planned_stop_profit_loss": event.get("planned_stop_pnl"),
+            "planned_stop_price": event.get("planned_stop_price"),
             "stop_execution_slippage": event.get("stop_execution_slippage_dollars"),
             "stop_execution_slippage_per_share": event.get("stop_execution_slippage_per_share"),
             "exit_classification": str(event.get("exit_reason") or "broker_close_fill"),
