@@ -32,3 +32,29 @@ def test_strategy_comparison_keeps_missing_environments_explicit():
     assert [row["source"] for row in rows] == ["backtest", "paper", "live"]
     assert rows[1]["available"] is False
     assert rows[2]["sample_sufficient"] is False
+
+
+def test_historical_partial_paper_sample_is_visible_but_never_decision_ready():
+    result = build_performance_comparison(
+        backtest={"metrics": {"number_of_trades": 40, "expectancy_per_trade": 1.2}},
+        paper={
+            "metrics": {"number_of_trades": 40, "expectancy_per_trade": 0.3},
+            "data_quality": {"reconstruction_confidence": "partial"},
+            "provenance": {
+                "period_start": "2026-09-09",
+                "period_end": "2026-10-06",
+                "comparable_to_live": False,
+            },
+        },
+        live={"metrics": {"number_of_trades": 40, "expectancy_per_trade": -0.2}},
+    )
+
+    paper = next(row for row in result["rows"] if row["source"] == "paper")
+    assert paper["sample_sufficient"] is True
+    assert paper["evidence_quality"] == "partial"
+    assert paper["period_start"] == "2026-09-09"
+    assert result["comparison_ready"] is False
+    assert "not_like_for_like:paper" in result["flags"]
+    assert "partial_history:paper" in result["flags"]
+    assert "expectancy_sign_differs_across_environments" in result["flags"]
+
