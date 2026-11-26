@@ -6,6 +6,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from alpaca_paper_broker import AlpacaPaperBroker
 from monitoring_db import MonitoringDatabase
@@ -280,6 +281,27 @@ def _fetch_paper_account_snapshot(
     }
 
 
+def build_live_daily_cycle_report(
+    live_state: dict[str, Any], *, now: datetime | None = None
+) -> dict[str, Any]:
+    """Expose recorded Eastern-time cycle outcomes without inferring missing history."""
+    observed_now = now or datetime.now(timezone.utc)
+    day_key = observed_now.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    daily = dict(live_state.get("daily_cycle_reports") or {})
+    row = dict(daily.get(day_key) or {})
+    return {
+        "date_et": day_key,
+        "available": bool(row),
+        "first_recorded_at": row.get("first_recorded_at"),
+        "last_recorded_at": row.get("last_recorded_at"),
+        "last_observed_date_et": max(daily) if daily else None,
+        "total_cycles": int(row.get("total_cycles") or 0),
+        "counts": dict(row.get("counts") or {}),
+        "reason_counts": dict(row.get("reason_counts") or {}),
+        "recent_days": [dict(daily[key]) for key in sorted(daily)[-7:]],
+    }
+
+
 def fetch_live_dashboard_payload(
     *,
     live_broker_factory=None,
@@ -423,6 +445,7 @@ def fetch_live_dashboard_payload(
         "stock_pnl_reconstruction": reconstruction,
         "trade_review": trade_review,
         "performance_comparison": performance_comparison,
+        "daily_cycle_report": build_live_daily_cycle_report(live_state),
         "live_readiness": dict(last_cycle.get("readiness") or {}),
         "live_exit_shadow": live_exit_shadow,
         "live_exit_actions": live_exit_actions,
