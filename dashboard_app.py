@@ -1864,6 +1864,46 @@ def build_service_health_telemetry(payload, view):
     }
 
 
+def build_daily_decision_rows(report):
+    counts = dict((report or {}).get("counts") or {})
+    return [
+        {"Outcome": label, "Cycles": int(counts.get(key) or 0)}
+        for key, label in (
+            ("market_closed", "Market closed"),
+            ("risk_blocked", "Risk or entry gate blocked"),
+            ("no_qualifying_setup", "No qualifying setup"),
+            ("order_submitted", "Order submitted"),
+            ("broker_rejected", "Broker rejected order"),
+            ("service_error", "Service error"),
+            ("other", "Other"),
+        )
+    ]
+
+
+def render_daily_decision_report(payload):
+    if str(payload.get("dashboard_data_profile") or "") != "live-micro-account":
+        return
+    report = dict(payload.get("daily_cycle_report") or {})
+    st.markdown("#### Today's live bot decisions")
+    if not report.get("available"):
+        last_day = str(report.get("last_observed_date_et") or "none")
+        st.info(f"No recorded cycles for {report.get('date_et') or 'today'} ET. Last recorded day: {last_day}.")
+        return
+    st.caption(
+        f"{report.get('date_et')} ET · {int(report.get('total_cycles') or 0)} recorded cycles · "
+        f"latest {format_timestamp_eastern(report.get('last_recorded_at'))}. "
+        "Counts start when this report is deployed; earlier cycles are not inferred."
+    )
+    st.dataframe(build_daily_decision_rows(report))
+    reasons = dict(report.get("reason_counts") or {})
+    if reasons:
+        st.caption(
+            "Observed reasons: "
+            + ", ".join(f"{friendly_action_reason(reason)} ({count})" for reason, count in sorted(reasons.items()))
+            + ". A closed-market cycle may also record a risk reason; its primary outcome remains Market closed."
+        )
+
+
 def build_shadow_exit_trial_scorecard(payload: dict[str, Any]) -> dict[str, Any]:
     """Normalize the read-only shadow-exit evidence supplied by the live runner."""
     raw_summary = payload.get("shadow_exit_trial_summary")
@@ -4269,6 +4309,8 @@ def render_command_center_page(payload, view):
             "Existing exit rules remain active; no automatic liquidation is enabled."
         )
 
+    render_daily_decision_report(payload)
+
     st.markdown(
         "<div class='dq-section-intro dq-profit-heading'><div><span class='dq-section-index'>02</span>"
         "<div><div class='dq-section-title'>Realized profit / loss</div><div class='dq-section-copy'>Money made or lost only after the bot completes a sell</div></div></div></div>",
@@ -4474,6 +4516,8 @@ def render_mobile_command_center(payload, view):
             f"EXIT-ONLY · {float(entry_policy.get('gross_exposure_percent') or 0.0):.1f}% gross exposure · "
             f"{int(entry_policy.get('open_stock_positions') or 0)} positions. New buys are paused; exits stay active."
         )
+
+    render_daily_decision_report(payload)
 
     selected_view = st.radio(
         "Mobile navigation",
@@ -5155,6 +5199,7 @@ def render_architecture_page(payload, view):
     _metric_card(tcols2[1], "Database", telemetry.get("database_availability"), "healthy" if telemetry.get("database_availability") == "Connected" else "error")
     _metric_card(tcols2[2], "Broker Connectivity", telemetry.get("broker_connectivity"), "healthy" if telemetry.get("broker_connectivity") == "Connected" else "warning")
     _metric_card(tcols2[3], "Recent Error Count", telemetry.get("recent_error_count"), "warning" if _safe_int(telemetry.get("recent_error_count"), 0) > 0 else "healthy")
+    render_daily_decision_report(payload)
 
 
 def render_shadow_exit_trial_scorecard(payload: dict[str, Any]) -> None:
