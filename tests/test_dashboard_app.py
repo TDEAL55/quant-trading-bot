@@ -79,6 +79,12 @@ def test_currency_formatting():
     assert dashboard_app.format_currency("bad", default="$0.00") == "$0.00"
 
 
+def test_fraction_percent_formatting():
+    assert dashboard_app.format_fraction_percent(1 / 3) == "33.33%"
+    assert dashboard_app.format_fraction_percent(0.45) == "45.00%"
+    assert dashboard_app.format_fraction_percent(None) == "0.00%"
+
+
 def test_market_waiting_message_for_missing_values():
     assert dashboard_app.market_display_value(None, {"market_open": 0}) == "Waiting for the next market-hours update"
     assert dashboard_app.market_display_value(None, {"market_open": 1}) == "Waiting for the next market-hours update"
