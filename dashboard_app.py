@@ -4285,7 +4285,7 @@ def render_command_center_page(payload, view):
         and not live_scan_blocked(payload)
         and bool(view.get("market_is_open"))
     )
-    engine_items = [("EQ", "Stocks only", "Enabled" if trading_enabled else "Paused", stock_market, trading_enabled)]
+    engine_items = [("EQ", "Stocks only", "Market closed" if stock_market == "Closed" else "Enabled" if trading_enabled else "Paused", stock_market, trading_enabled)]
     engine_html = "".join(
         "<div class='dq-engine-card'>"
         f"<span class='dq-engine-symbol'>{_safe_text(symbol)}</span>"
@@ -4507,7 +4507,7 @@ def render_mobile_command_center(payload, view):
     engines = [("Stocks only", stock_enabled, "Open" if market_open else "Closed")]
     engine_html = "".join(
         f"<div class='dq-mobile-engine'><span>{_safe_text(name)} · {_safe_text(market)}</span>"
-        f"<strong class='{'' if enabled else 'off'}'>{'ENABLED' if enabled else 'PAUSED'}</strong></div>"
+        f"<strong class='{'' if enabled else 'off'}'>{'MARKET CLOSED' if market == 'Closed' else 'ENABLED' if enabled else 'PAUSED'}</strong></div>"
         for name, enabled, market in engines
     )
     st.markdown(f"<div class='dq-mobile-engine-row'>{engine_html}</div>", unsafe_allow_html=True)
