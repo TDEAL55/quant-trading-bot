@@ -85,6 +85,21 @@ def test_fraction_percent_formatting():
     assert dashboard_app.format_fraction_percent(None) == "0.00%"
 
 
+def test_daily_decision_rows_keep_outcomes_distinct():
+    rows = dashboard_app.build_daily_decision_rows(
+        {"counts": {"market_closed": 4, "risk_blocked": 2, "no_qualifying_setup": 3, "service_error": 1}}
+    )
+    assert {row["Outcome"]: row["Cycles"] for row in rows} == {
+        "Market closed": 4,
+        "Risk or entry gate blocked": 2,
+        "No qualifying setup": 3,
+        "Order submitted": 0,
+        "Broker rejected order": 0,
+        "Service error": 1,
+        "Other": 0,
+    }
+
+
 def test_market_waiting_message_for_missing_values():
     assert dashboard_app.market_display_value(None, {"market_open": 0}) == "Waiting for the next market-hours update"
     assert dashboard_app.market_display_value(None, {"market_open": 1}) == "Waiting for the next market-hours update"
