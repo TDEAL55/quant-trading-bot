@@ -83,16 +83,27 @@ def build_performance_comparison(
     for source, payload in (("backtest", backtest), ("paper", paper), ("live", live)):
         metrics = _metrics(payload)
         available = bool(payload)
+        provenance = dict((payload or {}).get("provenance") or {})
+        quality = dict((payload or {}).get("data_quality") or {})
         metrics.update(
             {
                 "source": source,
                 "available": available,
                 "sample_sufficient": available and metrics["trade_count"] >= max(int(minimum_sample), 1),
+                "evidence_quality": quality.get("reconstruction_confidence") or provenance.get("quality"),
+                "period_start": provenance.get("period_start"),
+                "period_end": provenance.get("period_end"),
+                "comparable_to_live": provenance.get("comparable_to_live"),
             }
         )
         rows.append(metrics)
 
-    comparable = [row for row in rows if row["sample_sufficient"] and row["expectancy"] is not None]
+    comparable = [
+        row for row in rows
+        if row["sample_sufficient"]
+        and row["expectancy"] is not None
+        and row["comparable_to_live"] is not False
+    ]
     flags: list[str] = []
     if len(comparable) >= 2:
         signs = {1 if float(row["expectancy"]) > 0 else -1 if float(row["expectancy"]) < 0 else 0 for row in comparable}
@@ -103,6 +114,11 @@ def build_performance_comparison(
         flags.append("missing_sources:" + ",".join(missing))
     if any(row["available"] and not row["sample_sufficient"] for row in rows):
         flags.append("one_or_more_samples_below_minimum")
+    for row in rows:
+        if row["available"] and row["comparable_to_live"] is False:
+            flags.append("not_like_for_like:" + row["source"])
+        if row["available"] and row["evidence_quality"] == "partial":
+            flags.append("partial_history:" + row["source"])
     by_source = {
         source: {row["strategy"]: row for row in _strategy_rows(payload)}
         for source, payload in (("backtest", backtest), ("paper", paper), ("live", live))
@@ -128,3 +144,4 @@ def build_performance_comparison(
         "allocation_changed": False,
         "note": "Comparison is diagnostic only; it never changes live strategy allocation.",
     }
+
