@@ -307,6 +307,39 @@ def test_cycle_result_persists_funnel_and_shadow_review(tmp_path):
     assert saved["shadow_exit_trial_summary"]["trial_count"] == 1
 
 
+def test_daily_cycle_report_keeps_closed_market_separate_from_risk_blocks(tmp_path):
+    store = LiveStateStore(tmp_path / "live.json")
+    store.record_cycle_result(
+        {"status": "blocked", "reasons": ["regular_market_closed", "daily_loss_stop_active"]},
+        recorded_at="2026-11-25T21:05:00+00:00",
+    )
+    store.record_cycle_result(
+        {"status": "blocked", "reasons": ["daily_loss_stop_active"]},
+        recorded_at="2026-11-25T19:00:00+00:00",
+    )
+    store.record_cycle_result(
+        {"status": "no_trade", "reasons": ["no_eligible_risk_checked_candidate"]},
+        recorded_at="2026-11-25T18:00:00+00:00",
+    )
+    store.record_cycle_result(
+        {"status": "error", "reasons": ["cycle_exception_TimeoutError"]},
+        recorded_at="2026-11-25T17:00:00+00:00",
+    )
+    report = store.load()["daily_cycle_reports"]["2026-11-25"]
+    assert report["total_cycles"] == 4
+    assert report["counts"] == {
+        "market_closed": 1,
+        "risk_blocked": 1,
+        "no_qualifying_setup": 1,
+        "service_error": 1,
+    }
+    assert report["reason_counts"]["daily_loss_stop_active"] == 2
+    assert module.classify_live_cycle(
+        "no_trade", ["no_eligible_risk_checked_candidate"],
+        {"rejection_counts": {"position_size_below_one_share": 1}},
+    ) == "risk_blocked"
+
+
 def test_recent_binary_event_news_blocks_candidate_entry(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "evaluate_all_strategies", signal)
     broker = Broker()
