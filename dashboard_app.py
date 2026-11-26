@@ -393,6 +393,14 @@ def format_percent(value, default="0.00%"):
     return f"{sign}{number:.2f}%"
 
 
+def format_fraction_percent(value, default="0.00%"):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return f"{number * 100:.2f}%"
+
+
 def build_account_display(view: dict[str, Any]) -> dict[str, str]:
     """Return one authoritative set of account labels for every dashboard shell."""
     if not bool(view.get("account_data_available")):
@@ -4766,13 +4774,13 @@ def render_performance_page(payload):
                 "Strategy": _safe_text((row or {}).get("strategy_id"), "Unknown"),
                 "Mode": _safe_text(execution_policy.get("state"), "PROBATION"),
                 "Closed": int((row or {}).get("completed_trade_count") or 0),
-                "Win rate": format_percent((row or {}).get("win_rate"), "0.00%"),
+                "Win rate": format_fraction_percent((row or {}).get("win_rate"), "0.00%"),
                 "Actual fill P/L": format_currency((row or {}).get("actual_fill_net_profit")),
                 "Estimated costs": format_currency((row or {}).get("estimated_execution_costs")),
                 "Estimated live P/L": format_currency((row or {}).get("net_profit")),
                 "Profit factor": round(_as_float((row or {}).get("profit_factor"), 0.0), 2),
                 "Expectancy": format_currency((row or {}).get("expectancy")),
-                "Max drawdown": format_percent((row or {}).get("maximum_drawdown"), "0.00%"),
+                "Max drawdown": format_fraction_percent((row or {}).get("maximum_drawdown"), "0.00%"),
             }
         )
     st.markdown("#### Strategy Scoreboard")
