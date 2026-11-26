@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 import time
 from typing import Any, Callable, Mapping
+from zoneinfo import ZoneInfo
 
 from alpaca_live_broker import AlpacaLiveBroker
 from correlation_engine import CorrelationPolicy, assess_symbol_correlation
@@ -73,6 +74,37 @@ def _as_datetime(value: Any) -> datetime | None:
 
 def _is_true(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def classify_live_cycle(
+    status: str, reasons: list[str], candidate_funnel: Mapping[str, Any] | None = None
+) -> str:
+    """One primary outcome per cycle; market closure takes precedence over risk gates."""
+    normalized = str(status or "").strip().lower()
+    reason_set = {str(reason).strip().lower() for reason in reasons}
+    if normalized == "error":
+        return "service_error"
+    if "regular_market_closed" in reason_set:
+        return "market_closed"
+    if normalized == "submitted":
+        return "order_submitted"
+    if normalized == "rejected":
+        return "broker_rejected"
+    if normalized == "no_trade" and "no_eligible_risk_checked_candidate" in reason_set:
+        rejections = dict((candidate_funnel or {}).get("rejection_counts") or {})
+        risk_rejections = {
+            "scheduled_or_binary_event_risk",
+            "position_already_held",
+            "symbol_not_in_live_universe",
+            "correlation_history_incomplete",
+            "position_size_below_one_share",
+        }
+        if any(int(rejections.get(reason) or 0) > 0 for reason in risk_rejections):
+            return "risk_blocked"
+        return "no_qualifying_setup"
+    if normalized in {"blocked", "no_trade"}:
+        return "risk_blocked"
+    return "other"
 
 
 def _resolve_stock_universe(
@@ -180,10 +212,12 @@ class LiveStateStore:
         """Persist the latest runner decision so the dashboard can explain pauses."""
         state = self.load()
         payload = dict(result or {})
+        timestamp = str(recorded_at or _utc_iso())
+        reasons = [str(item) for item in list(payload.get("reasons") or [])]
         state["last_cycle"] = {
-            "recorded_at": str(recorded_at or _utc_iso()),
+            "recorded_at": timestamp,
             "status": str(payload.get("status") or "unknown"),
-            "reasons": [str(item) for item in list(payload.get("reasons") or [])],
+            "reasons": reasons,
             "submitted": bool(payload.get("submitted")),
             "readiness": dict(payload.get("readiness") or {}),
             "candidate_symbol": str(dict(payload.get("candidate") or {}).get("symbol") or ""),
@@ -195,6 +229,27 @@ class LiveStateStore:
             "premarket_gap_shadow": list(payload.get("premarket_gap_shadow") or []),
             "shadow_exit_trial_summary": dict(payload.get("shadow_exit_trial_summary") or {}),
         }
+        observed = _as_datetime(timestamp) or datetime.now(timezone.utc)
+        day_key = observed.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+        daily = dict(state.get("daily_cycle_reports") or {})
+        row = dict(daily.get(day_key) or {})
+        counts = dict(row.get("counts") or {})
+        category = classify_live_cycle(
+            str(payload.get("status") or ""), reasons, payload.get("candidate_funnel")
+        )
+        counts[category] = int(counts.get(category) or 0) + 1
+        reason_counts = dict(row.get("reason_counts") or {})
+        for reason in set(reasons):
+            reason_counts[reason] = int(reason_counts.get(reason) or 0) + 1
+        daily[day_key] = {
+            "date_et": day_key,
+            "first_recorded_at": row.get("first_recorded_at") or timestamp,
+            "last_recorded_at": timestamp,
+            "total_cycles": int(row.get("total_cycles") or 0) + 1,
+            "counts": counts,
+            "reason_counts": reason_counts,
+        }
+        state["daily_cycle_reports"] = dict(sorted(daily.items())[-14:])
         self._save(state)
 
     def record_market_bars(
@@ -1406,6 +1461,14 @@ def run_forever(*, interval_seconds: int = 60) -> None:
             ).record_cycle_result(result)
             print(json.dumps({"event": "controlled_live_cycle", "timestamp": _utc_iso(), **result}, default=str))
         except Exception as exc:
+            try:
+                LiveStateStore(
+                    os.getenv("LIVE_STATE_PATH", "/var/lib/quant-bot/live-micro-state.json")
+                ).record_cycle_result(
+                    {"status": "error", "reasons": [f"cycle_exception_{type(exc).__name__}"], "submitted": False}
+                )
+            except Exception:
+                pass
             print(
                 json.dumps(
                     {
