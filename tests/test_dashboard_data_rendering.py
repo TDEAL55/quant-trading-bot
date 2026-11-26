@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 
 from monitoring_db import MonitoringDatabase
 from monitoring_recorder import MonitoringRecorder
@@ -158,6 +159,28 @@ def test_live_dashboard_uses_live_read_only_account_and_service(tmp_path):
     assert payload["live_exit_actions"][0]["status"] == "ratcheted"
     assert payload["shadow_exit_trial_summary"]["trial_count"] == 4
     assert payload["shadow_exit_trial_summary"]["orders_changed"] is False
+
+
+def test_live_daily_cycle_report_does_not_infer_missing_days():
+    report = dashboard_data.build_live_daily_cycle_report(
+        {
+            "daily_cycle_reports": {
+                "2026-11-25": {
+                    "date_et": "2026-11-25",
+                    "total_cycles": 3,
+                    "counts": {"market_closed": 2, "no_qualifying_setup": 1},
+                    "reason_counts": {"regular_market_closed": 2},
+                    "first_recorded_at": "2026-11-25T14:00:00+00:00",
+                    "last_recorded_at": "2026-11-25T21:00:00+00:00",
+                }
+            }
+        },
+        now=datetime(2026, 11, 26, 18, 0, tzinfo=timezone.utc),
+    )
+    assert report["date_et"] == "2026-11-26"
+    assert report["available"] is False
+    assert report["total_cycles"] == 0
+    assert report["last_observed_date_et"] == "2026-11-25"
 
 
 def test_live_broker_market_clock_overrides_stale_signal_state():
